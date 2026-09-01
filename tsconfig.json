@@ -1,0 +1,3 @@
+{
+  "extends": "@colleague-line/config/tsconfig.base.json"
+}
