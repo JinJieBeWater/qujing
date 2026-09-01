@@ -1,0 +1,22 @@
+{
+  "name": "@colleague-line/cli",
+  "version": "0.1.0",
+  "private": true,
+  "bin": {
+    "colleague-line": "./src/cli.ts"
+  },
+  "type": "module",
+  "scripts": {
+    "check-types": "tsc --noEmit",
+    "start": "bun src/cli.ts",
+    "test": "bun test",
+    "test:go": "cd native/transport && go test ./..."
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.29.0",
+    "zod": "4.1.12"
+  },
+  "devDependencies": {
+    "@colleague-line/config": "workspace:*"
+  }
+}
