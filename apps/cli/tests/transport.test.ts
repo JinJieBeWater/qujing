@@ -2,7 +2,13 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { connectorArgs, createTransportKey, serverArgs } from "../src/transport/process";
+import { Effect } from "effect";
+import {
+  connectorArgs,
+  createTransportKeyEffect,
+  serverArgs,
+  startConnectorEffect,
+} from "../src/transport/process";
 
 const roots: string[] = [];
 afterEach(async () =>
@@ -66,10 +72,52 @@ describe("Tailcat transport command boundary", () => {
     await chmod(binary, 0o700);
     const started = performance.now();
 
-    expect(await createTransportKey(join(root, "key"), binary)).toEqual({
+    expect(await Effect.runPromise(createTransportKeyEffect(join(root, "key"), binary))).toEqual({
       publicKey: "nodekey:test",
       keyPath: "/tmp/key",
     });
     expect(performance.now() - started).toBeLessThan(5_000);
+  });
+
+  test("closes a process still waiting for readiness when caller aborts", async () => {
+    const root = await mkdtemp(join(tmpdir(), "colleague-line-transport-process-"));
+    roots.push(root);
+    const binary = join(root, "fake-transport");
+    const pid = join(root, "pid");
+    await writeFile(binary, `#!/bin/sh\necho $$ > "${pid}"\nwhile :; do sleep 1; done\n`);
+    await chmod(binary, 0o700);
+    const controller = new AbortController();
+    const pending = Effect.runPromise(
+      startConnectorEffect(
+        {
+          serverAddress: "tailcat",
+          remotePort: 43110,
+          keyPath: "/key",
+          localHost: "127.0.0.1",
+          localPort: 0,
+        },
+        binary,
+        controller.signal,
+      ),
+    );
+    for (let retry = 0; retry < 100 && !(await Bun.file(pid).exists()); retry++)
+      await Bun.sleep(10);
+    expect(await Bun.file(pid).exists()).toBe(true);
+    const started = performance.now();
+    controller.abort(new DOMException("Aborted", "AbortError"));
+
+    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+    expect(performance.now() - started).toBeLessThan(1_000);
+    const childPid = Number((await Bun.file(pid).text()).trim());
+    let alive = true;
+    for (let retry = 0; retry < 20 && alive; retry++) {
+      await Bun.sleep(10);
+      try {
+        process.kill(childPid, 0);
+      } catch {
+        alive = false;
+      }
+    }
+    expect(alive).toBe(false);
   });
 });

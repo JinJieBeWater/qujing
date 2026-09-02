@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Effect } from "effect";
 import { TailcatSupervisor } from "../src/transport/supervisor";
 import type { TransportProcess } from "../src/transport/process";
 
@@ -16,26 +17,28 @@ describe("TailcatSupervisor", () => {
     roots.push(root);
     const starts: string[][] = [];
     let closes = 0;
-    const start = async (options: { allowedKeys: string[] }): Promise<TransportProcess> => {
-      starts.push(options.allowedKeys);
-      return {
-        ready: { ready: true, serverAddress: "tc-stable", remotePort: 43_110 },
-        exited: new Promise(() => {}),
-        close: async () => {
-          closes++;
-        },
-      };
-    };
-    const supervisor = new TailcatSupervisor({ stateRoot: root, port: 43_110, start });
+    const startEffect = (options: { allowedKeys: string[] }): Effect.Effect<TransportProcess> =>
+      Effect.sync(() => {
+        starts.push(options.allowedKeys);
+        return {
+          ready: { ready: true, serverAddress: "tc-stable", remotePort: 43_110 },
+          exitedEffect: Effect.never,
+          closeEffect: () =>
+            Effect.sync(() => {
+              closes++;
+            }),
+        };
+      });
+    const supervisor = new TailcatSupervisor({ stateRoot: root, port: 43_110, startEffect });
 
-    await supervisor.reload([]);
-    await supervisor.reload([]);
-    await supervisor.reload(["nodekey:a"]);
+    await Effect.runPromise(supervisor.reloadEffect([]));
+    await Effect.runPromise(supervisor.reloadEffect([]));
+    await Effect.runPromise(supervisor.reloadEffect(["nodekey:a"]));
     expect(starts).toEqual([[], ["nodekey:a"]]);
     expect(closes).toBe(1);
-    expect((await supervisor.state()).serverAddress).toBe("tc-stable");
+    expect((await Effect.runPromise(supervisor.stateEffect())).serverAddress).toBe("tc-stable");
     expect((await stat(join(root, "transport", "server.json"))).mode & 0o777).toBe(0o600);
-    await supervisor.close();
+    await Effect.runPromise(supervisor.closeEffect());
     expect(closes).toBe(2);
   });
 
@@ -46,14 +49,17 @@ describe("TailcatSupervisor", () => {
     const supervisor = new TailcatSupervisor({
       stateRoot: root,
       port: 43_110,
-      start: async () => ({
-        ready: { ready: true, serverAddress: `tc-${++count}`, remotePort: 43_110 },
-        exited: new Promise(() => {}),
-        close: async () => {},
-      }),
+      startEffect: () =>
+        Effect.sync(() => ({
+          ready: { ready: true, serverAddress: `tc-${++count}`, remotePort: 43_110 },
+          exitedEffect: Effect.never,
+          closeEffect: () => Effect.void,
+        })),
     });
-    await supervisor.reload([]);
-    await expect(supervisor.reload(["nodekey:a"])).rejects.toThrow("address changed");
+    await Effect.runPromise(supervisor.reloadEffect([]));
+    await expect(Effect.runPromise(supervisor.reloadEffect(["nodekey:a"]))).rejects.toThrow(
+      "address changed",
+    );
   });
 
   test("does not treat an intentional reload exit as fatal", async () => {
@@ -64,26 +70,24 @@ describe("TailcatSupervisor", () => {
       stateRoot: root,
       port: 43_110,
       onFatal: (error) => failures.push(error.message),
-      start: async () => {
-        let resolveExit!: (code: number) => void;
-        const exited = new Promise<number>((resolve) => {
-          resolveExit = resolve;
-        });
-        return {
-          ready: { ready: true, serverAddress: "tc-stable", remotePort: 43_110 },
-          exited,
-          close: async () => {
-            resolveExit(0);
-            await exited;
-          },
-        };
-      },
+      startEffect: () =>
+        Effect.sync(() => {
+          let resolveExit!: (code: number) => void;
+          const exited = new Promise<number>((resolve) => {
+            resolveExit = resolve;
+          });
+          return {
+            ready: { ready: true, serverAddress: "tc-stable", remotePort: 43_110 },
+            exitedEffect: Effect.promise(() => exited),
+            closeEffect: () => Effect.sync(() => resolveExit(0)),
+          };
+        }),
     });
 
-    await supervisor.reload([]);
-    await supervisor.reload(["nodekey:a"]);
+    await Effect.runPromise(supervisor.reloadEffect([]));
+    await Effect.runPromise(supervisor.reloadEffect(["nodekey:a"]));
     expect(failures).toEqual([]);
-    await supervisor.close();
+    await Effect.runPromise(supervisor.closeEffect());
     expect(failures).toEqual([]);
   });
 });

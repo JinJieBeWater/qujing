@@ -1,27 +1,33 @@
 import { randomUUID } from "node:crypto";
-import { chmod, lstat, mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
+import { chmod, link, lstat, mkdir, open, readdir, readFile, rename, rm } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { Effect } from "effect";
+import { decode, LockOwner as LockOwnerSchema, type LockOwner as LockOwnerData } from "./schemas";
 
-interface LockOwner {
-  pid: number;
-  nonce: string;
-}
+const parseLockOwner = decode(LockOwnerSchema);
+type LockOwner = LockOwnerData;
 
-export async function ensurePrivateDirectory(path: string): Promise<void> {
+export const ensurePrivateDirectoryEffect = (path: string) =>
+  fromPromise(() => ensurePrivateDirectoryNode(path));
+
+async function ensurePrivateDirectoryNode(path: string): Promise<void> {
   await mkdir(path, { recursive: true, mode: 0o700 });
   await chmod(path, 0o700);
-  await securePrivatePath(path, true);
+  await securePrivatePathNode(path, true);
 }
 
-export async function writePrivateJson(path: string, value: unknown): Promise<void> {
+export const writePrivateJsonEffect = (path: string, value: unknown) =>
+  fromPromise(() => writePrivateJsonNode(path, value));
+
+async function writePrivateJsonNode(path: string, value: unknown): Promise<void> {
   const parent = dirname(path);
-  await ensurePrivateDirectory(parent);
+  await ensurePrivateDirectoryNode(parent);
   const temporary = join(parent, `.${randomUUID()}.tmp`);
   try {
     let handle = await open(temporary, "wx", 0o600);
     if (process.platform === "win32") {
       await handle.close();
-      await securePrivatePath(temporary, false);
+      await securePrivatePathNode(temporary, false);
       handle = await open(temporary, "r+");
     }
     try {
@@ -31,10 +37,10 @@ export async function writePrivateJson(path: string, value: unknown): Promise<vo
       await handle.close();
     }
     await chmod(temporary, 0o600);
-    await securePrivatePath(temporary, false);
+    await securePrivatePathNode(temporary, false);
     await rename(temporary, path);
     await chmod(path, 0o600);
-    await securePrivatePath(path, false);
+    await securePrivatePathNode(path, false);
     await syncDirectory(parent);
   } catch (error) {
     await rm(temporary, { force: true }).catch(() => {});
@@ -42,7 +48,10 @@ export async function writePrivateJson(path: string, value: unknown): Promise<vo
   }
 }
 
-export async function securePrivatePath(path: string, directory: boolean): Promise<void> {
+export const securePrivatePathEffect = (path: string, directory: boolean) =>
+  fromPromise(() => securePrivatePathNode(path, directory));
+
+async function securePrivatePathNode(path: string, directory: boolean): Promise<void> {
   if (process.platform !== "win32") return;
   const script = String.raw`param([string]$Path,[string]$Kind)
 $identity = [Security.Principal.WindowsIdentity]::GetCurrent()
@@ -64,16 +73,16 @@ Set-Acl -LiteralPath $Path -AclObject $acl`;
   );
 }
 
-export async function isPrivatePath(path: string, directory?: boolean): Promise<boolean> {
-  try {
-    await assertPrivatePath(path, directory);
-    return true;
-  } catch {
-    return false;
-  }
-}
+export const isPrivatePathEffect = (path: string, directory?: boolean) =>
+  assertPrivatePathEffect(path, directory).pipe(
+    Effect.as(true),
+    Effect.catchEager(() => Effect.succeed(false)),
+  );
 
-export async function assertPrivatePath(path: string, directory?: boolean): Promise<void> {
+export const assertPrivatePathEffect = (path: string, directory?: boolean) =>
+  fromPromise(() => assertPrivatePathNode(path, directory));
+
+async function assertPrivatePathNode(path: string, directory?: boolean): Promise<void> {
   const info = await lstat(path);
   if (info.isSymbolicLink()) throw new Error(`Private state path must not be a symlink: ${path}`);
   if (directory !== undefined && info.isDirectory() !== directory)
@@ -92,14 +101,17 @@ export async function assertPrivatePath(path: string, directory?: boolean): Prom
   await assertWindowsAcl(path);
 }
 
-export async function assertPrivateTree(root: string): Promise<void> {
-  await assertPrivatePath(root, true);
+export const assertPrivateTreeEffect = (root: string) =>
+  fromPromise(() => assertPrivateTreeNode(root));
+
+async function assertPrivateTreeNode(root: string): Promise<void> {
+  await assertPrivatePathNode(root, true);
   const pending = [root];
   while (pending.length > 0) {
     const directory = pending.pop()!;
     for (const entry of await readdir(directory, { withFileTypes: true })) {
       const path = join(directory, entry.name);
-      await assertPrivatePath(path);
+      await assertPrivatePathNode(path);
       if (entry.isDirectory()) pending.push(path);
     }
   }
@@ -130,37 +142,49 @@ async function runPowerShell(script: string, args: string[], message: string): P
   if ((await child.exited) !== 0) throw new Error(message);
 }
 
-export async function withFileLock<T>(path: string, operation: () => Promise<T>): Promise<T> {
-  const release = await acquirePrivateLock(`${path}.lock`, {
-    wait: true,
-    timeoutMs: 30_000,
-    busyMessage: `Timed out waiting for config lock: ${path}`,
-  });
-  try {
-    return await operation();
-  } finally {
-    await release();
-  }
-}
+/** Scoped lock primitive. Scope owns release on every success, failure, or interruption path. */
+export const withPrivateLock = <A, E, R>(path: string, operation: Effect.Effect<A, E, R>) =>
+  Effect.scoped(
+    Effect.gen(function* () {
+      yield* Effect.acquireRelease(
+        acquirePrivateLockEffect(`${path}.lock`, {
+          wait: true,
+          timeoutMs: 30_000,
+          busyMessage: `Timed out waiting for config lock: ${path}`,
+        }),
+        (release) => release.pipe(Effect.orDie),
+      );
+      return yield* operation;
+    }),
+  );
 
-export async function acquirePrivateLock(
+export const acquirePrivateLockEffect = (
+  path: string,
+  options: { wait: boolean; timeoutMs?: number; busyMessage: string },
+) =>
+  fromPromise(() => acquirePrivateLockNode(path, options)).pipe(
+    Effect.map((release) => fromPromise(release)),
+  );
+
+async function acquirePrivateLockNode(
   path: string,
   options: { wait: boolean; timeoutMs?: number; busyMessage: string },
 ): Promise<() => Promise<void>> {
-  await ensurePrivateDirectory(dirname(path));
+  await ensurePrivateDirectoryNode(dirname(path));
   const owner: LockOwner = { pid: process.pid, nonce: randomUUID() };
   const recovering = `${path}.recovering`;
   const started = Date.now();
   for (;;) {
     if (await pathExists(recovering)) {
+      if ((await pathAge(recovering)) < 1_000) {
+        await waitForLock(options, started);
+        continue;
+      }
       await repairInterruptedRecovery(path, recovering);
-      if (!(await pathExists(recovering))) continue;
-      await waitForLock(options, started);
       continue;
     }
     try {
       await createOwnedLock(path, owner);
-      await rm(recovering, { recursive: true, force: true });
       return lockRelease(path, owner);
     } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
@@ -187,6 +211,11 @@ export async function acquirePrivateLock(
         continue;
       throw error;
     }
+    const moved = await readLockOwner(recovering);
+    if (moved?.nonce !== current?.nonce) {
+      await rename(recovering, path).catch(() => {});
+      continue;
+    }
     try {
       await createOwnedLock(path, owner);
       await rm(recovering, { recursive: true, force: true });
@@ -203,12 +232,18 @@ export async function acquirePrivateLock(
   }
 }
 
-export async function privateLockActive(path: string): Promise<boolean> {
+export const privateLockActiveEffect = (path: string) =>
+  fromPromise(() => privateLockActiveNode(path));
+
+async function privateLockActiveNode(path: string): Promise<boolean> {
   const owner = await readLockOwner(path);
   return owner !== undefined && processExists(owner.pid);
 }
 
-export async function privateLockPending(path: string): Promise<boolean> {
+export const privateLockPendingEffect = (path: string) =>
+  fromPromise(() => privateLockPendingNode(path));
+
+async function privateLockPendingNode(path: string): Promise<boolean> {
   return (
     (await pathExists(path)) &&
     (await readLockOwner(path)) === undefined &&
@@ -217,14 +252,12 @@ export async function privateLockPending(path: string): Promise<boolean> {
 }
 
 async function createOwnedLock(path: string, owner: LockOwner): Promise<void> {
-  await mkdir(path, { mode: 0o700 });
+  const candidate = `${path}.candidate-${owner.nonce}`;
   try {
-    await chmod(path, 0o700);
-    await securePrivatePath(path, true);
-    await writePrivateJson(join(path, "owner.json"), owner);
-  } catch (error) {
-    await rm(path, { recursive: true, force: true });
-    throw error;
+    await writePrivateJsonNode(candidate, owner);
+    await link(candidate, path);
+  } finally {
+    await rm(candidate, { force: true }).catch(() => {});
   }
 }
 
@@ -243,14 +276,11 @@ function lockRelease(path: string, owner: LockOwner): () => Promise<void> {
 }
 
 async function repairInterruptedRecovery(path: string, recovering: string): Promise<void> {
-  if (!(await pathExists(path))) {
-    await rename(recovering, path).catch(() => {});
+  if (await pathExists(path)) {
+    await rm(recovering, { recursive: true, force: true });
     return;
   }
-  const current = await readLockOwner(path);
-  if (current && processExists(current.pid)) return;
-  if (!current && (await pathAge(path)) < 1_000) return;
-  await rm(recovering, { recursive: true, force: true });
+  await rename(recovering, path).catch(() => {});
 }
 
 async function waitForLock(
@@ -271,10 +301,7 @@ async function readLockOwner(path: string): Promise<LockOwner | undefined> {
   try {
     const info = await lstat(path);
     const ownerPath = info.isDirectory() ? join(path, "owner.json") : path;
-    const parsed = JSON.parse(await readFile(ownerPath, "utf8")) as Partial<LockOwner>;
-    return Number.isInteger(parsed.pid) && typeof parsed.nonce === "string"
-      ? (parsed as LockOwner)
-      : undefined;
+    return parseLockOwner(JSON.parse(await readFile(ownerPath, "utf8")));
   } catch {
     return undefined;
   }
@@ -300,6 +327,10 @@ function processExists(pid: number): boolean {
   } catch (error) {
     return (error as NodeJS.ErrnoException).code === "EPERM";
   }
+}
+
+function fromPromise<A>(try_: () => Promise<A>) {
+  return Effect.tryPromise({ try: try_, catch: (error) => error });
 }
 
 async function syncDirectory(path: string): Promise<void> {

@@ -1,51 +1,44 @@
-import { access, readFile, realpath, stat } from "node:fs/promises";
 import { constants } from "node:fs";
-import { dirname, isAbsolute, join } from "node:path";
-import { z } from "zod";
-import { ensurePrivateDirectory, withFileLock, writePrivateJson } from "./private-files";
+import { access, readFile, realpath, stat } from "node:fs/promises";
+import { dirname, join } from "node:path";
+import { Effect } from "effect";
 import { createBearer, hashBearer, sameBearerHash } from "./credentials";
-import type { ClientIdentity, OwnerMetadata, PublicWorkspace } from "./types";
+import {
+  ensurePrivateDirectoryEffect,
+  withPrivateLock,
+  writePrivateJsonEffect,
+} from "./private-files";
+import {
+  decode,
+  GatewayClient as GatewayClientSchema,
+  GatewayConfig as GatewayConfigSchema,
+  Identifier,
+  NonEmptyString,
+  Tombstones as TombstonesSchema,
+  Workspace as WorkspaceSchema,
+  type ClientIdentity,
+  type GatewayConfig,
+  type Owner,
+  type Workspace,
+} from "./schemas";
 
-const idSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
-const ownerSchema = z.object({
-  id: idSchema,
-  name: z.string().min(1),
-  summary: z.string().min(1).optional(),
-});
-const workspaceSchema = z.object({
-  id: idSchema,
-  name: z.string().min(1),
-  summary: z.string().min(1),
-  root: z.string().refine(isAbsolute, "Workspace root must be absolute"),
-});
-const clientSchema = z.object({
-  id: idSchema,
-  tailcatKey: z.string().min(1),
-  bearerHash: z.string().regex(/^[a-f0-9]{64}$/),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-});
-const configSchema = z.object({
-  version: z.literal(1),
-  owner: ownerSchema,
-  server: z.object({ host: z.literal("127.0.0.1"), port: z.number().int().min(1).max(65_535) }),
-  workspaces: z.array(workspaceSchema),
-  clients: z.array(clientSchema),
-});
-const tombstonesSchema = z.object({
-  workspaces: z.array(idSchema),
-  clients: z.array(idSchema),
-});
+const parseConfig = decode(GatewayConfigSchema);
+const parseWorkspace = decode(WorkspaceSchema);
+const parseGatewayClient = decode(GatewayClientSchema);
+const parseTombstones = decode(TombstonesSchema);
+const parseIdentifier = decode(Identifier);
+const parseNonEmptyString = decode(NonEmptyString);
 
-export type Config = z.infer<typeof configSchema>;
-export type WorkspaceConfig = z.infer<typeof workspaceSchema>;
+export type Config = GatewayConfig;
+export type WorkspaceConfig = Workspace;
+
 export interface ConfigStorePaths {
   configPath: string;
   stateRoot: string;
 }
 
 export interface InitInput {
-  owner: OwnerMetadata;
+  owner: Owner;
   port?: number;
 }
 
@@ -74,222 +67,353 @@ export class ConfigStore {
     this.tombstonesPath = join(paths.stateRoot, "tombstones.json");
   }
 
-  async init(input: InitInput): Promise<void> {
-    const config = configSchema.parse({
-      version: 1,
-      owner: input.owner,
-      server: { host: "127.0.0.1", port: input.port ?? DEFAULT_PORT },
-      workspaces: [],
-      clients: [],
-    });
-    await ensurePrivateDirectory(this.stateRoot);
-    await ensurePrivateDirectory(dirname(this.configPath));
-    await withFileLock(this.configPath, async () => {
-      try {
-        const current = await this.read();
-        if (JSON.stringify(current) === JSON.stringify(config)) {
-          await this.readTombstones();
-          return;
-        }
-        throw new Error("Colleague Line is already initialized with different configuration");
-      } catch (error) {
-        if (!(error instanceof Error) || !error.message.includes("Config file not found"))
-          throw error;
-      }
-      await writePrivateJson(this.tombstonesPath, { workspaces: [], clients: [] });
-      await writePrivateJson(this.configPath, config);
+  initEffect(input: InitInput) {
+    return Effect.gen({ self: this }, function* () {
+      const config = yield* Effect.sync(() =>
+        parseConfig({
+          version: 1,
+          owner: input.owner,
+          server: { host: "127.0.0.1", port: input.port ?? DEFAULT_PORT },
+          workspaces: [],
+          clients: [],
+        }),
+      );
+      yield* Effect.all(
+        [
+          ensurePrivateDirectoryEffect(this.stateRoot),
+          ensurePrivateDirectoryEffect(dirname(this.configPath)),
+        ],
+        { concurrency: "unbounded" },
+      );
+      yield* this.withLockEffect(
+        Effect.gen({ self: this }, function* () {
+          yield* this.readEffect().pipe(
+            Effect.matchEffect({
+              onFailure: (error) => {
+                if (!(error instanceof Error) || !error.message.includes("Config file not found"))
+                  return Effect.fail(error);
+                return Effect.gen({ self: this }, function* () {
+                  yield* this.writeJsonEffect(this.tombstonesPath, { workspaces: [], clients: [] });
+                  yield* this.writeJsonEffect(this.configPath, config);
+                });
+              },
+              onSuccess: (current) => {
+                if (JSON.stringify(current) !== JSON.stringify(config))
+                  return Effect.fail(
+                    new Error("Colleague Line is already initialized with different configuration"),
+                  );
+                return this.readTombstonesEffect();
+              },
+            }),
+          );
+        }),
+      );
     });
   }
 
-  async read(): Promise<Config> {
-    try {
-      return configSchema.parse(JSON.parse(await readFile(this.configPath, "utf8")));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT")
-        throw new Error(`Config file not found: ${this.configPath}`);
-      throw error;
-    }
-  }
-
-  async readEffective(): Promise<Config> {
-    const [config, tombstones] = await Promise.all([this.read(), this.readTombstones()]);
-    return {
-      ...config,
-      workspaces: config.workspaces.filter(
-        (workspace) => !tombstones.workspaces.includes(workspace.id),
+  readEffect() {
+    return this.privateOperation(() => readFile(this.configPath, "utf8")).pipe(
+      Effect.flatMap((text) =>
+        Effect.try({ try: () => parseConfig(JSON.parse(text)), catch: (error) => error }),
       ),
-      clients: config.clients.filter((client) => !tombstones.clients.includes(client.id)),
-    };
+      Effect.catchIf(
+        (error) => (error as NodeJS.ErrnoException).code === "ENOENT",
+        () => Effect.fail(new Error(`Config file not found: ${this.configPath}`)),
+      ),
+    );
   }
 
-  async addWorkspace(input: WorkspaceInput): Promise<void> {
-    const root = await realpath(input.root).catch(() => {
-      throw new Error(`Workspace root does not exist: ${input.root}`);
-    });
-    if (!(await stat(root)).isDirectory())
-      throw new Error(`Workspace root is not a directory: ${input.root}`);
-    const workspace = workspaceSchema.parse({ ...input, root });
-    await withFileLock(this.configPath, async () => {
-      const config = await this.read();
-      const tombstones = await this.readTombstones();
-      if (tombstones.workspaces.includes(workspace.id))
-        throw new Error("Workspace ID was removed and cannot be reused");
-      const existing = config.workspaces.find((entry) => entry.id === workspace.id);
-      if (existing) {
-        if (JSON.stringify(existing) === JSON.stringify(workspace)) return;
-        throw new Error("Workspace ID already exists with different configuration");
-      }
-      if (config.workspaces.some((entry) => entry.root === workspace.root)) {
-        throw new Error("Workspace root is already registered");
-      }
-      config.workspaces.push(workspace);
-      await writePrivateJson(this.configPath, config);
+  readEffectiveEffect() {
+    return Effect.gen({ self: this }, function* () {
+      const [config, tombstones] = yield* Effect.all(
+        [this.readEffect(), this.readTombstonesEffect()],
+        { concurrency: "unbounded" },
+      );
+      return {
+        ...config,
+        workspaces: config.workspaces.filter(({ id }) => !tombstones.workspaces.includes(id)),
+        clients: config.clients.filter(({ id }) => !tombstones.clients.includes(id)),
+      };
     });
   }
 
-  async updateWorkspace(id: string, update: { name?: string; summary?: string }): Promise<void> {
-    idSchema.parse(id);
-    await withFileLock(this.configPath, async () => {
-      const config = await this.read();
-      const tombstones = await this.readTombstones();
-      if (tombstones.workspaces.includes(id)) throw new Error(`Workspace not found: ${id}`);
-      const workspace = config.workspaces.find((entry) => entry.id === id);
-      if (!workspace) throw new Error(`Workspace not found: ${id}`);
-      if (update.name !== undefined) workspace.name = z.string().min(1).parse(update.name);
-      if (update.summary !== undefined) workspace.summary = z.string().min(1).parse(update.summary);
-      await writePrivateJson(this.configPath, configSchema.parse(config));
+  addWorkspaceEffect(input: WorkspaceInput) {
+    return Effect.gen({ self: this }, function* () {
+      const root = yield* this.privateOperation(() => realpath(input.root)).pipe(
+        Effect.mapError(() => new Error(`Workspace root does not exist: ${input.root}`)),
+      );
+      const info = yield* this.privateOperation(() => stat(root));
+      if (!info.isDirectory()) throw new Error(`Workspace root is not a directory: ${input.root}`);
+      const workspace = yield* Effect.sync(() => parseWorkspace({ ...input, root }));
+      yield* this.withLockEffect(
+        Effect.gen({ self: this }, function* () {
+          const [config, tombstones] = yield* Effect.all([
+            this.readEffect(),
+            this.readTombstonesEffect(),
+          ]);
+          if (tombstones.workspaces.includes(workspace.id))
+            throw new Error("Workspace ID was removed and cannot be reused");
+          const existing = config.workspaces.find(({ id }) => id === workspace.id);
+          if (existing) {
+            if (JSON.stringify(existing) === JSON.stringify(workspace)) return;
+            throw new Error("Workspace ID already exists with different configuration");
+          }
+          if (config.workspaces.some(({ root }) => root === workspace.root))
+            throw new Error("Workspace root is already registered");
+          yield* this.writeJsonEffect(
+            this.configPath,
+            parseConfig({ ...config, workspaces: [...config.workspaces, workspace] }),
+          );
+        }),
+      );
     });
   }
 
-  async removeWorkspace(id: string): Promise<boolean> {
-    idSchema.parse(id);
-    return withFileLock(this.configPath, async () => {
-      const config = await this.read();
-      const next = config.workspaces.filter((entry) => entry.id !== id);
-      if (next.length === config.workspaces.length) return false;
-      config.workspaces = next;
-      const tombstones = await this.readTombstones();
-      if (!tombstones.workspaces.includes(id)) tombstones.workspaces.push(id);
-      await writePrivateJson(this.tombstonesPath, tombstones);
-      await writePrivateJson(this.configPath, config);
-      return true;
+  updateWorkspaceEffect(id: string, update: { name?: string; summary?: string }) {
+    return Effect.gen({ self: this }, function* () {
+      yield* Effect.sync(() => parseIdentifier(id));
+      yield* this.withLockEffect(
+        Effect.gen({ self: this }, function* () {
+          const [config, tombstones] = yield* Effect.all([
+            this.readEffect(),
+            this.readTombstonesEffect(),
+          ]);
+          if (tombstones.workspaces.includes(id)) throw new Error(`Workspace not found: ${id}`);
+          const workspace = config.workspaces.find((entry) => entry.id === id);
+          if (!workspace) throw new Error(`Workspace not found: ${id}`);
+          const next = {
+            ...workspace,
+            ...(update.name === undefined ? {} : { name: parseNonEmptyString(update.name) }),
+            ...(update.summary === undefined
+              ? {}
+              : { summary: parseNonEmptyString(update.summary) }),
+          };
+          yield* this.writeJsonEffect(
+            this.configPath,
+            parseConfig({
+              ...config,
+              workspaces: config.workspaces.map((entry) => (entry.id === id ? next : entry)),
+            }),
+          );
+        }),
+      );
     });
   }
 
-  async addClient(input: ClientInput): Promise<{ bearer: string }> {
-    const parsed = z.object({ id: idSchema, tailcatKey: z.string().min(1) }).parse(input);
-    return withFileLock(this.configPath, async () => {
-      const config = await this.read();
-      const tombstones = await this.readTombstones();
-      if (tombstones.clients.includes(parsed.id))
-        throw new Error("Client ID was revoked and cannot be reused");
-      if (config.clients.some((client) => client.id === parsed.id))
-        throw new Error(`Client already exists: ${parsed.id}`);
-      const bearer = createBearer();
-      const now = new Date().toISOString();
-      config.clients.push({
-        ...parsed,
-        bearerHash: hashBearer(bearer),
-        createdAt: now,
-        updatedAt: now,
+  removeWorkspaceEffect(id: string) {
+    return Effect.gen({ self: this }, function* () {
+      yield* Effect.sync(() => parseIdentifier(id));
+      return yield* this.withLockEffect(
+        Effect.gen({ self: this }, function* () {
+          const config = yield* this.readEffect();
+          const workspaces = config.workspaces.filter((entry) => entry.id !== id);
+          if (workspaces.length === config.workspaces.length) return false;
+          const tombstones = yield* this.readTombstonesEffect();
+          yield* this.writeJsonEffect(
+            this.tombstonesPath,
+            parseTombstones({
+              ...tombstones,
+              workspaces: tombstones.workspaces.includes(id)
+                ? tombstones.workspaces
+                : [...tombstones.workspaces, id],
+            }),
+          );
+          yield* this.writeJsonEffect(this.configPath, parseConfig({ ...config, workspaces }));
+          return true;
+        }),
+      );
+    });
+  }
+
+  addClientEffect(input: ClientInput) {
+    return Effect.gen({ self: this }, function* () {
+      const parsed = yield* Effect.sync(() => ({
+        id: parseIdentifier(input.id),
+        tailcatKey: parseNonEmptyString(input.tailcatKey),
+      }));
+      return yield* this.withLockEffect(
+        Effect.gen({ self: this }, function* () {
+          const [config, tombstones] = yield* Effect.all([
+            this.readEffect(),
+            this.readTombstonesEffect(),
+          ]);
+          if (tombstones.clients.includes(parsed.id))
+            throw new Error("Client ID was revoked and cannot be reused");
+          if (config.clients.some(({ id }) => id === parsed.id))
+            throw new Error(`Client already exists: ${parsed.id}`);
+          const bearer = createBearer();
+          const now = new Date().toISOString();
+          const client = parseGatewayClient({
+            ...parsed,
+            bearerHash: hashBearer(bearer),
+            createdAt: now,
+            updatedAt: now,
+          });
+          yield* this.writeJsonEffect(
+            this.configPath,
+            parseConfig({ ...config, clients: [...config.clients, client] }),
+          );
+          return { bearer };
+        }),
+      );
+    });
+  }
+
+  rotateClientEffect(id: string, tailcatKey: string) {
+    return Effect.gen({ self: this }, function* () {
+      yield* Effect.sync(() => {
+        parseIdentifier(id);
+        parseNonEmptyString(tailcatKey);
       });
-      await writePrivateJson(this.configPath, configSchema.parse(config));
-      return { bearer };
+      return yield* this.withLockEffect(
+        Effect.gen({ self: this }, function* () {
+          const [config, tombstones] = yield* Effect.all([
+            this.readEffect(),
+            this.readTombstonesEffect(),
+          ]);
+          if (tombstones.clients.includes(id)) throw new Error(`Client not found: ${id}`);
+          if (!config.clients.some((entry) => entry.id === id))
+            throw new Error(`Client not found: ${id}`);
+          const bearer = createBearer();
+          yield* this.writeJsonEffect(
+            this.configPath,
+            parseConfig({
+              ...config,
+              clients: config.clients.map((entry) =>
+                entry.id === id
+                  ? {
+                      ...entry,
+                      tailcatKey,
+                      bearerHash: hashBearer(bearer),
+                      updatedAt: new Date().toISOString(),
+                    }
+                  : entry,
+              ),
+            }),
+          );
+          return { bearer };
+        }),
+      );
     });
   }
 
-  async rotateClient(id: string, tailcatKey: string): Promise<{ bearer: string }> {
-    idSchema.parse(id);
-    z.string().min(1).parse(tailcatKey);
-    return withFileLock(this.configPath, async () => {
-      const config = await this.read();
-      const tombstones = await this.readTombstones();
-      if (tombstones.clients.includes(id)) throw new Error(`Client not found: ${id}`);
-      const client = config.clients.find((entry) => entry.id === id);
-      if (!client) throw new Error(`Client not found: ${id}`);
-      const bearer = createBearer();
-      client.tailcatKey = tailcatKey;
-      client.bearerHash = hashBearer(bearer);
-      client.updatedAt = new Date().toISOString();
-      await writePrivateJson(this.configPath, configSchema.parse(config));
-      return { bearer };
+  revokeClientEffect(id: string) {
+    return Effect.gen({ self: this }, function* () {
+      yield* Effect.sync(() => parseIdentifier(id));
+      return yield* this.withLockEffect(
+        Effect.gen({ self: this }, function* () {
+          const config = yield* this.readEffect();
+          const clients = config.clients.filter((entry) => entry.id !== id);
+          if (clients.length === config.clients.length) return false;
+          const tombstones = yield* this.readTombstonesEffect();
+          yield* this.writeJsonEffect(
+            this.tombstonesPath,
+            parseTombstones({
+              ...tombstones,
+              clients: tombstones.clients.includes(id)
+                ? tombstones.clients
+                : [...tombstones.clients, id],
+            }),
+          );
+          yield* this.writeJsonEffect(this.configPath, parseConfig({ ...config, clients }));
+          return true;
+        }),
+      );
     });
   }
 
-  async revokeClient(id: string): Promise<boolean> {
-    idSchema.parse(id);
-    return withFileLock(this.configPath, async () => {
-      const config = await this.read();
-      const next = config.clients.filter((entry) => entry.id !== id);
-      if (next.length === config.clients.length) return false;
-      config.clients = next;
-      const tombstones = await this.readTombstones();
-      if (!tombstones.clients.includes(id)) tombstones.clients.push(id);
-      await writePrivateJson(this.tombstonesPath, tombstones);
-      await writePrivateJson(this.configPath, config);
-      return true;
+  authenticateEffect(bearer: string) {
+    return Effect.gen({ self: this }, function* () {
+      const hash = hashBearer(bearer);
+      const [config, tombstones] = yield* Effect.all(
+        [this.readEffect(), this.readTombstonesEffect()],
+        { concurrency: "unbounded" },
+      );
+      const client = config.clients.find(
+        (entry) => !tombstones.clients.includes(entry.id) && sameBearerHash(entry.bearerHash, hash),
+      );
+      return client ? { id: client.id, credentialVersion: client.bearerHash } : undefined;
     });
   }
 
-  async authenticate(bearer: string): Promise<ClientIdentity | undefined> {
-    const hash = hashBearer(bearer);
-    const [config, tombstones] = await Promise.all([this.read(), this.readTombstones()]);
-    const client = config.clients.find(
-      (entry) => !tombstones.clients.includes(entry.id) && sameBearerHash(entry.bearerHash, hash),
+  getWorkspaceEffect(id: string) {
+    return Effect.gen({ self: this }, function* () {
+      const [config, tombstones] = yield* Effect.all(
+        [this.readEffect(), this.readTombstonesEffect()],
+        { concurrency: "unbounded" },
+      );
+      return tombstones.workspaces.includes(id)
+        ? undefined
+        : config.workspaces.find((workspace) => workspace.id === id);
+    });
+  }
+
+  hasClientEffect(client: ClientIdentity) {
+    return Effect.gen({ self: this }, function* () {
+      const [config, tombstones] = yield* Effect.all(
+        [this.readEffect(), this.readTombstonesEffect()],
+        { concurrency: "unbounded" },
+      );
+      return (
+        !tombstones.clients.includes(client.id) &&
+        config.clients.some(
+          (entry) => entry.id === client.id && entry.bearerHash === client.credentialVersion,
+        )
+      );
+    });
+  }
+
+  withLockEffect<A>(operation: Effect.Effect<A, unknown>): Effect.Effect<A, unknown> {
+    return withPrivateLock(this.configPath, operation);
+  }
+
+  listPublicWorkspacesEffect() {
+    return Effect.gen({ self: this }, function* () {
+      const [config, tombstones] = yield* Effect.all(
+        [this.readEffect(), this.readTombstonesEffect()],
+        { concurrency: "unbounded" },
+      );
+      return yield* Effect.all(
+        config.workspaces
+          .filter(({ id }) => !tombstones.workspaces.includes(id))
+          .map(({ id, name, summary, root }) =>
+            this.isWorkspaceAvailableEffect(root).pipe(
+              Effect.map((available) => ({ id, name, summary, available })),
+            ),
+          ),
+        { concurrency: "unbounded" },
+      );
+    });
+  }
+
+  isWorkspaceAvailableEffect(root: string) {
+    return Effect.all([
+      this.privateOperation(() => access(root, constants.R_OK)),
+      this.privateOperation(() => realpath(root)),
+      this.privateOperation(() => stat(root)),
+    ]).pipe(
+      Effect.map(([, canonicalRoot, info]) => canonicalRoot === root && info.isDirectory()),
+      Effect.catch(() => Effect.succeed(false)),
     );
-    return client ? { id: client.id, credentialVersion: client.bearerHash } : undefined;
   }
 
-  async getWorkspace(id: string): Promise<WorkspaceConfig | undefined> {
-    const [config, tombstones] = await Promise.all([this.read(), this.readTombstones()]);
-    if (tombstones.workspaces.includes(id)) return undefined;
-    return config.workspaces.find((workspace) => workspace.id === id);
-  }
-
-  async hasClient(client: ClientIdentity): Promise<boolean> {
-    const [config, tombstones] = await Promise.all([this.read(), this.readTombstones()]);
-    return (
-      !tombstones.clients.includes(client.id) &&
-      config.clients.some(
-        (entry) => entry.id === client.id && entry.bearerHash === client.credentialVersion,
-      )
+  private readTombstonesEffect() {
+    return this.privateOperation(() => readFile(this.tombstonesPath, "utf8")).pipe(
+      Effect.flatMap((text) =>
+        Effect.try({ try: () => parseTombstones(JSON.parse(text)), catch: (error) => error }),
+      ),
+      Effect.catchIf(
+        (error) => (error as NodeJS.ErrnoException).code === "ENOENT",
+        () => Effect.fail(new Error(`Security state file not found: ${this.tombstonesPath}`)),
+      ),
     );
   }
 
-  withLock<T>(operation: () => Promise<T>): Promise<T> {
-    return withFileLock(this.configPath, operation);
+  private writeJsonEffect(path: string, value: unknown) {
+    return writePrivateJsonEffect(path, value);
   }
 
-  async listPublicWorkspaces(): Promise<PublicWorkspace[]> {
-    const [config, tombstones] = await Promise.all([this.read(), this.readTombstones()]);
-    return Promise.all(
-      config.workspaces
-        .filter(({ id }) => !tombstones.workspaces.includes(id))
-        .map(async ({ id, name, summary, root }) => ({
-          id,
-          name,
-          summary,
-          available: await this.isWorkspaceAvailable(root),
-        })),
-    );
-  }
-
-  async isWorkspaceAvailable(root: string): Promise<boolean> {
-    try {
-      await access(root, constants.R_OK);
-      return (await realpath(root)) === root && (await stat(root)).isDirectory();
-    } catch {
-      return false;
-    }
-  }
-
-  private async readTombstones(): Promise<z.infer<typeof tombstonesSchema>> {
-    try {
-      return tombstonesSchema.parse(JSON.parse(await readFile(this.tombstonesPath, "utf8")));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT")
-        throw new Error(`Security state file not found: ${this.tombstonesPath}`);
-      throw error;
-    }
+  private privateOperation<A>(operation: () => Promise<A>) {
+    return Effect.tryPromise({ try: operation, catch: (error) => error });
   }
 }

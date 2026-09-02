@@ -1,11 +1,12 @@
 import { dirname, join } from "node:path";
+import { Duration, Effect, Exit, Fiber, Ref, Scope } from "effect";
+import { pollEvery } from "./effect-runtime";
 import { createColleagueLine } from "./colleague-line";
-import { ConfigStore } from "./config";
+import { ConfigStore, type Config } from "./config";
+import { acknowledgeGatewayReloadEffect, configFingerprint } from "./gateway-reload";
 import { createMcpGateway } from "./mcp";
-import { acknowledgeGatewayReload } from "./gateway-reload";
-import { defaultPaths } from "./paths";
-import { assertPrivatePath, assertPrivateTree } from "./private-files";
-import { acquireGatewayLock } from "./process-lock";
+import { assertPrivatePathEffect, assertPrivateTreeEffect } from "./private-files";
+import { acquireGatewayLockEffect } from "./process-lock";
 import { RuntimeCoordinator } from "./runtime/coordinator";
 import { PiRuntime } from "./runtime/pi-runtime";
 import { RuntimeSessionStore } from "./runtime/sessions";
@@ -15,133 +16,147 @@ interface ServerOptions {
   configPath: string;
   stateRoot: string;
   transportBinary?: string;
-  piBinary?: string;
   fatal?: (error: Error) => void;
   fatalShutdownTimeoutMs?: number;
 }
 
-export async function startServer(paths: ServerOptions = defaultPaths()) {
-  await assertPrivateTree(dirname(paths.configPath));
-  await assertPrivatePath(paths.configPath, false);
-  await assertPrivateTree(paths.stateRoot);
-  await assertPrivatePath(join(paths.stateRoot, "tombstones.json"), false);
-  const releaseLock = await acquireGatewayLock(paths.stateRoot);
-  try {
-    return await startLockedServer(paths, releaseLock);
-  } catch (error) {
-    await releaseLock();
-    throw error;
-  }
+interface StartedServer {
+  url: string;
+  tailcat: import("./schemas").TailcatState;
+  server: ReturnType<typeof Bun.serve>;
 }
 
-async function startLockedServer(paths: ServerOptions, releaseLock: () => Promise<void>) {
-  const config = new ConfigStore(paths);
-  let current = await config.readEffective();
-  const sessions = new RuntimeSessionStore(paths.stateRoot);
-  let closeResources = async () => {};
-  const fatal = createFatalHandler(
-    () => closeResources(),
-    paths.fatal ?? (() => process.exit(1)),
-    paths.fatalShutdownTimeoutMs,
+/** Root gateway program. Acquisition order makes close: poll, transport, Bun, MCP, runtime, lock. */
+export function startServerEffect(paths: ServerOptions, scope: Scope.Scope) {
+  return Effect.gen(function* () {
+    yield* assertPrivateTreeEffect(dirname(paths.configPath));
+    yield* assertPrivatePathEffect(paths.configPath, false);
+    yield* assertPrivateTreeEffect(paths.stateRoot);
+    yield* assertPrivatePathEffect(join(paths.stateRoot, "tombstones.json"), false);
+    yield* Effect.acquireRelease(acquireGatewayLockEffect(paths.stateRoot), (release) =>
+      release.pipe(Effect.orDie),
+    );
+
+    const config = new ConfigStore(paths);
+    const current = yield* Ref.make<Config>(yield* config.readEffectiveEffect());
+    const effective = yield* Ref.get(current);
+    const sessions = new RuntimeSessionStore(paths.stateRoot);
+    const fatal = createScopedFatalHandler(
+      scope,
+      paths.fatal ?? (() => process.exit(1)),
+      paths.fatalShutdownTimeoutMs,
+    );
+    const runtime = yield* PiRuntime.createEffect({ fatal });
+    const resources = yield* Effect.acquireRelease(
+      RuntimeCoordinator.createEffect({
+        config,
+        sessions,
+        runtime,
+        desired: yield* Ref.get(current),
+      }).pipe(
+        Effect.map((coordinator) => ({
+          coordinator,
+          gateway: createMcpGateway({
+            app: createColleagueLine({ config, coordinator }),
+            authenticateEffect: (bearer) => config.authenticateEffect(bearer),
+            allowedHosts: [effective.server.host, "localhost"],
+            allowedOrigins: [],
+            fatal,
+          }),
+        })),
+      ),
+      ({ coordinator, gateway }) =>
+        gateway.closeEffect.pipe(
+          Effect.ensuring(coordinator.closeEffect().pipe(Effect.orDie)),
+          Effect.orDie,
+        ),
+    );
+    const { coordinator, gateway } = resources;
+    const server = yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        return Bun.serve({
+          hostname: effective.server.host,
+          port: effective.server.port,
+          idleTimeout: 255,
+          fetch: (request) => gateway.fetch(request),
+        });
+      }),
+      (resource) => Effect.sync(() => resource.stop(true)),
+    );
+    const transport = yield* Effect.acquireRelease(
+      Effect.sync(
+        () =>
+          new TailcatSupervisor({
+            stateRoot: paths.stateRoot,
+            port: server.port ?? effective.server.port,
+            ...(paths.transportBinary === undefined ? {} : { binary: paths.transportBinary }),
+            onFatal: fatal,
+          }),
+      ),
+      (resource) => resource.closeEffect().pipe(Effect.orDie),
+    );
+
+    const initial = yield* Ref.get(current);
+    yield* transport.reloadEffect(initial.clients.map((client) => client.tailcatKey));
+    yield* acknowledgeGatewayReloadEffect(paths.stateRoot, initial);
+    yield* startReloadFiber(
+      config,
+      current,
+      coordinator,
+      gateway,
+      transport,
+      paths.stateRoot,
+      fatal,
+    );
+
+    return {
+      url: `http://${server.hostname}:${server.port}`,
+      tailcat: yield* transport.stateEffect(),
+      server,
+    } satisfies StartedServer;
+  });
+}
+
+function startReloadFiber(
+  config: ConfigStore,
+  current: Ref.Ref<Config>,
+  coordinator: RuntimeCoordinator,
+  gateway: ReturnType<typeof createMcpGateway>,
+  transport: TailcatSupervisor,
+  stateRoot: string,
+  fatal: (error: Error) => void,
+) {
+  const reload = Effect.gen(function* () {
+    const previous = yield* Ref.get(current);
+    const next = yield* config.readEffectiveEffect();
+    if (configFingerprint(next) === configFingerprint(previous)) return;
+    yield* Effect.all(
+      [
+        coordinator.reconcileEffect(next),
+        ...changedClientIds(previous, next).map((clientId) => gateway.closeClientEffect(clientId)),
+      ],
+      { concurrency: "unbounded" },
+    );
+    yield* transport.reloadEffect(next.clients.map((client) => client.tailcatKey));
+    yield* Ref.set(current, next);
+    yield* acknowledgeGatewayReloadEffect(stateRoot, next);
+  }).pipe(
+    Effect.catchEager((error) =>
+      Effect.sync(() => fatal(error instanceof Error ? error : new Error("Config reload failed"))),
+    ),
   );
-  const runtime = await PiRuntime.create({
-    ...(paths.piBinary === undefined ? {} : { piBinary: paths.piBinary }),
-    fatal,
-  });
-  const coordinator = await RuntimeCoordinator.create({
-    config,
-    sessions,
-    runtime,
-    desired: current,
-  });
-  const app = createColleagueLine({
-    config,
-    answer: (input) => coordinator.answer(input),
-  });
-  const gateway = createMcpGateway({
-    app,
-    authenticate: (bearer) => config.authenticate(bearer),
-    allowedHosts: [current.server.host, "localhost"],
-    allowedOrigins: [],
-    fatal,
-  });
-  const server = Bun.serve({
-    hostname: current.server.host,
-    port: current.server.port,
-    idleTimeout: 255,
-    fetch: (request) => gateway.fetch(request),
-  });
-  const transport = new TailcatSupervisor({
-    stateRoot: paths.stateRoot,
-    port: current.server.port,
-    ...(paths.transportBinary === undefined ? {} : { binary: paths.transportBinary }),
-    onFatal: fatal,
-  });
-  let reloading = Promise.resolve();
-  let reloadTimer: ReturnType<typeof setInterval> | undefined;
-  let closePromise: Promise<void> | undefined;
-  closeResources = () => {
-    closePromise ??= (async () => {
-      try {
-        if (reloadTimer) clearInterval(reloadTimer);
-        await reloading;
-        let failure: unknown;
-        for (const operation of [
-          () => transport.close(),
-          () => Promise.resolve(server.stop(true)),
-          () => coordinator.close(),
-          () => gateway.close(),
-        ]) {
-          try {
-            await operation();
-          } catch (error) {
-            failure ??= error;
-          }
-        }
-        if (failure) throw failure;
-      } finally {
-        await releaseLock();
-      }
-    })();
-    return closePromise;
-  };
-  try {
-    await transport.reload(current.clients.map((client) => client.tailcatKey));
-    await acknowledgeGatewayReload(paths.stateRoot, current);
-  } catch (error) {
-    try {
-      await closeResources();
-    } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], "Gateway startup cleanup failed");
-    }
-    throw error;
-  }
-  reloadTimer = setInterval(() => {
-    reloading = reloading
-      .then(async () => {
-        const next = await config.readEffective();
-        await Promise.all([
-          coordinator.reconcile(next),
-          ...changedClientIds(current, next).map((clientId) => gateway.closeClient(clientId)),
-        ]);
-        await transport.reload(next.clients.map((client) => client.tailcatKey));
-        current = next;
-        await acknowledgeGatewayReload(paths.stateRoot, current);
-      })
-      .catch((error) => fatal(error instanceof Error ? error : new Error("Config reload failed")));
-  }, 250);
-  reloadTimer.unref?.();
-  const tailcat = await transport.state();
-  return {
-    url: `http://${server.hostname}:${server.port}`,
-    tailcat,
-    server,
-    close: closeResources,
-  };
+  return Effect.acquireRelease(
+    Effect.sleep(Duration.millis(250)).pipe(
+      Effect.andThen(reload),
+      Effect.repeat(pollEvery(250)),
+      Effect.forkScoped,
+    ),
+    (fiber) => Fiber.interrupt(fiber),
+  );
 }
 
-export function createFatalHandler(
-  close: () => Promise<void>,
+export function createScopedFatalHandler(
+  scope: Scope.Scope,
   terminate: (error: Error) => void,
   timeoutMs = 10_000,
 ): (error: Error) => void {
@@ -149,31 +164,18 @@ export function createFatalHandler(
   return (error) => {
     if (triggered) return;
     triggered = true;
-    void settleWithin(close(), timeoutMs).then(
-      () => terminate(error),
-      () => terminate(error),
+    void Effect.runPromise(
+      Scope.close(scope, Exit.void).pipe(
+        Effect.timeout(Duration.millis(timeoutMs)),
+        Effect.asVoid,
+        Effect.catchEager(() => Effect.void),
+        Effect.ensuring(Effect.sync(() => terminate(error))),
+      ),
     );
   };
 }
 
-async function settleWithin(operation: Promise<void>, timeoutMs: number): Promise<void> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  try {
-    await Promise.race([
-      operation,
-      new Promise<void>((resolve) => {
-        timer = setTimeout(resolve, timeoutMs);
-      }),
-    ]);
-  } finally {
-    clearTimeout(timer);
-  }
-}
-
-function changedClientIds(
-  previous: Awaited<ReturnType<ConfigStore["read"]>>,
-  next: Awaited<ReturnType<ConfigStore["read"]>>,
-): string[] {
+function changedClientIds(previous: Config, next: Config): string[] {
   const current = new Map(
     next.clients.map((client) => [client.id, `${client.tailcatKey}\0${client.bearerHash}`]),
   );

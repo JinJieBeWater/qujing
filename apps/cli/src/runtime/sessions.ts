@@ -1,92 +1,141 @@
 import { createHash, randomUUID } from "node:crypto";
 import { readFile, readdir, rm } from "node:fs/promises";
 import { join } from "node:path";
-import { z } from "zod";
-import { writePrivateJson } from "../private-files";
+import { Deferred, Effect, Semaphore } from "effect";
+import { writePrivateJsonEffect } from "../private-files";
+import {
+  decode,
+  RuntimeSession as RuntimeSessionSchema,
+  type RuntimeSession as RuntimeSessionData,
+} from "../schemas";
 
-const runtimeSessionSchema = z.object({
-  id: z.string().uuid(),
-  clientId: z.string().min(1),
-  workspaceId: z.string().min(1),
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-});
+const parseRuntimeSession = decode(RuntimeSessionSchema);
 
-export type RuntimeSession = z.infer<typeof runtimeSessionSchema>;
+export type RuntimeSession = RuntimeSessionData;
 
 export class RuntimeSessionStore {
   private readonly directory: string;
-  private readonly pending = new Map<string, Promise<RuntimeSession>>();
+  private readonly gate = Semaphore.makeUnsafe(1);
+  private readonly pending = new Map<string, Deferred.Deferred<RuntimeSession, unknown>>();
 
   constructor(stateRoot: string) {
     this.directory = join(stateRoot, "runtime-sessions");
   }
 
-  getOrCreate(clientId: string, workspaceId: string): Promise<RuntimeSession> {
+  getOrCreateEffect(clientId: string, workspaceId: string) {
     const key = runtimeBindingKey(clientId, workspaceId);
-    const active = this.pending.get(key);
-    if (active) return active;
-    const operation = this.loadOrCreate(key, clientId, workspaceId).finally(() =>
-      this.pending.delete(key),
-    );
-    this.pending.set(key, operation);
-    return operation;
-  }
-
-  async touch(session: RuntimeSession): Promise<void> {
-    const path = this.path(runtimeBindingKey(session.clientId, session.workspaceId));
-    const current = runtimeSessionSchema.parse(JSON.parse(await readFile(path, "utf8")));
-    if (current.id !== session.id) throw new Error("Runtime Session binding changed before touch");
-    await writePrivateJson(path, { ...session, updatedAt: new Date().toISOString() });
-  }
-
-  async matching(predicate: (session: RuntimeSession) => boolean): Promise<RuntimeSession[]> {
-    return (await this.list()).filter(predicate);
-  }
-
-  async remove(session: RuntimeSession): Promise<void> {
-    await rm(this.path(runtimeBindingKey(session.clientId, session.workspaceId)), { force: true });
-  }
-
-  async list(): Promise<RuntimeSession[]> {
-    let names: string[];
-    try {
-      names = await readdir(this.directory);
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
-      throw error;
-    }
-    return Promise.all(
-      names
-        .filter((name) => name.endsWith(".json"))
-        .map(async (name) =>
-          runtimeSessionSchema.parse(
-            JSON.parse(await readFile(join(this.directory, name), "utf8")),
+    return Effect.gen({ self: this }, function* () {
+      const decision = yield* this.gate.withPermit(
+        Effect.sync(() => {
+          const active = this.pending.get(key);
+          if (active) return { deferred: active, owner: false } as const;
+          const deferred = Deferred.makeUnsafe<RuntimeSession, unknown>();
+          this.pending.set(key, deferred);
+          return { deferred, owner: true } as const;
+        }),
+      );
+      if (!decision.owner) return yield* Deferred.await(decision.deferred);
+      return yield* Effect.uninterruptible(
+        this.loadOrCreateEffect(key, clientId, workspaceId).pipe(
+          Effect.exit,
+          Effect.tap((exit) => Deferred.done(decision.deferred, exit)),
+          Effect.ensuring(
+            this.gate.withPermit(
+              Effect.sync(() => {
+                if (this.pending.get(key) === decision.deferred) this.pending.delete(key);
+              }),
+            ),
           ),
+          Effect.flatMap((exit) => exit),
         ),
+      );
+    });
+  }
+
+  touchEffect(session: RuntimeSession) {
+    return Effect.gen({ self: this }, function* () {
+      const path = this.path(runtimeBindingKey(session.clientId, session.workspaceId));
+      const current = yield* this.readSessionEffect(path);
+      if (current.id !== session.id)
+        throw new Error("Runtime Session binding changed before touch");
+      yield* this.writeSessionEffect(path, { ...session, updatedAt: new Date().toISOString() });
+    });
+  }
+
+  matchingEffect(predicate: (session: RuntimeSession) => boolean) {
+    return this.listEffect().pipe(Effect.map((sessions) => sessions.filter(predicate)));
+  }
+
+  removeEffect(session: RuntimeSession) {
+    return this.operation(() =>
+      rm(this.path(runtimeBindingKey(session.clientId, session.workspaceId)), { force: true }),
     );
   }
 
-  private async loadOrCreate(
-    key: string,
-    clientId: string,
-    workspaceId: string,
-  ): Promise<RuntimeSession> {
-    try {
-      return runtimeSessionSchema.parse(JSON.parse(await readFile(this.path(key), "utf8")));
-    } catch (error) {
-      if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-    }
-    const now = new Date().toISOString();
-    const session = runtimeSessionSchema.parse({
-      id: randomUUID(),
-      clientId,
-      workspaceId,
-      createdAt: now,
-      updatedAt: now,
+  listEffect() {
+    return Effect.gen({ self: this }, function* () {
+      const names = yield* this.operation(() => readdir(this.directory)).pipe(
+        Effect.matchEffect({
+          onFailure: (error) =>
+            (error as NodeJS.ErrnoException).code === "ENOENT"
+              ? Effect.succeed([])
+              : Effect.fail(error),
+          onSuccess: Effect.succeed,
+        }),
+      );
+      return yield* Effect.all(
+        names
+          .filter((name) => name.endsWith(".json"))
+          .map((name) => this.readSessionEffect(join(this.directory, name))),
+        { concurrency: "unbounded" },
+      );
     });
-    await writePrivateJson(this.path(key), session);
-    return session;
+  }
+
+  private loadOrCreateEffect(key: string, clientId: string, workspaceId: string) {
+    return Effect.gen({ self: this }, function* () {
+      const path = this.path(key);
+      const existing = yield* this.readSessionEffect(path).pipe(
+        Effect.matchEffect({
+          onFailure: (error) =>
+            (error as NodeJS.ErrnoException).code === "ENOENT"
+              ? Effect.succeed(undefined)
+              : Effect.fail(error),
+          onSuccess: Effect.succeed,
+        }),
+      );
+      if (existing) return existing;
+      const now = new Date().toISOString();
+      const session = yield* Effect.sync(() =>
+        parseRuntimeSession({
+          id: randomUUID(),
+          clientId,
+          workspaceId,
+          createdAt: now,
+          updatedAt: now,
+        }),
+      );
+      yield* this.writeSessionEffect(path, session);
+      return session;
+    });
+  }
+
+  private readSessionEffect(path: string) {
+    return Effect.gen({ self: this }, function* () {
+      const text = yield* this.operation(() => readFile(path, "utf8"));
+      return yield* Effect.try({
+        try: () => parseRuntimeSession(JSON.parse(text)),
+        catch: (error) => error,
+      });
+    });
+  }
+
+  private writeSessionEffect(path: string, session: RuntimeSession) {
+    return writePrivateJsonEffect(path, session);
+  }
+
+  private operation<A>(operation: () => Promise<A>) {
+    return Effect.tryPromise({ try: operation, catch: (error) => error });
   }
 
   private path(key: string): string {

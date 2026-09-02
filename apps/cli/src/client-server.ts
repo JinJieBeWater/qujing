@@ -1,15 +1,26 @@
 import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
+import { Duration, Effect, Fiber, Ref, Scope } from "effect";
 import { ClientApplication, type LineRuntimeClient } from "./client-application";
-import { ClientConfigStore, type LineConfig, LOCAL_CLIENT_ID } from "./client-config";
-import { processClientLineRetirement } from "./client-control";
+import {
+  ClientConfigStore,
+  type ClientConfig,
+  type LineConfig,
+  LOCAL_CLIENT_ID,
+} from "./client-config";
+import { processClientLineRetirementEffect } from "./client-control";
 import { createClientMcp } from "./client-mcp";
-import { acknowledgeClientReload } from "./gateway-reload";
+import { pollEvery } from "./effect-runtime";
+import { acknowledgeClientReloadEffect, configFingerprint } from "./gateway-reload";
 import { LineRuntime } from "./line-runtime";
-import { assertPrivatePath, assertPrivateTree, ensurePrivateDirectory } from "./private-files";
-import { acquireProcessLock } from "./process-lock";
-import { createFatalHandler } from "./server";
-import { startConnector } from "./transport/process";
+import {
+  assertPrivatePathEffect,
+  assertPrivateTreeEffect,
+  ensurePrivateDirectoryEffect,
+} from "./private-files";
+import { acquireProcessLockEffect } from "./process-lock";
+import { createScopedFatalHandler } from "./server";
+import { startConnectorEffect } from "./transport/process";
 
 export interface ClientServerOptions {
   configPath: string;
@@ -21,127 +32,130 @@ export interface ClientServerOptions {
   createRuntime?: (line: LineConfig) => LineRuntimeClient;
 }
 
-export async function startClientServer(options: ClientServerOptions) {
-  await assertPrivatePath(dirname(options.configPath), true);
-  await assertPrivatePath(options.configPath, false);
-  const stateExists = await stat(options.stateRoot).then(
-    () => true,
-    (error) => {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-      throw error;
-    },
-  );
-  if (stateExists) await assertPrivateTree(options.stateRoot);
-  else await ensurePrivateDirectory(options.stateRoot);
-  const releaseLock = await acquireProcessLock(
-    join(options.stateRoot, "client.lock"),
-    "Colleague Line Client is already running",
-  );
-  try {
-    return await startLockedClientServer(options, releaseLock);
-  } catch (error) {
-    await releaseLock();
-    throw error;
-  }
+interface StartedClientServer {
+  url: string;
+  server: ReturnType<typeof Bun.serve>;
 }
 
-async function startLockedClientServer(
-  options: ClientServerOptions,
-  releaseLock: () => Promise<void>,
+/** Root Client program. Acquisition order makes close: poll, Bun, MCP, app, lock. */
+export function startClientServerEffect(options: ClientServerOptions, scope: Scope.Scope) {
+  return Effect.gen(function* () {
+    yield* assertPrivatePathEffect(dirname(options.configPath), true);
+    yield* assertPrivatePathEffect(options.configPath, false);
+    const stateExists = yield* promise(() =>
+      stat(options.stateRoot).then(
+        () => true,
+        (error) => {
+          if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+          throw error;
+        },
+      ),
+    );
+    if (stateExists) yield* assertPrivateTreeEffect(options.stateRoot);
+    else yield* ensurePrivateDirectoryEffect(options.stateRoot);
+    yield* Effect.acquireRelease(
+      acquireProcessLockEffect(
+        join(options.stateRoot, "client.lock"),
+        "Colleague Line Client is already running",
+      ),
+      (release) => release.pipe(Effect.orDie),
+    );
+
+    const config = new ClientConfigStore({ configPath: options.configPath });
+    const initial = yield* config.readEffect();
+    const current = yield* Ref.make<ClientConfig>(initial);
+    const app = yield* Effect.acquireRelease(
+      Effect.sync(
+        () =>
+          new ClientApplication({
+            config,
+            createRuntime:
+              options.createRuntime ??
+              ((line) =>
+                new LineRuntime({
+                  line,
+                  startConnectorEffect: (connector, signal) =>
+                    startConnectorEffect(connector, options.transportBinary, signal),
+                })),
+          }),
+      ),
+      (resource) => resource.closeEffect().pipe(Effect.orDie),
+    );
+    yield* processClientLineRetirementEffect(options.stateRoot, initial, app);
+
+    const fatal = createScopedFatalHandler(
+      scope,
+      options.fatal ?? (() => process.exit(1)),
+      options.fatalShutdownTimeoutMs,
+    );
+    const effective = initial;
+    const mcp = yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        createClientMcp({
+          app,
+          config,
+          allowedHosts: [effective.server.host, "localhost"],
+          allowedOrigins: [],
+          fatal,
+        }),
+      ),
+      (resource) => resource.closeEffect.pipe(Effect.orDie),
+    );
+    const server = yield* Effect.acquireRelease(
+      Effect.sync(() =>
+        Bun.serve({
+          hostname: effective.server.host,
+          port: options.port ?? effective.server.port,
+          idleTimeout: 255,
+          fetch: (request) => mcp.fetch(request),
+        }),
+      ),
+      (resource) => Effect.sync(() => resource.stop(true)),
+    );
+
+    yield* acknowledgeClientReloadEffect(options.stateRoot, effective);
+    yield* startReloadFiber(config, current, app, mcp, options.stateRoot, fatal);
+
+    return {
+      url: `http://${server.hostname}:${server.port}`,
+      server,
+    } satisfies StartedClientServer;
+  });
+}
+
+function startReloadFiber(
+  config: ClientConfigStore,
+  current: Ref.Ref<ClientConfig>,
+  app: ClientApplication,
+  mcp: ReturnType<typeof createClientMcp>,
+  stateRoot: string,
+  fatal: (error: Error) => void,
 ) {
-  const config = new ClientConfigStore({ configPath: options.configPath });
-  let current = await config.read();
-  const app = new ClientApplication({
-    config,
-    createRuntime:
-      options.createRuntime ??
-      ((line) =>
-        new LineRuntime({
-          line,
-          startConnector: (connector, signal) =>
-            startConnector(connector, options.transportBinary, signal),
-        })),
-  });
-  await processClientLineRetirement(options.stateRoot, current, app);
-  let closeResources = async () => {};
-  const fatal = createFatalHandler(
-    () => closeResources(),
-    options.fatal ?? (() => process.exit(1)),
-    options.fatalShutdownTimeoutMs,
+  const reload = Effect.gen(function* () {
+    const previous = yield* Ref.get(current);
+    const next = yield* config.readEffect();
+    yield* processClientLineRetirementEffect(stateRoot, next, app);
+    if (configFingerprint(next) === configFingerprint(previous)) return;
+    const reconciled = yield* app.reconcileEffect();
+    if (reconciled.localBearerHash !== previous.localBearerHash)
+      yield* mcp.closeClientEffect(LOCAL_CLIENT_ID);
+    yield* Ref.set(current, reconciled);
+    yield* acknowledgeClientReloadEffect(stateRoot, reconciled);
+  }).pipe(
+    Effect.catchEager((error) =>
+      Effect.sync(() => fatal(error instanceof Error ? error : new Error("Client reload failed"))),
+    ),
   );
-  const mcp = createClientMcp({
-    app,
-    config,
-    allowedHosts: [current.server.host, "localhost"],
-    allowedOrigins: [],
-    fatal,
-  });
-  let server: ReturnType<typeof Bun.serve>;
-  try {
-    server = Bun.serve({
-      hostname: current.server.host,
-      port: options.port ?? current.server.port,
-      idleTimeout: 255,
-      fetch: (request) => mcp.fetch(request),
-    });
-  } catch (error) {
-    await Promise.allSettled([mcp.close(), app.close()]);
-    throw error;
-  }
-  let reloadTimer: ReturnType<typeof setInterval> | undefined;
-  let reloading = Promise.resolve();
-  let closePromise: Promise<void> | undefined;
-  closeResources = () => {
-    closePromise ??= (async () => {
-      try {
-        if (reloadTimer) clearInterval(reloadTimer);
-        await reloading;
-        let failure: unknown;
-        for (const operation of [
-          () => Promise.resolve(server.stop(true)),
-          () => mcp.close(),
-          () => app.close(),
-        ]) {
-          try {
-            await operation();
-          } catch (error) {
-            failure ??= error;
-          }
-        }
-        if (failure) throw failure;
-      } finally {
-        await releaseLock();
-      }
-    })();
-    return closePromise;
-  };
-  try {
-    await acknowledgeClientReload(options.stateRoot, current);
-  } catch (error) {
-    try {
-      await closeResources();
-    } catch (cleanupError) {
-      throw new AggregateError([error, cleanupError], "Client startup cleanup failed");
-    }
-    throw error;
-  }
-  reloadTimer = setInterval(() => {
-    reloading = reloading
-      .then(async () => {
-        const next = await config.read();
-        await processClientLineRetirement(options.stateRoot, next, app);
-        const reconciled = await app.reconcile();
-        if (reconciled.localBearerHash !== current.localBearerHash)
-          await mcp.closeClient(LOCAL_CLIENT_ID);
-        current = reconciled;
-        await acknowledgeClientReload(options.stateRoot, current);
-      })
-      .catch((error) => fatal(error instanceof Error ? error : new Error("Client reload failed")));
-  }, 250);
-  reloadTimer.unref?.();
-  return {
-    url: `http://${server.hostname}:${server.port}`,
-    server,
-    close: closeResources,
-  };
+  return Effect.acquireRelease(
+    Effect.sleep(Duration.millis(250)).pipe(
+      Effect.andThen(reload),
+      Effect.repeat(pollEvery(250)),
+      Effect.forkScoped,
+    ),
+    (fiber) => Fiber.interrupt(fiber),
+  );
+}
+
+function promise<A>(try_: () => Promise<A>) {
+  return Effect.tryPromise({ try: try_, catch: (error) => error });
 }

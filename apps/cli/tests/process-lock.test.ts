@@ -1,12 +1,13 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtemp, rm, writeFile } from "node:fs/promises";
+import { Effect } from "effect";
+import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  acquireGatewayLock,
-  acquireMaintenanceLock,
-  acquireProcessLock,
-  processLockActive,
+  acquireGatewayLockEffect,
+  acquireMaintenanceLockEffect,
+  acquireProcessLockEffect,
+  processLockActiveEffect,
 } from "../src/process-lock";
 
 const roots: string[] = [];
@@ -19,11 +20,13 @@ describe("process lock", () => {
     const root = await mkdtemp(join(tmpdir(), "colleague-line-lock-"));
     roots.push(root);
     const path = join(root, "gateway.lock");
-    const release = await acquireProcessLock(path);
-    await expect(acquireProcessLock(path)).rejects.toThrow("already running");
-    await release();
-    const releaseAgain = await acquireProcessLock(path);
-    await releaseAgain();
+    const release = await Effect.runPromise(acquireProcessLockEffect(path));
+    await expect(Effect.runPromise(acquireProcessLockEffect(path))).rejects.toThrow(
+      "already running",
+    );
+    await Effect.runPromise(release);
+    const releaseAgain = await Effect.runPromise(acquireProcessLockEffect(path));
+    await Effect.runPromise(releaseAgain);
   });
 
   test("recovers a lock owned by a dead process", async () => {
@@ -31,8 +34,8 @@ describe("process lock", () => {
     roots.push(root);
     const path = join(root, "gateway.lock");
     await writeFile(path, JSON.stringify({ pid: 999_999_999, nonce: "dead" }));
-    const release = await acquireProcessLock(path);
-    await release();
+    const release = await Effect.runPromise(acquireProcessLockEffect(path));
+    await Effect.runPromise(release);
   });
 
   test("recovers an interrupted stale-lock quarantine on the first restart", async () => {
@@ -40,9 +43,11 @@ describe("process lock", () => {
     roots.push(root);
     const path = join(root, "gateway.lock");
     await writeFile(`${path}.recovering`, JSON.stringify({ pid: 999_999_999, nonce: "dead" }));
-    const release = await acquireProcessLock(path);
-    expect(await processLockActive(path)).toBe(true);
-    await release();
+    const old = new Date(Date.now() - 120_000);
+    await utimes(`${path}.recovering`, old, old);
+    const release = await Effect.runPromise(acquireProcessLockEffect(path));
+    expect(await Effect.runPromise(processLockActiveEffect(path))).toBe(true);
+    await Effect.runPromise(release);
   });
 
   test("does not delete a fresh lock whose owner write is incomplete", async () => {
@@ -50,7 +55,7 @@ describe("process lock", () => {
     roots.push(root);
     const path = join(root, "gateway.lock");
     await writeFile(path, "");
-    const pending = acquireProcessLock(path);
+    const pending = Effect.runPromise(acquireProcessLockEffect(path));
     await Bun.sleep(25);
     await writeFile(path, JSON.stringify({ pid: process.pid, nonce: "live" }));
 
@@ -62,7 +67,7 @@ describe("process lock", () => {
     roots.push(root);
     const path = join(root, "gateway.lock");
     await writeFile(path, "");
-    const pending = processLockActive(path);
+    const pending = Effect.runPromise(processLockActiveEffect(path));
     await Bun.sleep(25);
     await writeFile(path, JSON.stringify({ pid: process.pid, nonce: "live" }));
     expect(await pending).toBe(true);
@@ -71,13 +76,19 @@ describe("process lock", () => {
     const root = await mkdtemp(join(tmpdir(), "colleague-line-lock-"));
     roots.push(root);
 
-    const releaseMaintenance = await acquireMaintenanceLock(root);
-    await expect(acquireGatewayLock(root)).rejects.toThrow("maintenance is in progress");
-    expect(await processLockActive(join(root, "gateway.lock"))).toBe(false);
-    await releaseMaintenance();
+    const releaseMaintenance = await Effect.runPromise(acquireMaintenanceLockEffect(root));
+    await expect(Effect.runPromise(acquireGatewayLockEffect(root))).rejects.toThrow(
+      "maintenance is in progress",
+    );
+    expect(await Effect.runPromise(processLockActiveEffect(join(root, "gateway.lock")))).toBe(
+      false,
+    );
+    await Effect.runPromise(releaseMaintenance);
 
-    const releaseGateway = await acquireGatewayLock(root);
-    await expect(acquireMaintenanceLock(root)).rejects.toThrow("Gateway is already running");
-    await releaseGateway();
+    const releaseGateway = await Effect.runPromise(acquireGatewayLockEffect(root));
+    await expect(Effect.runPromise(acquireMaintenanceLockEffect(root))).rejects.toThrow(
+      "Gateway is already running",
+    );
+    await Effect.runPromise(releaseGateway);
   });
 });

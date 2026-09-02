@@ -72,7 +72,7 @@ On Client machine, create Line key:
 colleague-line client line key-create jason
 ```
 
-Send printed public key to Owner. Owner registers one remote Client identity:
+Send printed public key to Owner. Owner registers one remote Gateway Client identity:
 
 ```bash
 colleague-line gateway client add alice-jason --tailcat-key 'nodekey:...'
@@ -100,7 +100,8 @@ Full install, pairing, rotation, revocation, service, and recovery workflow: [`s
 - Agent local bearer and every Line’s Tailcat key/remote bearer are distinct.
 - Client verifies expected Owner ID on every rebuilt upstream MCP session.
 - Gateway runs Owner’s full global `pi --mode rpc --approve`: default model, authentication, settings, skills, extensions, builtin tools, and `~/.pi/agent/sessions/`.
-- Every paired remote Client is therefore trusted with Owner-level Pi capability, including shell execution, file changes, and access outside selected Workspace when Pi chooses it.
+- Colleague Line appends a fixed consultation prompt that asks Pi to gather relevant context and behave read-only. It does not replace or filter Owner's Pi configuration; the prompt is behavior guidance, not a security boundary.
+- Every paired remote Gateway Client is therefore trusted with Owner-level Pi capability, including shell execution, file changes, and access outside selected Workspace when Pi chooses it.
 - Runtime Session IDs remain distinct by remote Gateway Client and Workspace. Revocation removes binding but does not delete Owner’s global Pi archive.
 - Default Colleague Line logs exclude credentials, addresses, roots, questions, answers, and file contents.
 

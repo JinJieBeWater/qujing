@@ -1,15 +1,19 @@
-import { access } from "node:fs/promises";
 import { constants } from "node:fs";
+import { access } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
+import { Duration, Effect } from "effect";
 import { ConfigStore, type Config } from "./config";
-import { assertPrivatePath, assertPrivateTree, isPrivatePath } from "./private-files";
-import { processLockActive } from "./process-lock";
-import { readTailcatState } from "./transport/supervisor";
-import { requireTransportBinary, transportBinaryPath } from "./transport/process";
-import { piBinaryPath } from "./runtime/pi-rpc";
+import {
+  assertPrivatePathEffect,
+  assertPrivateTreeEffect,
+  isPrivatePathEffect,
+} from "./private-files";
+import { processLockActiveEffect } from "./process-lock";
+import { requireTransportBinaryEffect, transportBinaryPath } from "./transport/process";
+import { readTailcatStateEffect } from "./transport/supervisor";
 
-interface DoctorCheck {
+export interface DoctorCheck {
   name: string;
   status: "ok" | "warning" | "error";
   message: string;
@@ -24,150 +28,269 @@ interface DoctorPaths {
   configPath: string;
   stateRoot: string;
   transportBinary?: string;
-  piBinary?: string;
 }
 
 interface DoctorDependencies {
-  checkPi?: (binary: string) => Promise<boolean>;
-  checkPort?: (host: string, port: number) => Promise<boolean>;
+  checkPi?: (binary: string) => Effect.Effect<boolean, unknown>;
+  checkPort?: (host: string, port: number) => Effect.Effect<boolean, unknown>;
 }
 
-export async function runDoctor(
-  paths: DoctorPaths,
-  dependencies: DoctorDependencies = {},
-): Promise<DoctorReport> {
-  const checks: DoctorCheck[] = [];
-  const add = (name: string, status: DoctorCheck["status"], message: string) =>
-    checks.push({ name, status, message });
+type Check = DoctorReport["checks"][number];
+type ConfigResult = { config?: Config; check: Check };
+
+export function runDoctorEffect(paths: DoctorPaths, dependencies: DoctorDependencies = {}) {
   const store = new ConfigStore(paths);
-  let config: Config | undefined;
-  try {
-    config = await store.readEffective();
-    add("config", "ok", "Owner config is valid");
-  } catch (error) {
-    add("config", "error", error instanceof Error ? error.message : "Owner config is invalid");
-  }
-
-  if (config) {
-    const safe = await Promise.all([
-      assertPrivateTree(dirname(paths.configPath)),
-      assertPrivatePath(paths.configPath, false),
-      assertPrivateTree(paths.stateRoot),
-      assertPrivatePath(store.tombstonesPath, false),
-    ]).then(
-      () => true,
-      () => false,
+  return Effect.gen(function* () {
+    const [configResult, permissions, transport, pi, tailcat] = yield* Effect.all(
+      [
+        configCheckEffect(store),
+        permissionsCheckEffect(paths, store),
+        transportCheckEffect(paths.transportBinary),
+        piCheckEffect("pi", dependencies.checkPi),
+        tailcatCheckEffect(paths.stateRoot),
+      ],
+      { concurrency: "unbounded" },
     );
-    add(
-      "permissions",
-      safe ? "ok" : "error",
-      safe
-        ? "Config and state permissions are private"
-        : "Config and state permissions must be 0600/0700",
-    );
+    const configChecks = configResult.config
+      ? yield* Effect.all(
+          [
+            workspaceChecksEffect(store, configResult.config),
+            portCheckEffect(paths.stateRoot, configResult.config, dependencies.checkPort),
+          ],
+          { concurrency: "unbounded" },
+        )
+      : undefined;
+    const checks = [
+      configResult.check,
+      permissions,
+      ...(configChecks ? [...configChecks[0], configChecks[1]] : []),
+      transport,
+      pi,
+      tailcat,
+    ];
+    return {
+      ok: checks.every((check) => check.status !== "error"),
+      checks,
+    } satisfies DoctorReport;
+  });
+}
 
-    const publicWorkspaces = new Map(
-      (await store.listPublicWorkspaces()).map((workspace) => [workspace.id, workspace]),
-    );
-    for (const workspace of config.workspaces) {
-      const available = publicWorkspaces.get(workspace.id)?.available === true;
-      add(
-        `workspace:${workspace.id}`,
-        available ? "ok" : "error",
-        available
-          ? "Workspace root is canonical and readable"
-          : "Workspace root is unavailable or non-canonical",
-      );
-    }
-
-    const running = await processLockActive(join(paths.stateRoot, "gateway.lock"));
-    const portAvailable =
-      running ||
-      (await (dependencies.checkPort ?? checkPort)(config.server.host, config.server.port));
-    add(
-      "port",
-      portAvailable ? "ok" : "error",
-      running
-        ? "Gateway is running"
-        : portAvailable
-          ? "Gateway port is available"
-          : "Gateway port is already in use",
-    );
-  }
-
-  try {
-    const binary = await requireTransportBinary(paths.transportBinary ?? transportBinaryPath());
-    await access(binary, constants.X_OK);
-    add("transport", "ok", "Tailcat transport binary is executable");
-  } catch (error) {
-    add(
-      "transport",
-      "error",
-      error instanceof Error ? error.message : "Tailcat transport binary is unavailable",
-    );
-  }
-
-  const piAvailable = await (dependencies.checkPi ?? checkPi)(
-    paths.piBinary ?? piBinaryPath(),
-  ).catch(() => false);
-  add(
-    "pi",
-    piAvailable ? "ok" : "error",
-    piAvailable ? "Global Pi CLI is executable" : "Global Pi CLI is unavailable",
+function configCheckEffect(store: ConfigStore) {
+  return store.readEffectiveEffect().pipe(
+    Effect.map((config): ConfigResult => ({
+      config,
+      check: check("config", "ok", "Owner config is valid"),
+    })),
+    Effect.catchEager((error) =>
+      Effect.succeed<ConfigResult>({
+        check: check("config", "error", message(error, "Owner config is invalid")),
+      }),
+    ),
   );
-
-  try {
-    const tailcat = await readTailcatState(paths.stateRoot);
-    if (!tailcat) add("tailcat-state", "warning", "Tailcat Server has not completed first startup");
-    else {
-      const keyPath = join(paths.stateRoot, "transport", "server-key.json");
-      const statePath = join(paths.stateRoot, "transport", "server.json");
-      const privateState =
-        (await isPrivatePath(statePath, false)) && (await isPrivatePath(keyPath, false));
-      add(
-        "tailcat-state",
-        privateState ? "ok" : "error",
-        privateState
-          ? "Tailcat Server key and address are persisted privately"
-          : "Tailcat Server state or key permissions are unsafe",
-      );
-    }
-  } catch (error) {
-    add(
-      "tailcat-state",
-      "error",
-      error instanceof Error ? error.message : "Tailcat Server state is invalid",
-    );
-  }
-
-  return { ok: checks.every((check) => check.status !== "error"), checks };
 }
 
-async function checkPi(binary: string): Promise<boolean> {
-  const child = Bun.spawn([binary, "--version"], {
-    stdin: "ignore",
-    stdout: "ignore",
-    stderr: "ignore",
-  });
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  const available = await Promise.race([
-    child.exited.then((code) => code === 0),
-    new Promise<false>((resolve) => {
-      timer = setTimeout(() => resolve(false), 5_000);
+function permissionsCheckEffect(paths: DoctorPaths, store: ConfigStore) {
+  return Effect.all(
+    [
+      assertPrivateTreeEffect(dirname(paths.configPath)),
+      assertPrivatePathEffect(paths.configPath, false),
+      assertPrivateTreeEffect(paths.stateRoot),
+      assertPrivatePathEffect(store.tombstonesPath, false),
+    ],
+    { concurrency: "unbounded" },
+  ).pipe(
+    Effect.as(check("permissions", "ok", "Config and state permissions are private")),
+    Effect.catchEager(() =>
+      Effect.succeed(
+        check("permissions", "error", "Config and state permissions must be 0600/0700"),
+      ),
+    ),
+  );
+}
+
+function workspaceChecksEffect(store: ConfigStore, config: Config) {
+  return store.listPublicWorkspacesEffect().pipe(
+    Effect.map((workspaces) => {
+      const publicWorkspaces = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
+      return config.workspaces.map((workspace) => {
+        const available = publicWorkspaces.get(workspace.id)?.available === true;
+        return check(
+          `workspace:${workspace.id}`,
+          available ? "ok" : "error",
+          available
+            ? "Workspace root is canonical and readable"
+            : "Workspace root is unavailable or non-canonical",
+        );
+      });
     }),
-  ]);
-  clearTimeout(timer);
-  if (!available && child.exitCode === null) {
-    child.kill("SIGKILL");
-    await child.exited;
-  }
-  return available;
+    Effect.catchEager(() =>
+      Effect.succeed(
+        config.workspaces.map((workspace) =>
+          check(
+            `workspace:${workspace.id}`,
+            "error",
+            "Workspace root is unavailable or non-canonical",
+          ),
+        ),
+      ),
+    ),
+  );
 }
 
-function checkPort(host: string, port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const server = createServer();
-    server.once("error", () => resolve(false));
-    server.listen(port, host, () => server.close(() => resolve(true)));
-  });
+function portCheckEffect(
+  stateRoot: string,
+  config: Config,
+  checkPortOverride?: DoctorDependencies["checkPort"],
+) {
+  return processLockActiveEffect(join(stateRoot, "gateway.lock")).pipe(
+    Effect.flatMap((running) =>
+      (running
+        ? Effect.succeed<boolean>(true)
+        : portAvailableEffect(config.server.host, config.server.port, checkPortOverride)
+      ).pipe(
+        Effect.map((available) =>
+          check(
+            "port",
+            available ? "ok" : "error",
+            running
+              ? "Gateway is running"
+              : available
+                ? "Gateway port is available"
+                : "Gateway port is already in use",
+          ),
+        ),
+      ),
+    ),
+    Effect.catchEager(() =>
+      Effect.succeed(check("port", "error", "Gateway port is already in use")),
+    ),
+  );
+}
+
+function portAvailableEffect(
+  host: string,
+  port: number,
+  checkPortOverride?: DoctorDependencies["checkPort"],
+) {
+  return checkPortOverride ? checkPortOverride(host, port) : checkPortEffect(host, port);
+}
+
+function transportCheckEffect(binaryPath?: string) {
+  return requireTransportBinaryEffect(binaryPath ?? transportBinaryPath()).pipe(
+    Effect.flatMap((binary) => promise(() => access(binary, constants.X_OK))),
+    Effect.as(check("transport", "ok", "Tailcat transport binary is executable")),
+    Effect.catchEager((error) =>
+      Effect.succeed(
+        check("transport", "error", message(error, "Tailcat transport binary is unavailable")),
+      ),
+    ),
+  );
+}
+
+function piCheckEffect(binary: string, checkPiOverride?: DoctorDependencies["checkPi"]) {
+  return (checkPiOverride ? checkPiOverride(binary) : checkPiEffect(binary)).pipe(
+    Effect.map((available) =>
+      check(
+        "pi",
+        available ? "ok" : "error",
+        available ? "Global Pi CLI is executable" : "Global Pi CLI is unavailable",
+      ),
+    ),
+    Effect.catchEager(() => Effect.succeed(check("pi", "error", "Global Pi CLI is unavailable"))),
+  );
+}
+
+function tailcatCheckEffect(stateRoot: string) {
+  return readTailcatStateEffect(stateRoot).pipe(
+    Effect.flatMap((tailcat) => {
+      if (!tailcat)
+        return Effect.succeed(
+          check("tailcat-state", "warning", "Tailcat Server has not completed first startup"),
+        );
+      const keyPath = join(stateRoot, "transport", "server-key.json");
+      const statePath = join(stateRoot, "transport", "server.json");
+      return Effect.all(
+        [isPrivatePathEffect(statePath, false), isPrivatePathEffect(keyPath, false)],
+        { concurrency: "unbounded" },
+      ).pipe(
+        Effect.map(([statePrivate, keyPrivate]) => statePrivate && keyPrivate),
+        Effect.map((privateState) =>
+          check(
+            "tailcat-state",
+            privateState ? "ok" : "error",
+            privateState
+              ? "Tailcat Server key and address are persisted privately"
+              : "Tailcat Server state or key permissions are unsafe",
+          ),
+        ),
+      );
+    }),
+    Effect.catchEager((error) =>
+      Effect.succeed(
+        check("tailcat-state", "error", message(error, "Tailcat Server state is invalid")),
+      ),
+    ),
+  );
+}
+
+function checkPiEffect(binary: string) {
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const child = yield* Effect.acquireRelease(
+        Effect.sync(() =>
+          Bun.spawn([binary, "--version"], {
+            stdin: "ignore",
+            stdout: "ignore",
+            stderr: "ignore",
+          }),
+        ),
+        (process) =>
+          promise(async () => {
+            if (process.exitCode === null) process.kill("SIGKILL");
+            await process.exited;
+          }).pipe(Effect.catchEager(() => Effect.void)),
+      );
+      return yield* promise(() => child.exited).pipe(
+        Effect.map((code) => code === 0),
+        Effect.timeoutOrElse({
+          duration: Duration.seconds(5),
+          orElse: () => Effect.succeed(false),
+        }),
+      );
+    }),
+  );
+}
+
+export function checkPortEffect(host: string, port: number) {
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const server = yield* Effect.acquireRelease(
+        Effect.sync(() => createServer()),
+        (resource) =>
+          Effect.promise(
+            () =>
+              new Promise<void>((resolve) =>
+                resource.listening ? resource.close(() => resolve()) : resolve(),
+              ),
+          ),
+      );
+      return yield* promise(
+        () =>
+          new Promise<boolean>((resolve) => {
+            server.once("error", () => resolve(false));
+            server.listen(port, host, () => resolve(true));
+          }),
+      );
+    }),
+  );
+}
+
+function promise<A>(try_: () => Promise<A>) {
+  return Effect.tryPromise({ try: try_, catch: (error) => error });
+}
+function check(name: string, status: Check["status"], message: string): Check {
+  return { name, status, message };
+}
+function message(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
 }

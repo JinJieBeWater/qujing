@@ -1,5 +1,6 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
+import { Context, Deferred, Duration, Effect, Exit, Queue, Scope } from "effect";
 
 interface RpcResponse {
   type: "response";
@@ -8,98 +9,195 @@ interface RpcResponse {
   data?: unknown;
 }
 
-interface PendingRequest {
-  resolve(response: RpcResponse): void;
-  reject(error: Error): void;
-}
+type PendingRequest = Deferred.Deferred<RpcResponse, Error>;
 
-interface Deferred {
-  promise: Promise<void>;
-  resolve(): void;
-  reject(error: Error): void;
-}
+const COLLEAGUE_LINE_PROMPT = `你正在通过 Colleague Line 回答另一位同事的问题。
 
-export interface PiRpcSession {
-  prompt(question: string): Promise<void>;
+Colleague Line 是同事之间的私密咨询通道。你可以查阅 Owner 的工作上下文，帮助对方理解项目、补充背景、找回决策和解决问题。
+
+回答前先按需取证：判断当前问题缺少什么证据，再选择最相关的来源。证据可能来自当前代码、项目文档、Git、可用 Skills，或与当前项目明确相关的 Agent 历史。
+
+当前行为由代码、测试和配置核定。Skills 承载 Owner 积累的工作方法和特殊经验。Agent 历史用于找回过去的讨论、决策和排查结果，但需要结合当前资料确认是否仍然有效。
+
+获取足够证据后直接回答。区分已确认事实、历史背景和你的判断；依据不足时明确说明。
+
+全程只读：只查看、搜索、分析和回答。需要变更时提供建议，但不执行更改。`;
+
+export interface PiRpcSessionEffect {
   getLastAssistantText(): string | undefined;
   isAlive(): boolean;
-  clearQueue(): Promise<void>;
-  abort(): Promise<void>;
-  waitForIdle(): Promise<void>;
-  dispose(): Promise<void>;
+  promptEffect(question: string): Effect.Effect<void, Error>;
+  clearQueueEffect(): Effect.Effect<void, Error>;
+  abortEffect(): Effect.Effect<void, Error>;
+  waitForIdleEffect(): Effect.Effect<void, Error>;
+  disposeEffect(): Effect.Effect<void>;
 }
 
-export function piBinaryPath(env: NodeJS.ProcessEnv = process.env): string {
-  return env.COLLEAGUE_LINE_PI_BIN || "pi";
-}
-
-export async function startPiRpcSession(options: {
+export interface PiRpcOptions {
   cwd: string;
   sessionId: string;
   binary?: string;
   startupTimeoutMs?: number;
-}): Promise<PiRpcSession> {
-  const child = spawn(
-    options.binary ?? piBinaryPath(),
-    ["--mode", "rpc", "--approve", "--session-id", options.sessionId],
-    { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"] },
-  );
-  const session = new GlobalPiRpcSession(child);
-  try {
-    const response = await withTimeout(
-      session.command("get_state"),
-      options.startupTimeoutMs ?? 30_000,
-      "Global Pi startup timed out",
+}
+
+/** Scoped Effect API. Scope owns Pi process and reader fiber. */
+export const startPiRpcSessionEffect = (
+  options: PiRpcOptions,
+): Effect.Effect<PiRpcSessionEffect, Error, Scope.Scope> =>
+  Effect.gen(function* () {
+    const child = yield* Effect.acquireRelease(
+      Effect.try({
+        try: () =>
+          spawn(
+            options.binary ?? "pi",
+            [
+              "--mode",
+              "rpc",
+              "--approve",
+              "--append-system-prompt",
+              COLLEAGUE_LINE_PROMPT,
+              "--session-id",
+              options.sessionId,
+            ],
+            { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"] },
+          ),
+        catch: (error) => new Error("Could not start global Pi", { cause: error }),
+      }),
+      (child) => stopChildEffect(child),
     );
-    const state = response.data as { sessionId?: unknown } | undefined;
-    if (state?.sessionId !== options.sessionId) throw new Error("Pi opened wrong Runtime Session");
+    const session = yield* GlobalPiRpcSession.make(child);
+    yield* Effect.addFinalizer(() => session.disposeEffect());
+    yield* session.readerEffect.pipe(Effect.forkScoped);
+    yield* session.commandEffect("get_state").pipe(
+      Effect.timeoutOrElse({
+        duration: Duration.millis(options.startupTimeoutMs ?? 30_000),
+        orElse: () => Effect.fail(new Error("Global Pi startup timed out")),
+      }),
+      Effect.flatMap((response) => {
+        const state = response.data as { sessionId?: unknown } | undefined;
+        return state?.sessionId === options.sessionId
+          ? Effect.succeed(session)
+          : Effect.fail(new Error("Pi opened wrong Runtime Session"));
+      }),
+    );
     return session;
-  } catch (error) {
-    await session.dispose();
-    throw error;
+  });
+
+/** Owned session Effect. Returned facade keeps its child Scope alive until dispose. */
+export const startManagedPiRpcSessionEffect = (options: PiRpcOptions) =>
+  Effect.gen(function* () {
+    const scope = yield* Scope.make();
+    return yield* Effect.provide(
+      startPiRpcSessionEffect(options),
+      Context.make(Scope.Scope, scope),
+    ).pipe(
+      Effect.map((session) => new ManagedPiRpcSession(session, scope)),
+      Effect.tapError(() => Scope.close(scope, Exit.void)),
+    );
+  });
+
+class ManagedPiRpcSession implements PiRpcSessionEffect {
+  constructor(
+    private readonly session: PiRpcSessionEffect,
+    private readonly scope: Scope.Closeable,
+  ) {}
+  promptEffect(question: string) {
+    return this.session.promptEffect(question);
+  }
+  getLastAssistantText() {
+    return this.session.getLastAssistantText();
+  }
+  isAlive() {
+    return this.session.isAlive();
+  }
+  clearQueueEffect() {
+    return this.session.clearQueueEffect();
+  }
+  abortEffect() {
+    return this.session.abortEffect();
+  }
+  waitForIdleEffect() {
+    return this.session.waitForIdleEffect();
+  }
+  disposeEffect() {
+    return Scope.close(this.scope, Exit.void);
   }
 }
 
-class GlobalPiRpcSession implements PiRpcSession {
+class GlobalPiRpcSession implements PiRpcSessionEffect {
   private readonly pending = new Map<string, PendingRequest>();
+  private readonly stdoutQueue = Effect.runSync(Queue.unbounded<Effect.Effect<void, Error>>());
   private stdoutBuffer = Buffer.alloc(0);
-  private currentTurn: Deferred | undefined;
+  private currentTurn: Deferred.Deferred<void, Error> | undefined;
   private lastAssistantText: string | undefined;
   private failed = false;
   private stopped = false;
 
-  constructor(private readonly child: ChildProcessWithoutNullStreams) {
-    child.stdout.on("data", (chunk: Buffer) => this.read(chunk));
-    child.stdout.on("end", () => {
-      if (this.stdoutBuffer.length > 0) this.fail(new Error("Pi RPC ended with partial JSONL"));
-    });
-    child.stderr.resume();
-    child.on("error", (error) =>
-      this.fail(new Error("Could not start global Pi", { cause: error })),
+  private constructor(
+    private readonly child: ChildProcessWithoutNullStreams,
+    private readonly failure: Deferred.Deferred<void, Error>,
+  ) {}
+
+  static make(child: ChildProcessWithoutNullStreams): Effect.Effect<GlobalPiRpcSession> {
+    return Deferred.make<void, Error>().pipe(
+      Effect.map((failure) => new GlobalPiRpcSession(child, failure)),
     );
-    child.on("exit", (code, signal) => {
-      if (!this.stopped) this.fail(new Error(`Global Pi exited (${code ?? signal ?? "unknown"})`));
-    });
   }
 
-  async prompt(question: string): Promise<void> {
-    if (this.currentTurn) throw new Error("Pi Runtime Session already has an active turn");
-    const turn = deferred();
-    this.currentTurn = turn;
-    this.lastAssistantText = undefined;
-    try {
-      await this.command("prompt", { message: question });
-      await turn.promise;
-    } catch (error) {
-      if (this.currentTurn === turn) this.currentTurn = undefined;
-      throw error;
-    }
-  }
+  readonly readerEffect = Effect.acquireUseRelease(
+    Effect.sync(() => {
+      const onData = (chunk: Buffer) => {
+        Queue.offerUnsafe(this.stdoutQueue, this.readEffect(chunk));
+      };
+      const onEnd = () => {
+        Queue.offerUnsafe(
+          this.stdoutQueue,
+          Effect.suspend(() =>
+            this.stdoutBuffer.length > 0
+              ? this.failEffect(new Error("Pi RPC ended with partial JSONL"))
+              : Effect.void,
+          ),
+        );
+      };
+      const onError = (error: Error) => {
+        Queue.offerUnsafe(
+          this.stdoutQueue,
+          this.failEffect(new Error("Could not start global Pi", { cause: error })),
+        );
+      };
+      const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
+        if (!this.stopped)
+          Queue.offerUnsafe(
+            this.stdoutQueue,
+            this.failEffect(new Error(`Global Pi exited (${code ?? signal ?? "unknown"})`)),
+          );
+      };
+      this.child.stdout.on("data", onData);
+      this.child.stdout.on("end", onEnd);
+      this.child.stderr.resume();
+      this.child.on("error", onError);
+      this.child.on("close", onClose);
+      return { onData, onEnd, onError, onClose };
+    }),
+    () =>
+      Queue.take(this.stdoutQueue).pipe(
+        Effect.flatMap((effect) =>
+          effect.pipe(Effect.catchEager((error) => this.failEffect(error))),
+        ),
+        Effect.forever,
+      ),
+    ({ onData, onEnd, onError, onClose }) =>
+      Effect.sync(() => {
+        this.child.stdout.off("data", onData);
+        this.child.stdout.off("end", onEnd);
+        this.child.off("error", onError);
+        this.child.off("close", onClose);
+      }),
+  );
 
   getLastAssistantText(): string | undefined {
     return this.lastAssistantText;
   }
-
   isAlive(): boolean {
     return (
       !this.failed &&
@@ -109,98 +207,102 @@ class GlobalPiRpcSession implements PiRpcSession {
     );
   }
 
-  async clearQueue(): Promise<void> {
-    await this.command("clear_queue");
-  }
-
-  async abort(): Promise<void> {
-    await this.command("abort");
-  }
-
-  async waitForIdle(): Promise<void> {
-    await this.currentTurn?.promise;
-  }
-
-  async dispose(): Promise<void> {
-    if (this.stopped) return;
-    this.stopped = true;
-    if (this.child.exitCode !== null || this.child.signalCode !== null) {
-      this.fail(new Error("Global Pi stopped"));
-      return;
-    }
-    this.child.kill("SIGTERM");
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    await Promise.race([
-      new Promise<void>((resolve) => this.child.once("exit", () => resolve())),
-      new Promise<void>((resolve) => {
-        timer = setTimeout(() => {
-          this.child.kill("SIGKILL");
-          resolve();
-        }, 1_000);
-      }),
-    ]);
-    clearTimeout(timer);
-    this.fail(new Error("Global Pi stopped"));
-  }
-
-  async command(type: string, fields: Record<string, unknown> = {}): Promise<RpcResponse> {
-    if (this.stopped) throw new Error("Global Pi is stopped");
-    const id = randomUUID();
-    const response = new Promise<RpcResponse>((resolve, reject) => {
-      this.pending.set(id, { resolve, reject });
+  promptEffect(question: string): Effect.Effect<void, Error> {
+    return Effect.gen({ self: this }, function* () {
+      if (this.currentTurn)
+        return yield* Effect.fail(new Error("Pi Runtime Session already has an active turn"));
+      const turn = yield* Deferred.make<void, Error>();
+      this.currentTurn = turn;
+      this.lastAssistantText = undefined;
+      yield* this.commandEffect("prompt", { message: question })
+        .pipe(Effect.andThen(Deferred.await(turn)))
+        .pipe(
+          Effect.tapError(() =>
+            Effect.sync(() => {
+              if (this.currentTurn === turn) this.currentTurn = undefined;
+            }),
+          ),
+        );
     });
-    try {
-      await this.write({ type, id, ...fields });
-    } catch (error) {
-      this.pending.delete(id);
-      const failure = error instanceof Error ? error : new Error(String(error));
-      this.fail(failure);
-      throw failure;
-    }
-    const result = await response;
-    if (!result.success) throw new Error(`Pi RPC command failed: ${type}`);
-    return result;
   }
 
-  private read(chunk: Buffer): void {
-    this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, chunk]);
-    let newline = this.stdoutBuffer.indexOf(0x0a);
-    while (newline !== -1) {
-      const line = this.stdoutBuffer.subarray(0, newline);
-      this.stdoutBuffer = this.stdoutBuffer.subarray(newline + 1);
-      const end = line.at(-1) === 0x0d ? line.length - 1 : line.length;
-      if (end > 0) this.handleLine(line.toString("utf8", 0, end));
-      newline = this.stdoutBuffer.indexOf(0x0a);
-    }
+  clearQueueEffect(): Effect.Effect<void, Error> {
+    return this.commandEffect("clear_queue").pipe(Effect.asVoid);
+  }
+  abortEffect(): Effect.Effect<void, Error> {
+    return this.commandEffect("abort").pipe(Effect.asVoid);
+  }
+  waitForIdleEffect(): Effect.Effect<void, Error> {
+    return Effect.suspend(() =>
+      this.currentTurn ? Deferred.await(this.currentTurn) : Effect.void,
+    );
+  }
+  disposeEffect(): Effect.Effect<void> {
+    return stopChildEffect(this.child).pipe(
+      Effect.andThen(this.failEffect(new Error("Global Pi stopped"))),
+    );
   }
 
-  private handleLine(line: string): void {
-    let message: Record<string, unknown>;
-    try {
-      message = JSON.parse(line) as Record<string, unknown>;
-    } catch (error) {
-      this.fail(new Error("Global Pi emitted invalid JSONL", { cause: error }));
-      return;
-    }
-    if (message.type === "response" && typeof message.id === "string") {
-      const pending = this.pending.get(message.id);
-      if (!pending) return;
-      this.pending.delete(message.id);
-      pending.resolve(message as unknown as RpcResponse);
-      return;
-    }
-    if (message.type === "message_end") this.captureAssistant(message.message);
-    if (message.type === "agent_settled") {
-      const turn = this.currentTurn;
-      this.currentTurn = undefined;
-      turn?.resolve();
-      return;
-    }
-    if (message.type === "extension_ui_request") {
-      void this.answerUiRequest(message).catch((error: unknown) =>
-        this.fail(error instanceof Error ? error : new Error(String(error))),
-      );
-    }
+  commandEffect(
+    type: string,
+    fields: Record<string, unknown> = {},
+  ): Effect.Effect<RpcResponse, Error> {
+    return Effect.gen({ self: this }, function* () {
+      if (this.stopped) return yield* Effect.fail(new Error("Global Pi is stopped"));
+      const id = randomUUID();
+      const pending = yield* Deferred.make<RpcResponse, Error>();
+      this.pending.set(id, pending);
+      yield* this.writeEffect({ type, id, ...fields });
+      const response = yield* Deferred.await(pending);
+      if (!response.success) return yield* Effect.fail(new Error(`Pi RPC command failed: ${type}`));
+      return response;
+    });
+  }
+
+  private readEffect(chunk: Buffer): Effect.Effect<void, Error> {
+    return Effect.gen({ self: this }, function* () {
+      this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, chunk]);
+      let newline = this.stdoutBuffer.indexOf(0x0a);
+      while (newline !== -1) {
+        const line = this.stdoutBuffer.subarray(0, newline);
+        this.stdoutBuffer = this.stdoutBuffer.subarray(newline + 1);
+        if (line.includes(0x0d)) {
+          yield* this.failEffect(new Error("Global Pi emitted non-LF JSONL"));
+          return;
+        }
+        if (line.length > 0) yield* this.handleLineEffect(line.toString("utf8"));
+        newline = this.stdoutBuffer.indexOf(0x0a);
+      }
+    });
+  }
+
+  private handleLineEffect(line: string): Effect.Effect<void, Error> {
+    return Effect.gen({ self: this }, function* () {
+      let message: Record<string, unknown>;
+      try {
+        message = JSON.parse(line) as Record<string, unknown>;
+      } catch (error) {
+        return yield* this.failEffect(
+          new Error("Global Pi emitted invalid JSONL", { cause: error }),
+        );
+      }
+      if (message.type === "response" && typeof message.id === "string") {
+        const pending = this.pending.get(message.id);
+        if (pending) {
+          this.pending.delete(message.id);
+          yield* Deferred.succeed(pending, message as unknown as RpcResponse);
+        }
+        return;
+      }
+      if (message.type === "message_end") this.captureAssistant(message.message);
+      if (message.type === "agent_settled") {
+        const turn = this.currentTurn;
+        this.currentTurn = undefined;
+        if (turn) yield* Deferred.succeed(turn, undefined);
+        return;
+      }
+      if (message.type === "extension_ui_request") yield* this.answerUiRequestEffect(message);
+    });
   }
 
   private captureAssistant(value: unknown): void {
@@ -221,64 +323,77 @@ class GlobalPiRpcSession implements PiRpcSession {
     this.lastAssistantText = text || undefined;
   }
 
-  private async answerUiRequest(request: Record<string, unknown>): Promise<void> {
-    if (typeof request.id !== "string") return;
-    if (request.method === "confirm") {
-      await this.write({ type: "extension_ui_response", id: request.id, confirmed: true });
-      return;
-    }
+  private answerUiRequestEffect(request: Record<string, unknown>): Effect.Effect<void, Error> {
+    if (typeof request.id !== "string") return Effect.void;
+    if (request.method === "confirm")
+      return this.writeEffect({ type: "extension_ui_response", id: request.id, confirmed: true });
     if (request.method === "select" && Array.isArray(request.options)) {
       const value = request.options.find((option): option is string => typeof option === "string");
-      await this.write(
+      return this.writeEffect(
         value === undefined
           ? { type: "extension_ui_response", id: request.id, cancelled: true }
           : { type: "extension_ui_response", id: request.id, value },
       );
-      return;
     }
-    if (request.method === "input" || request.method === "editor") {
-      const value =
-        request.method === "editor" && typeof request.prefill === "string" ? request.prefill : "";
-      await this.write({ type: "extension_ui_response", id: request.id, value });
-    }
+    if (request.method === "input" || request.method === "editor")
+      return this.writeEffect({
+        type: "extension_ui_response",
+        id: request.id,
+        value:
+          request.method === "editor" && typeof request.prefill === "string" ? request.prefill : "",
+      });
+    return Effect.void;
   }
 
-  private write(message: Record<string, unknown>): Promise<void> {
+  private writeEffect(message: Record<string, unknown>): Effect.Effect<void, Error> {
     if (this.stopped || !this.child.stdin.writable)
-      return Promise.reject(new Error("Global Pi is stopped"));
-    return new Promise<void>((resolve, reject) => {
-      this.child.stdin.write(`${JSON.stringify(message)}\n`, (error) => {
-        if (error) reject(error);
-        else resolve();
-      });
+      return Effect.fail(new Error("Global Pi is stopped"));
+    return Effect.callback<void, Error>((resume) => {
+      this.child.stdin.write(`${JSON.stringify(message)}\n`, (error) =>
+        resume(error ? Effect.fail(error) : Effect.void),
+      );
     });
   }
 
-  private fail(error: Error): void {
-    this.failed = true;
-    for (const pending of this.pending.values()) pending.reject(error);
-    this.pending.clear();
-    this.currentTurn?.reject(error);
-    this.currentTurn = undefined;
+  private failEffect(error: Error): Effect.Effect<void> {
+    return Effect.gen({ self: this }, function* () {
+      this.failed = true;
+      for (const pending of this.pending.values()) yield* Deferred.fail(pending, error);
+      this.pending.clear();
+      if (this.currentTurn) yield* Deferred.fail(this.currentTurn, error);
+      this.currentTurn = undefined;
+      yield* Deferred.fail(this.failure, error);
+    });
   }
 }
 
-function deferred(): Deferred {
-  let resolve!: () => void;
-  let reject!: (error: Error) => void;
-  const promise = new Promise<void>((done, fail) => {
-    resolve = done;
-    reject = fail;
+function stopChildEffect(child: ChildProcessWithoutNullStreams): Effect.Effect<void> {
+  return Effect.suspend(() => {
+    if (child.exitCode !== null || child.signalCode !== null) return Effect.void;
+    return Effect.sync(() => child.kill("SIGTERM")).pipe(
+      Effect.andThen(
+        waitForExitEffect(child).pipe(
+          Effect.timeoutOrElse({
+            duration: Duration.seconds(1),
+            orElse: () =>
+              Effect.sync(() => {
+                child.kill("SIGKILL");
+              }),
+          }),
+        ),
+      ),
+    );
   });
-  return { promise, resolve, reject };
 }
 
-function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
-  let timer: ReturnType<typeof setTimeout> | undefined;
-  return Promise.race([
-    promise,
-    new Promise<never>((_resolve, reject) => {
-      timer = setTimeout(() => reject(new Error(message)), timeoutMs);
-    }),
-  ]).finally(() => clearTimeout(timer));
+function waitForExitEffect(child: ChildProcessWithoutNullStreams): Effect.Effect<void> {
+  return Effect.callback<void>((resume, signal) => {
+    const onExit = () => resume(Effect.void);
+    child.once("exit", onExit);
+    return Effect.sync(() => {
+      child.off("exit", onExit);
+      signal.removeEventListener("abort", onAbort);
+    });
+    function onAbort() {}
+  });
 }

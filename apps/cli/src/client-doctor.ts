@@ -1,14 +1,18 @@
 import { constants } from "node:fs";
 import { access, stat } from "node:fs/promises";
-import { createServer } from "node:net";
 import { join } from "node:path";
+import { Effect } from "effect";
 import { ClientApplication } from "./client-application";
 import { ClientConfigStore, type ClientConfig } from "./client-config";
-import type { DoctorReport } from "./doctor";
+import { checkPortEffect, type DoctorCheck, type DoctorReport } from "./doctor";
 import { LineRuntime } from "./line-runtime";
-import { assertPrivateTree, isPrivatePath } from "./private-files";
-import { processLockActive } from "./process-lock";
-import { requireTransportBinary, startConnector, transportBinaryPath } from "./transport/process";
+import { assertPrivateTreeEffect, isPrivatePathEffect } from "./private-files";
+import { processLockActiveEffect } from "./process-lock";
+import {
+  requireTransportBinaryEffect,
+  startConnectorEffect,
+  transportBinaryPath,
+} from "./transport/process";
 
 interface ClientDoctorPaths {
   clientConfigPath: string;
@@ -17,113 +21,199 @@ interface ClientDoctorPaths {
 }
 
 interface ClientDoctorDependencies {
-  inspectLines?: (config: ClientConfig) => Promise<Array<{ id: string; available: boolean }>>;
-  checkPort?: (host: string, port: number) => Promise<boolean>;
+  inspectLines?: (
+    config: ClientConfig,
+  ) => Effect.Effect<Array<{ id: string; available: boolean }>, unknown>;
+  checkPort?: (host: string, port: number) => Effect.Effect<boolean, unknown>;
 }
 
-export async function runClientDoctor(
+type Check = DoctorCheck;
+
+export function runClientDoctorEffect(
   paths: ClientDoctorPaths,
   dependencies: ClientDoctorDependencies = {},
-): Promise<DoctorReport> {
-  const checks: DoctorReport["checks"] = [];
-  const add = (name: string, status: "ok" | "warning" | "error", message: string) =>
-    checks.push({ name, status, message });
+) {
   const store = new ClientConfigStore({ configPath: paths.clientConfigPath });
-  let config: ClientConfig;
-  try {
-    config = await store.read();
-    add("config", "ok", "Client config is valid and private");
-  } catch (error) {
-    add("config", "error", error instanceof Error ? error.message : "Client config is invalid");
-    return { ok: false, checks };
-  }
-  const stateExists = await stat(paths.clientStateRoot).then(
-    () => true,
-    (error) => {
-      if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-      throw error;
-    },
-  );
-  if (!stateExists) add("state", "warning", "Client state is not created until first serve");
-  else {
-    const privateState = await assertPrivateTree(paths.clientStateRoot).then(
-      () => true,
-      () => false,
+  return Effect.gen(function* () {
+    const [configResult, state, transport] = yield* Effect.all(
+      [
+        configCheckEffect(store),
+        stateCheckEffect(paths.clientStateRoot),
+        transportCheckEffect(paths.transportBinary),
+      ],
+      { concurrency: "unbounded" },
     );
-    add(
-      "state",
-      privateState ? "ok" : "error",
-      privateState ? "Client state permissions are private" : "Client state must be 0600/0700",
+    if (!configResult.config)
+      return {
+        ok: false,
+        checks: [configResult.check, state, transport],
+      } satisfies DoctorReport;
+    const config = configResult.config;
+    const [lineKeys, port, lines] = yield* Effect.all(
+      [
+        lineKeyChecksEffect(config),
+        portCheckEffect(paths.clientStateRoot, config, dependencies.checkPort),
+        linesCheckEffect(store, config, paths.transportBinary, dependencies.inspectLines),
+      ],
+      { concurrency: "unbounded" },
     );
-  }
-  try {
-    const binary = await requireTransportBinary(paths.transportBinary ?? transportBinaryPath());
-    await access(binary, constants.X_OK);
-    add("transport", "ok", "Tailcat transport binary is executable");
-  } catch (error) {
-    add("transport", "error", error instanceof Error ? error.message : "Transport unavailable");
-  }
-  for (const line of config.lines) {
-    const privateKey = await isPrivatePath(line.keyPath, false);
-    add(
-      `line-key:${line.id}`,
-      privateKey ? "ok" : "error",
-      privateKey ? "Line key is private" : "Line key is missing or unsafe",
-    );
-  }
-  const running = await processLockActive(join(paths.clientStateRoot, "client.lock"));
-  const portAvailable =
-    running ||
-    (await (dependencies.checkPort ?? checkPort)(config.server.host, config.server.port));
-  add(
-    "port",
-    portAvailable ? "ok" : "error",
-    running
-      ? "Client is running"
-      : portAvailable
-        ? "Client port is available"
-        : "Client port is already in use",
-  );
-  try {
-    const lines = dependencies.inspectLines
-      ? await dependencies.inspectLines(config)
-      : await inspectLines(store, paths.transportBinary);
-    for (const line of lines) {
-      add(
-        `line:${line.id}`,
-        line.available ? "ok" : "error",
-        line.available ? "Owner and Workspaces are reachable" : "Line is unavailable",
-      );
-    }
-  } catch (error) {
-    add("lines", "error", error instanceof Error ? error.message : "Line checks failed");
-  }
-  return { ok: checks.every((check) => check.status !== "error"), checks };
+    const checks = [configResult.check, state, transport, ...lineKeys, port, ...lines];
+    return {
+      ok: checks.every((check) => check.status !== "error"),
+      checks,
+    } satisfies DoctorReport;
+  });
 }
 
-async function inspectLines(
-  store: ClientConfigStore,
-  transportBinary?: string,
-): Promise<Array<{ id: string; available: boolean }>> {
-  const app = new ClientApplication({
-    config: store,
-    createRuntime: (line) =>
-      new LineRuntime({
-        line,
-        startConnector: (connector, signal) => startConnector(connector, transportBinary, signal),
+function configCheckEffect(store: ClientConfigStore) {
+  return store.readEffect().pipe(
+    Effect.map((config) => ({
+      config,
+      check: check("config", "ok", "Client config is valid and private"),
+    })),
+    Effect.catchEager((error) =>
+      Effect.succeed<{ config?: ClientConfig; check: Check }>({
+        check: check("config", "error", message(error, "Client config is invalid")),
       }),
-  });
-  try {
-    return await app.listLines(AbortSignal.timeout(15_000));
-  } finally {
-    await app.close();
-  }
+    ),
+  );
 }
 
-function checkPort(host: string, port: number): Promise<boolean> {
-  return new Promise((resolve) => {
-    const server = createServer();
-    server.once("error", () => resolve(false));
-    server.listen(port, host, () => server.close(() => resolve(true)));
-  });
+function stateCheckEffect(stateRoot: string) {
+  return promise(() => stat(stateRoot)).pipe(
+    Effect.flatMap(() =>
+      assertPrivateTreeEffect(stateRoot).pipe(
+        Effect.as(check("state", "ok", "Client state permissions are private")),
+        Effect.catchEager(() =>
+          Effect.succeed(check("state", "error", "Client state must be 0600/0700")),
+        ),
+      ),
+    ),
+    Effect.catchEager((error) =>
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? Effect.succeed(check("state", "warning", "Client state is not created until first serve"))
+        : Effect.succeed(check("state", "error", message(error, "Client state must be 0600/0700"))),
+    ),
+  );
+}
+
+function transportCheckEffect(binaryPath?: string) {
+  return requireTransportBinaryEffect(binaryPath ?? transportBinaryPath()).pipe(
+    Effect.flatMap((binary) => promise(() => access(binary, constants.X_OK))),
+    Effect.as(check("transport", "ok", "Tailcat transport binary is executable")),
+    Effect.catchEager((error) =>
+      Effect.succeed(check("transport", "error", message(error, "Transport unavailable"))),
+    ),
+  );
+}
+
+function lineKeyChecksEffect(config: ClientConfig) {
+  return Effect.all(
+    config.lines.map((line) =>
+      isPrivatePathEffect(line.keyPath, false).pipe(
+        Effect.map((privateKey) =>
+          check(
+            `line-key:${line.id}`,
+            privateKey ? "ok" : "error",
+            privateKey ? "Line key is private" : "Line key is missing or unsafe",
+          ),
+        ),
+        Effect.catchEager(() =>
+          Effect.succeed(check(`line-key:${line.id}`, "error", "Line key is missing or unsafe")),
+        ),
+      ),
+    ),
+    { concurrency: "unbounded" },
+  );
+}
+
+function portCheckEffect(
+  stateRoot: string,
+  config: ClientConfig,
+  checkPortOverride?: ClientDoctorDependencies["checkPort"],
+) {
+  return processLockActiveEffect(join(stateRoot, "client.lock")).pipe(
+    Effect.flatMap((running) =>
+      (running
+        ? Effect.succeed<boolean>(true)
+        : checkPortOverride
+          ? checkPortOverride(config.server.host, config.server.port)
+          : checkPortEffect(config.server.host, config.server.port)
+      ).pipe(Effect.map((available) => ({ available, running }))),
+    ),
+    Effect.map(({ available, running }) =>
+      check(
+        "port",
+        available ? "ok" : "error",
+        running
+          ? "Client is running"
+          : available
+            ? "Client port is available"
+            : "Client port is already in use",
+      ),
+    ),
+    Effect.catchEager(() =>
+      Effect.succeed(check("port", "error", "Client port is already in use")),
+    ),
+  );
+}
+
+function linesCheckEffect(
+  store: ClientConfigStore,
+  config: ClientConfig,
+  transportBinary: string | undefined,
+  inspectLinesOverride?: ClientDoctorDependencies["inspectLines"],
+) {
+  const lines = inspectLinesOverride
+    ? inspectLinesOverride(config)
+    : inspectLinesEffect(store, transportBinary);
+  return lines.pipe(
+    Effect.map((entries) =>
+      entries.map((line) =>
+        check(
+          `line:${line.id}`,
+          line.available ? "ok" : "error",
+          line.available ? "Owner and Workspaces are reachable" : "Line is unavailable",
+        ),
+      ),
+    ),
+    Effect.catchEager((error) =>
+      Effect.succeed([check("lines", "error", message(error, "Line checks failed"))]),
+    ),
+  );
+}
+
+function inspectLinesEffect(store: ClientConfigStore, transportBinary?: string) {
+  return Effect.scoped(
+    Effect.gen(function* () {
+      const app = yield* Effect.acquireRelease(
+        Effect.sync(
+          () =>
+            new ClientApplication({
+              config: store,
+              createRuntime: (line) =>
+                new LineRuntime({
+                  line,
+                  startConnectorEffect: (connector, signal) =>
+                    startConnectorEffect(connector, transportBinary, signal),
+                }),
+            }),
+        ),
+        (resource) => resource.closeEffect().pipe(Effect.catchEager(() => Effect.void)),
+      );
+      return yield* app
+        .listLinesEffect(AbortSignal.timeout(15_000))
+        .pipe(Effect.map((lines) => lines.map(({ id, available }) => ({ id, available }))));
+    }),
+  );
+}
+
+function promise<A>(try_: () => Promise<A>) {
+  return Effect.tryPromise({ try: try_, catch: (error) => error });
+}
+function check(name: string, status: Check["status"], message: string): Check {
+  return { name, status, message };
+}
+function message(error: unknown, fallback: string): string {
+  return error instanceof Error ? error.message : fallback;
 }

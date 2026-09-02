@@ -1,4 +1,8 @@
 import { expect, test } from "bun:test";
+import { Deferred, Duration, Effect, Exit, Fiber } from "effect";
+
+const sleep = (milliseconds: number) =>
+  new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
 import { LineRuntime, type UpstreamClient, type UpstreamTransport } from "../src/line-runtime";
 
 const line = {
@@ -22,16 +26,15 @@ function fixture(callTool: UpstreamClient["callTool"]) {
   const events: string[] = [];
   const runtime = new LineRuntime({
     line,
-    startConnector: async () => {
-      starts++;
-      return {
-        ready: { ready: true, localAddress: "127.0.0.1:4567" },
-        exited: new Promise(() => {}),
-        close: async () => {
-          events.push("connector-close");
-        },
-      };
-    },
+    startConnectorEffect: () =>
+      Effect.sync(() => {
+        starts++;
+        return {
+          ready: { ready: true, localAddress: "127.0.0.1:4567" },
+          exitedEffect: Effect.never,
+          closeEffect: () => Effect.sync(() => events.push("connector-close")),
+        };
+      }),
     createUpstream: () => ({
       transport: {
         terminateSession: async () => {
@@ -58,11 +61,53 @@ test("uses one verified lazy session and refreshes Workspace metadata", async ()
     return workspaceResult(`Owner ${lists}`);
   });
 
-  expect((await runtime.listWorkspaces()).owner.name).toBe("Owner 2");
-  expect((await runtime.listWorkspaces()).owner.name).toBe("Owner 3");
+  expect((await Effect.runPromise(runtime.listWorkspacesEffect())).owner.name).toBe("Owner 2");
+  expect((await Effect.runPromise(runtime.listWorkspacesEffect())).owner.name).toBe("Owner 3");
   expect(starts()).toBe(1);
-  await runtime.close();
+  await Effect.runPromise(runtime.closeEffect());
 });
+
+test("shares one pending bootstrap across concurrent first requests", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const started = yield* Deferred.make<void>();
+      const release = yield* Deferred.make<void>();
+      let starts = 0;
+      const runtime = new LineRuntime({
+        line,
+        startConnectorEffect: () =>
+          Effect.sync(() => {
+            starts++;
+          }).pipe(
+            Effect.andThen(Deferred.succeed(started, undefined)),
+            Effect.andThen(Deferred.await(release)),
+            Effect.as({
+              ready: { ready: true, localAddress: "127.0.0.1:4567" },
+              exitedEffect: Effect.never,
+              closeEffect: () => Effect.void,
+            }),
+          ),
+        createUpstream: () => ({
+          transport: {},
+          client: {
+            connect: async () => {},
+            callTool: async () => workspaceResult(),
+            close: async () => {},
+          },
+        }),
+      });
+      const requests = yield* Effect.all(
+        [runtime.listWorkspacesEffect(), runtime.listWorkspacesEffect()],
+        { concurrency: "unbounded" },
+      ).pipe(Effect.forkChild);
+
+      yield* Deferred.await(started);
+      expect(starts).toBe(1);
+      yield* Deferred.succeed(release, undefined);
+      expect(yield* Fiber.join(requests)).toHaveLength(2);
+      yield* runtime.closeEffect();
+    }),
+  ));
 
 test("forwards list cancellation without discarding verified session", async () => {
   let lists = 0;
@@ -81,13 +126,13 @@ test("forwards list cancellation without discarding verified session", async () 
     return workspaceResult();
   });
   const controller = new AbortController();
-  const pending = runtime.listWorkspaces(controller.signal);
-  await Bun.sleep(10);
+  const pending = Effect.runPromise(runtime.listWorkspacesEffect(controller.signal));
+  await sleep(10);
   controller.abort();
   await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-  await runtime.listWorkspaces();
+  await Effect.runPromise(runtime.listWorkspacesEffect());
   expect(starts()).toBe(1);
-  await runtime.close();
+  await Effect.runPromise(runtime.closeEffect());
 });
 
 test("never retries a dispatched ask and reconnects only on a later call", async () => {
@@ -101,16 +146,18 @@ test("never retries a dispatched ask and reconnects only on a later call", async
   });
   const controller = new AbortController();
 
-  await expect(runtime.ask("ws", "q", controller.signal)).rejects.toMatchObject({
+  await expect(
+    Effect.runPromise(runtime.askEffect("ws", "q", controller.signal)),
+  ).rejects.toMatchObject({
     code: "LINE_UNAVAILABLE",
   });
   expect(asks).toBe(1);
-  expect(askOptions?.signal).toBe(controller.signal);
+  expect(askOptions?.signal).not.toBe(controller.signal);
   expect(askOptions?.timeout).toBeGreaterThan(125_000);
   expect(starts()).toBe(1);
-  await runtime.listWorkspaces();
+  await Effect.runPromise(runtime.listWorkspacesEffect());
   expect(starts()).toBe(2);
-  await runtime.close();
+  await Effect.runPromise(runtime.closeEffect());
 });
 
 test("preserves safe Gateway errors without dropping the session", async () => {
@@ -123,12 +170,12 @@ test("preserves safe Gateway errors without dropping the session", async () => {
         },
   );
 
-  await expect(runtime.ask("missing", "q")).rejects.toMatchObject({
+  await expect(Effect.runPromise(runtime.askEffect("missing", "q"))).rejects.toMatchObject({
     code: "WORKSPACE_NOT_FOUND",
   });
-  await runtime.listWorkspaces();
+  await Effect.runPromise(runtime.listWorkspacesEffect());
   expect(starts()).toBe(1);
-  await runtime.close();
+  await Effect.runPromise(runtime.closeEffect());
 });
 
 test("rejects Owner mismatch and closes upstream in protocol order", async () => {
@@ -136,9 +183,48 @@ test("rejects Owner mismatch and closes upstream in protocol order", async () =>
     structuredContent: { owner: { id: "other", name: "Other" }, workspaces: [] },
   }));
 
-  await expect(runtime.listWorkspaces()).rejects.toMatchObject({ code: "OWNER_ID_MISMATCH" });
+  await expect(Effect.runPromise(runtime.listWorkspacesEffect())).rejects.toMatchObject({
+    code: "OWNER_ID_MISMATCH",
+  });
   expect(events.indexOf("terminate")).toBeLessThan(events.indexOf("client-close"));
   expect(events).toContain("connector-close");
+});
+
+test("retries after a transient bootstrap failure", async () => {
+  let starts = 0;
+  const runtime = new LineRuntime({
+    line,
+    startConnectorEffect: () =>
+      Effect.tryPromise({
+        try: async () => {
+          starts++;
+          if (starts === 1) throw new Error("temporary network failure");
+          return {
+            ready: { ready: true, localAddress: "127.0.0.1:4567" },
+            exitedEffect: Effect.never,
+            closeEffect: () => Effect.void,
+          };
+        },
+        catch: (error) => error,
+      }),
+    createUpstream: () => ({
+      transport: {},
+      client: {
+        connect: async () => {},
+        callTool: async () => workspaceResult(),
+        close: async () => {},
+      },
+    }),
+  });
+
+  await expect(Effect.runPromise(runtime.listWorkspacesEffect())).rejects.toThrow(
+    "temporary network failure",
+  );
+  await expect(Effect.runPromise(runtime.listWorkspacesEffect())).resolves.toMatchObject({
+    owner: { id: "owner" },
+  });
+  expect(starts).toBe(2);
+  await Effect.runPromise(runtime.closeEffect());
 });
 
 test("aborts and cleans up a cancelled first-request bootstrap", async () => {
@@ -146,40 +232,68 @@ test("aborts and cleans up a cancelled first-request bootstrap", async () => {
   let connectorClosed = false;
   const runtime = new LineRuntime({
     line,
-    startConnector: async (_options, signal) => {
-      await new Promise<void>((_resolve, reject) => {
-        signal?.addEventListener(
-          "abort",
-          () => {
-            bootstrapAborted = true;
-            reject(new DOMException("Aborted", "AbortError"));
-          },
-          { once: true },
-        );
-      });
-      return {
-        ready: { ready: true, localAddress: "127.0.0.1:4567" },
-        exited: Promise.resolve(0),
-        close: async () => {
-          connectorClosed = true;
+    startConnectorEffect: (_options, signal) =>
+      Effect.tryPromise({
+        try: async () => {
+          await new Promise<void>((_resolve, reject) => {
+            signal?.addEventListener(
+              "abort",
+              () => {
+                bootstrapAborted = true;
+                reject(new DOMException("Aborted", "AbortError"));
+              },
+              { once: true },
+            );
+          });
+          return {
+            ready: { ready: true, localAddress: "127.0.0.1:4567" },
+            exitedEffect: Effect.succeed(0),
+            closeEffect: () =>
+              Effect.sync(() => {
+                connectorClosed = true;
+              }),
+          };
         },
-      };
-    },
+        catch: (error) => error,
+      }),
     createUpstream: () => {
       throw new Error("upstream must not start");
     },
   });
   const controller = new AbortController();
-  const pending = runtime.listWorkspaces(controller.signal);
-  await Bun.sleep(10);
+  const pending = Effect.runPromise(runtime.listWorkspacesEffect(controller.signal));
+  await sleep(10);
   controller.abort();
 
   await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-  await Bun.sleep(10);
+  await sleep(10);
   expect(bootstrapAborted).toBe(true);
   expect(connectorClosed).toBe(false);
-  await runtime.close();
+  await Effect.runPromise(runtime.closeEffect());
 });
+
+test("interrupts a never-settling bootstrap during close", () =>
+  Effect.runPromise(
+    Effect.scoped(
+      Effect.gen(function* () {
+        const started = yield* Deferred.make<void>();
+        const runtime = new LineRuntime({
+          line,
+          startConnectorEffect: () =>
+            Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
+          createUpstream: () => {
+            throw new Error("upstream must not start");
+          },
+        });
+        const request = yield* runtime.listWorkspacesEffect().pipe(Effect.forkChild);
+        yield* Deferred.await(started);
+
+        yield* runtime.closeEffect().pipe(Effect.timeout(Duration.seconds(1)));
+
+        expect(Exit.isFailure(yield* Fiber.await(request))).toBe(true);
+      }),
+    ),
+  ));
 
 test("disposes a late bootstrap result after its only waiter cancels", async () => {
   let releaseConnect!: () => void;
@@ -187,13 +301,15 @@ test("disposes a late bootstrap result after its only waiter cancels", async () 
   let clientClosed = false;
   const runtime = new LineRuntime({
     line,
-    startConnector: async () => ({
-      ready: { ready: true, localAddress: "127.0.0.1:4567" },
-      exited: new Promise(() => {}),
-      close: async () => {
-        connectorClosed = true;
-      },
-    }),
+    startConnectorEffect: () =>
+      Effect.succeed({
+        ready: { ready: true, localAddress: "127.0.0.1:4567" },
+        exitedEffect: Effect.never,
+        closeEffect: () =>
+          Effect.sync(() => {
+            connectorClosed = true;
+          }),
+      }),
     createUpstream: () => ({
       transport: {},
       client: {
@@ -209,13 +325,29 @@ test("disposes a late bootstrap result after its only waiter cancels", async () 
     }),
   });
   const controller = new AbortController();
-  const pending = runtime.listWorkspaces(controller.signal);
-  while (!releaseConnect) await Bun.sleep(1);
+  const pending = Effect.runPromise(runtime.listWorkspacesEffect(controller.signal));
+  while (!releaseConnect) await sleep(1);
   controller.abort();
   await expect(pending).rejects.toMatchObject({ name: "AbortError" });
   releaseConnect();
-  await Bun.sleep(10);
+  await sleep(10);
   expect(clientClosed).toBe(true);
   expect(connectorClosed).toBe(true);
-  await runtime.close();
+  await Effect.runPromise(runtime.closeEffect());
 });
+
+test("runs session close as scoped finalizer", () =>
+  Effect.runPromise(
+    Effect.gen(function* () {
+      const { runtime, events } = fixture(async () => workspaceResult());
+      yield* Effect.scoped(
+        Effect.acquireRelease(Effect.succeed(runtime), (resource) =>
+          resource.closeEffect().pipe(Effect.catchEager(() => Effect.void)),
+        ).pipe(
+          Effect.flatMap((resource) => resource.listWorkspacesEffect()),
+          Effect.asVoid,
+        ),
+      );
+      expect(events).toEqual(["terminate", "client-close", "connector-close"]);
+    }),
+  ));

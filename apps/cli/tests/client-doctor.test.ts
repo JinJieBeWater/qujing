@@ -1,9 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
+import { Effect } from "effect";
 import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClientConfigStore } from "../src/client-config";
-import { runClientDoctor } from "../src/client-doctor";
+import { runClientDoctorEffect } from "../src/client-doctor";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -22,23 +23,27 @@ test("checks private Client state, transport, port, and each Line independently"
   await Bun.write(keyPath, "key");
   await chmod(keyPath, 0o600);
   const store = new ClientConfigStore({ configPath });
-  await store.init({ port: 43222 });
-  await store.add({
-    id: "one",
-    expectedOwnerId: "owner",
-    remoteClientId: "remote",
-    serverAddress: "tailcat",
-    remotePort: 43110,
-    keyPath,
-    remoteBearer: "bearer",
-  });
+  await Effect.runPromise(store.initEffect({ port: 43222 }));
+  await Effect.runPromise(
+    store.addEffect({
+      id: "one",
+      expectedOwnerId: "owner",
+      remoteClientId: "remote",
+      serverAddress: "tailcat",
+      remotePort: 43110,
+      keyPath,
+      remoteBearer: "bearer",
+    }),
+  );
 
-  const report = await runClientDoctor(
-    { clientConfigPath: configPath, clientStateRoot: stateRoot, transportBinary },
-    {
-      checkPort: async () => true,
-      inspectLines: async () => [{ id: "one", available: false }],
-    },
+  const report = await Effect.runPromise(
+    runClientDoctorEffect(
+      { clientConfigPath: configPath, clientStateRoot: stateRoot, transportBinary },
+      {
+        checkPort: () => Effect.succeed(true),
+        inspectLines: () => Effect.succeed([{ id: "one", available: false }]),
+      },
+    ),
   );
   expect(report.ok).toBe(false);
   expect(report.checks).toEqual(
@@ -62,10 +67,36 @@ test("reports unsafe Client state permissions", async () => {
   await Bun.write(join(stateRoot, "entry"), "state");
   await chmod(stateRoot, 0o755);
   const store = new ClientConfigStore({ configPath });
-  await store.init();
-  const report = await runClientDoctor(
-    { clientConfigPath: configPath, clientStateRoot: stateRoot, transportBinary },
-    { checkPort: async () => true, inspectLines: async () => [] },
+  await Effect.runPromise(store.initEffect());
+  const report = await Effect.runPromise(
+    runClientDoctorEffect(
+      { clientConfigPath: configPath, clientStateRoot: stateRoot, transportBinary },
+      { checkPort: () => Effect.succeed(true), inspectLines: () => Effect.succeed([]) },
+    ),
   );
   expect(report.checks.find(({ name }) => name === "state")?.status).toBe("error");
+});
+
+test("reports invalid Client config without aborting doctor", async () => {
+  const root = await mkdtemp(join(tmpdir(), "colleague-line-client-doctor-config-"));
+  roots.push(root);
+  const configPath = join(root, "config", "client.json");
+  const stateRoot = join(root, "state");
+  const transportBinary = join(root, "transport");
+  await Bun.write(transportBinary, "binary");
+  await chmod(transportBinary, 0o700);
+  await Effect.runPromise(new ClientConfigStore({ configPath }).initEffect());
+  await Bun.write(configPath, "not-json");
+  if (process.platform !== "win32") await chmod(configPath, 0o600);
+
+  const report = await Effect.runPromise(
+    runClientDoctorEffect({
+      clientConfigPath: configPath,
+      clientStateRoot: stateRoot,
+      transportBinary,
+    }),
+  );
+
+  expect(report.ok).toBe(false);
+  expect(report.checks.find(({ name }) => name === "config")?.status).toBe("error");
 });

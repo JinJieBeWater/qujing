@@ -1,16 +1,17 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Effect } from "effect";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ClientConfigStore } from "../src/client-config";
 import { ConfigStore } from "../src/config";
 import {
-  acknowledgeClientReload,
-  acknowledgeGatewayReload,
-  waitForClientReload,
-  waitForGatewayReload,
+  acknowledgeClientReloadEffect,
+  acknowledgeGatewayReloadEffect,
+  waitForClientReloadEffect,
+  waitForGatewayReloadEffect,
 } from "../src/gateway-reload";
-import { acquireProcessLock } from "../src/process-lock";
+import { acquireProcessLockEffect } from "../src/process-lock";
 
 const roots: string[] = [];
 afterEach(async () =>
@@ -25,14 +26,23 @@ describe("Gateway reload acknowledgement", () => {
       configPath: join(root, "config.json"),
       stateRoot: join(root, "state"),
     });
-    await store.init({ owner: { id: "owner", name: "Owner" } });
-    const release = await acquireProcessLock(join(root, "state", "gateway.lock"));
-    const pending = waitForGatewayReload(store, join(root, "state"), () => true, 1_000);
+    await Effect.runPromise(store.initEffect({ owner: { id: "owner", name: "Owner" } }));
+    const release = await Effect.runPromise(
+      acquireProcessLockEffect(join(root, "state", "gateway.lock")),
+    );
+    const pending = Effect.runPromise(
+      waitForGatewayReloadEffect(store, join(root, "state"), () => true, 1_000),
+    );
     await Bun.sleep(25);
-    await acknowledgeGatewayReload(join(root, "state"), await store.readEffective());
+    await Effect.runPromise(
+      acknowledgeGatewayReloadEffect(
+        join(root, "state"),
+        await Effect.runPromise(store.readEffectiveEffect()),
+      ),
+    );
 
     expect(await pending).toBe(true);
-    await release();
+    await Effect.runPromise(release);
   });
 
   test("returns control for local cleanup if Gateway stops", async () => {
@@ -42,8 +52,12 @@ describe("Gateway reload acknowledgement", () => {
       configPath: join(root, "config.json"),
       stateRoot: join(root, "state"),
     });
-    await store.init({ owner: { id: "owner", name: "Owner" } });
-    expect(await waitForGatewayReload(store, join(root, "state"), () => true, 100)).toBe(false);
+    await Effect.runPromise(store.initEffect({ owner: { id: "owner", name: "Owner" } }));
+    expect(
+      await Effect.runPromise(
+        waitForGatewayReloadEffect(store, join(root, "state"), () => true, 100),
+      ),
+    ).toBe(false);
   });
 });
 
@@ -51,15 +65,19 @@ test("waits until running Client acknowledges exact config", async () => {
   const root = await mkdtemp(join(tmpdir(), "colleague-line-client-reload-"));
   roots.push(root);
   const store = new ClientConfigStore({ configPath: join(root, "client.json") });
-  await store.init();
-  const expected = await store.read();
-  const release = await acquireProcessLock(join(root, "state", "client.lock"));
+  await Effect.runPromise(store.initEffect());
+  const expected = await Effect.runPromise(store.readEffect());
+  const release = await Effect.runPromise(
+    acquireProcessLockEffect(join(root, "state", "client.lock")),
+  );
   try {
-    const pending = waitForClientReload(store, join(root, "state"), expected, 1_000);
+    const pending = Effect.runPromise(
+      waitForClientReloadEffect(store, join(root, "state"), expected, 1_000),
+    );
     await Bun.sleep(10);
-    await acknowledgeClientReload(join(root, "state"), expected);
+    await Effect.runPromise(acknowledgeClientReloadEffect(join(root, "state"), expected));
     expect(await pending).toBe(true);
   } finally {
-    await release();
+    await Effect.runPromise(release);
   }
 });

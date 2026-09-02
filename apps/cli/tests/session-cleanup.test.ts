@@ -2,7 +2,11 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { purgeClientRuntimeSessions, purgeRemovedRuntimeSessions } from "../src/runtime/cleanup";
+import { Effect } from "effect";
+import {
+  purgeClientRuntimeSessionsEffect,
+  purgeRemovedRuntimeSessionsEffect,
+} from "../src/runtime/cleanup";
 import { RuntimeSessionStore } from "../src/runtime/sessions";
 
 const roots: string[] = [];
@@ -15,32 +19,31 @@ describe("runtime session cleanup", () => {
     const root = await mkdtemp(join(tmpdir(), "colleague-line-cleanup-"));
     roots.push(root);
     const store = new RuntimeSessionStore(root);
-    const keep = await store.getOrCreate("active", "docs");
-    const removedClient = await store.getOrCreate("revoked", "docs");
-    const removedWorkspace = await store.getOrCreate("active", "removed");
+    const keep = await Effect.runPromise(store.getOrCreateEffect("active", "docs"));
+    const removedClient = await Effect.runPromise(store.getOrCreateEffect("revoked", "docs"));
+    const removedWorkspace = await Effect.runPromise(store.getOrCreateEffect("active", "removed"));
 
-    const removed = await purgeRemovedRuntimeSessions(
-      { clientIds: ["active"], workspaceIds: ["docs"] },
-      store,
+    const removed = await Effect.runPromise(
+      purgeRemovedRuntimeSessionsEffect({ clientIds: ["active"], workspaceIds: ["docs"] }, store),
     );
 
     expect(removed.map(({ id }) => id).sort()).toEqual(
       [removedClient.id, removedWorkspace.id].sort(),
     );
-    expect((await store.list()).map(({ id }) => id)).toEqual([keep.id]);
+    expect((await Effect.runPromise(store.listEffect())).map(({ id }) => id)).toEqual([keep.id]);
   });
 
   test("removes bindings without deleting Pi-owned session archives", async () => {
     const root = await mkdtemp(join(tmpdir(), "colleague-line-cleanup-"));
     roots.push(root);
     const store = new RuntimeSessionStore(root);
-    await store.getOrCreate("client", "docs");
+    await Effect.runPromise(store.getOrCreateEffect("client", "docs"));
     const archive = join(root, "owner-global-pi-session.jsonl");
     await writeFile(archive, "history");
 
-    await purgeClientRuntimeSessions("client", store);
+    await Effect.runPromise(purgeClientRuntimeSessionsEffect("client", store));
 
-    expect(await store.list()).toEqual([]);
+    expect(await Effect.runPromise(store.listEffect())).toEqual([]);
     expect(await Bun.file(archive).text()).toBe("history");
   });
 });

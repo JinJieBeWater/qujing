@@ -1,18 +1,9 @@
+import { Duration, Effect, Exit, Fiber, Scope, Semaphore } from "effect";
 import type { WorkspaceConfig } from "../config";
 import { ABORT_SETTLE_TIMEOUT_MS, ASK_TIMEOUT_MS } from "../constants";
 import { ColleagueLineError } from "../errors";
-import { startPiRpcSession } from "./pi-rpc";
+import { startManagedPiRpcSessionEffect, type PiRpcSessionEffect } from "./pi-rpc";
 import type { RuntimeSession } from "./sessions";
-
-export interface ManagedPiSession {
-  prompt(question: string): Promise<void>;
-  getLastAssistantText(): string | undefined;
-  isAlive(): boolean;
-  clearQueue(): Promise<void>;
-  abort(): Promise<void>;
-  waitForIdle(): Promise<void>;
-  dispose(): Promise<void>;
-}
 
 export interface PiRuntimeAnswerInput {
   workspace: WorkspaceConfig;
@@ -22,12 +13,12 @@ export interface PiRuntimeAnswerInput {
 }
 
 interface RuntimeEntry {
-  session: ManagedPiSession;
+  session: PiRpcSessionEffect;
   clientId: string;
   workspaceId: string;
+  turnGate: Semaphore.Semaphore;
   busy: boolean;
   waiting: number;
-  tail: Promise<void>;
   lastUsed: number;
 }
 
@@ -35,11 +26,14 @@ interface RuntimeCreation {
   clientId: string;
   workspaceId: string;
   retired: boolean;
-  promise: Promise<RuntimeEntry>;
+  fiber: Fiber.Fiber<RuntimeEntry, unknown>;
 }
 
 export interface PiRuntimeOptions {
-  createSession(workspace: WorkspaceConfig, session: RuntimeSession): Promise<ManagedPiSession>;
+  createSessionEffect(
+    workspace: WorkspaceConfig,
+    session: RuntimeSession,
+  ): Effect.Effect<PiRpcSessionEffect, unknown>;
   maxRuntimes?: number;
   queueCapacity?: number;
   idleTimeoutMs?: number;
@@ -51,345 +45,508 @@ export interface PiRuntimeOptions {
   fatal?: (error: Error) => void;
 }
 
+type EntryDecision =
+  | { readonly kind: "entry"; readonly entry: RuntimeEntry }
+  | { readonly kind: "creation"; readonly creation: RuntimeCreation };
+
+type TurnDecision =
+  | { readonly kind: "running" }
+  | { readonly kind: "retry" }
+  | { readonly kind: "dead" };
+
 export class PiRuntime {
+  readonly self = this;
   private readonly entries = new Map<string, RuntimeEntry>();
   private readonly creations = new Map<string, RuntimeCreation>();
-  private readonly retirements = new Set<Promise<void>>();
-  private readonly interval: ReturnType<typeof setInterval>;
+  private readonly retirements = new Set<Fiber.Fiber<void, unknown>>();
+  private readonly gate = Semaphore.makeUnsafe(1);
+  private readonly scope = Scope.makeUnsafe("parallel");
+  private readonly sweepFiber: Fiber.Fiber<void, never>;
+  private occupied = 0;
   private disposed = false;
 
   constructor(private readonly options: PiRuntimeOptions) {
     process.umask(0o077);
-    this.interval = setInterval(
-      () => {
-        void this.sweepIdle().catch((error: unknown) => {
-          const failure = error instanceof Error ? error : new Error(String(error));
-          if (this.options.fatal) this.options.fatal(failure);
-          else process.exit(1);
-        });
-      },
-      Math.min(options.idleTimeoutMs ?? 600_000, 60_000),
+    this.sweepFiber = Effect.runSync(
+      Effect.forkIn(this.sweepLoopEffect(), this.scope, { startImmediately: true }),
     );
-    this.interval.unref?.();
   }
 
-  static async create(
+  static createEffect(
     options: {
-      piBinary?: string;
       fatal?: (error: Error) => void;
     } = {},
-  ): Promise<PiRuntime> {
-    return new PiRuntime({
-      ...(options.fatal === undefined ? {} : { fatal: options.fatal }),
-      createSession: (workspace, session) =>
-        startPiRpcSession({
-          cwd: workspace.root,
-          sessionId: session.id,
-          ...(options.piBinary === undefined ? {} : { binary: options.piBinary }),
+  ) {
+    return Effect.sync(
+      () =>
+        new PiRuntime({
+          ...(options.fatal === undefined ? {} : { fatal: options.fatal }),
+          createSessionEffect: (workspace, session) =>
+            startManagedPiRpcSessionEffect({
+              cwd: workspace.root,
+              sessionId: session.id,
+            }),
         }),
-    });
+    );
   }
 
-  async answer(input: PiRuntimeAnswerInput): Promise<{ answer: string }> {
-    if (this.disposed) throw new ColleagueLineError("RUNTIME_UNAVAILABLE", "Runtime is stopped");
+  answerEffect(input: PiRuntimeAnswerInput): Effect.Effect<{ answer: string }, unknown> {
     const timeoutSignal = (this.options.createTimeoutSignal ?? AbortSignal.timeout)(
       this.options.askTimeoutMs ?? ASK_TIMEOUT_MS,
     );
     const signal = AbortSignal.any([input.signal, timeoutSignal]);
-    try {
-      signal.throwIfAborted();
+    return Effect.raceFirst(this.runAnswerEffect(input), abortEffect(signal)).pipe(
+      Effect.catch((error) => {
+        if (timeoutSignal.aborted && !input.signal.aborted)
+          return Effect.fail(new ColleagueLineError("RUNTIME_TIMEOUT", "Runtime timed out"));
+        if (input.signal.aborted) return Effect.fail(input.signal.reason);
+        return Effect.fail(error);
+      }),
+    );
+  }
+
+  private runAnswerEffect(input: PiRuntimeAnswerInput): Effect.Effect<{ answer: string }, unknown> {
+    return Effect.gen(this, function* () {
       while (true) {
-        const entry = await waitFor(this.getEntry(input.workspace, input.session), signal);
-        const release = deferred();
-        const previous = entry.tail;
-        entry.tail = previous.then(() => release.promise);
-        if (entry.waiting >= (this.options.queueCapacity ?? 20)) {
-          release.resolve();
-          throw new ColleagueLineError("BUSY", "Runtime Session queue is full");
-        }
-        entry.waiting++;
-        let acquired = false;
-        let running = false;
-        try {
-          await waitFor(previous, signal);
-          acquired = true;
-          entry.waiting--;
-          if (this.entries.get(input.session.id) !== entry) continue;
-          if (!entry.session.isAlive()) {
-            await this.evict(entry);
-            continue;
-          }
-          entry.busy = true;
-          running = true;
-          const answer = await this.runTurn(entry, input.question, signal);
-          return { answer };
-        } finally {
-          if (!acquired) entry.waiting--;
-          if (running) {
-            entry.busy = false;
-            entry.lastUsed = this.now();
-          }
-          release.resolve();
-        }
+        const entry = yield* this.getEntryEffect(input.workspace, input.session);
+        const reserved = yield* this.gate.withPermit(
+          Effect.sync(() => {
+            if (this.entries.get(input.session.id) !== entry) return false;
+            if (entry.waiting >= (this.options.queueCapacity ?? 20))
+              throw new ColleagueLineError("BUSY", "Runtime Session queue is full");
+            entry.waiting++;
+            return true;
+          }),
+        );
+        if (!reserved) continue;
+
+        let waiting = true;
+        const decision = yield* entry.turnGate
+          .withPermit(
+            Effect.uninterruptibleMask((restore) =>
+              Effect.gen(this, function* () {
+                const turn = yield* this.gate.withPermit(
+                  Effect.sync((): TurnDecision => {
+                    entry.waiting--;
+                    waiting = false;
+                    if (this.entries.get(input.session.id) !== entry) return { kind: "retry" };
+                    if (!entry.session.isAlive()) {
+                      this.entries.delete(input.session.id);
+                      return { kind: "dead" };
+                    }
+                    entry.busy = true;
+                    return { kind: "running" };
+                  }),
+                );
+                if (turn.kind === "retry") return turn;
+                if (turn.kind === "dead") {
+                  yield* restore(this.retireRemovedEntryEffect(entry, false));
+                  return turn;
+                }
+                return yield* restore(this.runTurnEffect(entry, input.question)).pipe(
+                  Effect.map((answer) => ({ kind: "running", answer }) as const),
+                  Effect.ensuring(
+                    this.gate.withPermit(
+                      Effect.sync(() => {
+                        entry.busy = false;
+                        entry.lastUsed = this.now();
+                      }),
+                    ),
+                  ),
+                );
+              }),
+            ),
+          )
+          .pipe(
+            Effect.ensuring(
+              Effect.suspend(() => {
+                if (!waiting) return Effect.void;
+                waiting = false;
+                return this.gate.withPermit(
+                  Effect.sync(() => {
+                    entry.waiting--;
+                  }),
+                );
+              }),
+            ),
+          );
+        if (decision.kind !== "running" || !("answer" in decision)) continue;
+        return { answer: decision.answer };
       }
-    } catch (error) {
-      if (timeoutSignal.aborted && !input.signal.aborted) {
-        throw new ColleagueLineError("RUNTIME_TIMEOUT", "Runtime timed out");
-      }
-      if (input.signal.aborted) throw input.signal.reason;
-      throw error;
-    }
-  }
-
-  async disposeRuntimeSession(id: string): Promise<void> {
-    const creation = this.creations.get(id);
-    if (creation) {
-      creation.retired = true;
-      await this.waitForRetiredCreations([creation]);
-    }
-    const entry = this.entries.get(id);
-    if (!entry) return;
-    await this.retireEntry(id, entry, entry.busy || entry.waiting > 0);
-  }
-
-  async disposeClient(clientId: string): Promise<void> {
-    await this.retireCreations((creation) => creation.clientId === clientId);
-    await Promise.all(
-      [...this.entries]
-        .filter(([, entry]) => entry.clientId === clientId)
-        .map(([id]) => this.disposeRuntimeSession(id)),
-    );
-  }
-
-  async disposeWorkspace(workspaceId: string): Promise<void> {
-    await this.retireCreations((creation) => creation.workspaceId === workspaceId);
-    await Promise.all(
-      [...this.entries]
-        .filter(([, entry]) => entry.workspaceId === workspaceId)
-        .map(([id]) => this.disposeRuntimeSession(id)),
-    );
-  }
-
-  async dispose(): Promise<void> {
-    this.disposed = true;
-    clearInterval(this.interval);
-    await this.retireCreations(() => true);
-    await Promise.all([...this.entries.keys()].map((id) => this.disposeRuntimeSession(id)));
-    await Promise.all(this.retirements);
-  }
-
-  private async runTurn(
-    entry: RuntimeEntry,
-    question: string,
-    signal: AbortSignal,
-  ): Promise<string> {
-    try {
-      await this.promptWithAbort(entry.session, question, signal);
-      const answer = entry.session.getLastAssistantText();
-      if (!answer) throw new ColleagueLineError("RUNTIME_FAILED", "Runtime returned no answer");
-      return answer;
-    } catch (error) {
-      if (!entry.session.isAlive()) await this.evict(entry);
-      if (signal.aborted) throw signal.reason;
-      if (error instanceof ColleagueLineError) throw error;
-      throw new ColleagueLineError("RUNTIME_FAILED", "Runtime failed", {
-        cause: error,
-      });
-    }
-  }
-
-  private async evict(entry: RuntimeEntry): Promise<void> {
-    for (const [id, candidate] of this.entries) {
-      if (candidate === entry) {
-        await this.retireEntry(id, entry, false);
-        return;
-      }
-    }
-  }
-
-  private retireEntry(id: string, entry: RuntimeEntry, abort: boolean): Promise<void> {
-    if (this.entries.get(id) !== entry) return Promise.resolve();
-    this.entries.delete(id);
-    let retirement!: Promise<void>;
-    retirement = (async () => {
-      try {
-        if (abort) await this.abortSession(entry.session);
-        await entry.session.dispose();
-      } finally {
-        this.retirements.delete(retirement);
-      }
-    })();
-    this.retirements.add(retirement);
-    return retirement;
-  }
-
-  private async promptWithAbort(
-    session: ManagedPiSession,
-    question: string,
-    signal: AbortSignal,
-  ): Promise<void> {
-    signal.throwIfAborted();
-    let abortTask: Promise<void> | undefined;
-    let rejectAbort: ((error: unknown) => void) | undefined;
-    const aborted = new Promise<never>((_resolve, reject) => {
-      rejectAbort = reject;
     });
-    const onAbort = () => {
-      abortTask = this.abortSession(session);
-      void abortTask.then(() => rejectAbort?.(signal.reason), rejectAbort);
-    };
-    signal.addEventListener("abort", onAbort, { once: true });
-    try {
-      await Promise.race([session.prompt(question), aborted]);
-      if (signal.aborted) {
-        await (abortTask ?? this.abortSession(session));
-        throw signal.reason;
-      }
-    } catch (error) {
-      if (signal.aborted) {
-        await abortTask;
-        throw signal.reason;
-      }
-      throw error;
-    } finally {
-      signal.removeEventListener("abort", onAbort);
-    }
   }
 
-  private async abortSession(session: ManagedPiSession): Promise<void> {
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let completed: boolean;
-    try {
-      completed = await Promise.race([
-        session
-          .clearQueue()
-          .then(() => session.abort())
-          .then(() => session.waitForIdle())
-          .then(() => true),
-        new Promise<false>((resolve) => {
-          timer = setTimeout(
-            () => resolve(false),
-            this.options.abortTimeoutMs ?? ABORT_SETTLE_TIMEOUT_MS,
+  private runTurnEffect(entry: RuntimeEntry, question: string): Effect.Effect<string, unknown> {
+    return this.promptSessionEffect(entry.session, question).pipe(
+      Effect.onInterrupt(() => this.abortSessionEffect(entry.session).pipe(Effect.orDie)),
+      Effect.flatMap(() => {
+        const answer = entry.session.getLastAssistantText();
+        return answer
+          ? Effect.succeed(answer)
+          : Effect.fail(new ColleagueLineError("RUNTIME_FAILED", "Runtime returned no answer"));
+      }),
+      Effect.catch((error) =>
+        Effect.gen(this, function* () {
+          if (!entry.session.isAlive()) yield* this.evictEffect(entry);
+          if (error instanceof ColleagueLineError) return yield* Effect.fail(error);
+          return yield* Effect.fail(
+            new ColleagueLineError("RUNTIME_FAILED", "Runtime failed", { cause: error }),
           );
         }),
-      ]);
-    } catch (error) {
-      clearTimeout(timer);
-      const failure = new Error("Pi Runtime abort failed", { cause: error });
-      if (this.options.fatal) this.options.fatal(failure);
-      else process.exit(1);
-      throw failure;
-    }
-    clearTimeout(timer);
-    if (completed) return;
-    const error = new Error("Pi Runtime did not settle after abort");
-    if (this.options.fatal) this.options.fatal(error);
-    else process.exit(1);
-    throw error;
+      ),
+    );
   }
 
-  private async getEntry(
+  private abortSessionEffect(session: PiRpcSessionEffect): Effect.Effect<void, unknown> {
+    return this.clearQueueSessionEffect(session).pipe(
+      Effect.andThen(this.abortPiSessionEffect(session)),
+      Effect.andThen(this.waitForIdleSessionEffect(session)),
+      Effect.catch((cause) =>
+        this.fatalFailureEffect(new Error("Pi Runtime abort failed", { cause })),
+      ),
+      Effect.timeoutOrElse({
+        duration: Duration.millis(this.options.abortTimeoutMs ?? ABORT_SETTLE_TIMEOUT_MS),
+        orElse: () => this.fatalFailureEffect(new Error("Pi Runtime did not settle after abort")),
+      }),
+    );
+  }
+
+  private getEntryEffect(
     workspace: WorkspaceConfig,
     session: RuntimeSession,
-  ): Promise<RuntimeEntry> {
-    if (this.disposed) throw new ColleagueLineError("RUNTIME_UNAVAILABLE", "Runtime is stopped");
-    const existing = this.entries.get(session.id);
-    if (existing) return existing;
-    const activeCreation = this.creations.get(session.id);
-    if (activeCreation) return activeCreation.promise;
-    let evicted: RuntimeEntry | undefined;
-    if (
-      this.entries.size + this.creations.size + this.retirements.size >=
-      (this.options.maxRuntimes ?? 4)
-    ) {
-      const idle = [...this.entries.entries()]
-        .filter(([, entry]) => !entry.busy && entry.waiting === 0)
-        .sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
-      if (!idle) throw new ColleagueLineError("BUSY", "All Runtime slots are active");
-      this.entries.delete(idle[0]);
-      evicted = idle[1];
-    }
-    const creation = {
-      clientId: session.clientId,
-      workspaceId: session.workspaceId,
-      retired: false,
-      promise: undefined as unknown as Promise<RuntimeEntry>,
-    };
-    this.creations.set(session.id, creation);
-    creation.promise = Promise.resolve().then(() =>
-      this.createEntry(workspace, session, creation, evicted),
+  ): Effect.Effect<RuntimeEntry, unknown> {
+    return Effect.uninterruptibleMask((restore) =>
+      Effect.gen(this, function* () {
+        const decision = yield* this.gate.withPermit(
+          Effect.gen(this, function* () {
+            if (this.disposed)
+              return yield* Effect.fail(
+                new ColleagueLineError("RUNTIME_UNAVAILABLE", "Runtime is stopped"),
+              );
+            const existing = this.entries.get(session.id);
+            if (existing) return { kind: "entry", entry: existing } satisfies EntryDecision;
+            const active = this.creations.get(session.id);
+            if (active) return { kind: "creation", creation: active } satisfies EntryDecision;
+
+            let evicted: RuntimeEntry | undefined;
+            if (this.occupied >= (this.options.maxRuntimes ?? 4)) {
+              const idle = [...this.entries.entries()]
+                .filter(([, entry]) => !entry.busy && entry.waiting === 0)
+                .sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
+              if (!idle)
+                return yield* Effect.fail(
+                  new ColleagueLineError("BUSY", "All Runtime slots are active"),
+                );
+              this.entries.delete(idle[0]);
+              evicted = idle[1];
+            } else {
+              this.occupied++;
+            }
+
+            const creation = {
+              clientId: session.clientId,
+              workspaceId: session.workspaceId,
+              retired: false,
+              fiber: undefined as unknown as Fiber.Fiber<RuntimeEntry, unknown>,
+            };
+            const fiber = yield* Effect.forkIn(
+              Effect.suspend(() => this.createEntryEffect(workspace, session, creation, evicted)),
+              this.scope,
+              { startImmediately: false },
+            );
+            creation.fiber = fiber;
+            this.creations.set(session.id, creation);
+            return { kind: "creation", creation } satisfies EntryDecision;
+          }),
+        );
+        return decision.kind === "entry"
+          ? decision.entry
+          : yield* restore(Fiber.join(decision.creation.fiber));
+      }),
     );
-    return creation.promise;
   }
 
-  private async createEntry(
+  private createEntryEffect(
     workspace: WorkspaceConfig,
     session: RuntimeSession,
     creation: RuntimeCreation,
     evicted?: RuntimeEntry,
-  ): Promise<RuntimeEntry> {
-    let managed: ManagedPiSession | undefined;
-    try {
-      await evicted?.session.dispose();
-      managed = await this.options.createSession(workspace, session);
-      if (creation.retired || this.disposed) {
-        throw new DOMException("Runtime Session creation retired", "AbortError");
-      }
-      const entry = {
-        session: managed,
+  ): Effect.Effect<RuntimeEntry, unknown> {
+    let managed: PiRpcSessionEffect | undefined;
+    let committed = false;
+    return Effect.gen(this, function* () {
+      if (evicted) yield* this.disposeSessionEffect(evicted.session);
+      managed = yield* this.options.createSessionEffect(workspace, session);
+      const started = managed;
+      const entry: RuntimeEntry = {
+        session: started,
         clientId: session.clientId,
         workspaceId: session.workspaceId,
+        turnGate: Semaphore.makeUnsafe(1),
         busy: false,
         waiting: 0,
-        tail: Promise.resolve(),
         lastUsed: this.now(),
       };
-      this.entries.set(session.id, entry);
+      const accepted = yield* this.gate.withPermit(
+        Effect.sync(() => {
+          if (this.creations.get(session.id) !== creation || creation.retired || this.disposed)
+            return false;
+          this.creations.delete(session.id);
+          this.entries.set(session.id, entry);
+          committed = true;
+          return true;
+        }),
+      );
+      if (!accepted) {
+        const late = managed;
+        managed = undefined;
+        yield* this.disposeSessionEffect(late!).pipe(Effect.ignore);
+        return yield* Effect.fail(
+          new DOMException("Runtime Session creation retired", "AbortError"),
+        );
+      }
       managed = undefined;
       return entry;
-    } catch (error) {
-      await managed?.dispose();
-      if (creation.retired || this.disposed) throw error;
-      throw new ColleagueLineError("RUNTIME_UNAVAILABLE", "Could not start Pi Runtime", {
-        cause: error,
-      });
-    } finally {
-      if (this.creations.get(session.id) === creation) this.creations.delete(session.id);
-    }
+    }).pipe(
+      Effect.catch((error) =>
+        Effect.gen(this, function* () {
+          if (managed) {
+            const current = managed;
+            managed = undefined;
+            yield* this.disposeSessionEffect(current).pipe(Effect.ignore);
+          }
+          if (creation.retired || this.disposed) return yield* Effect.fail(error);
+          return yield* Effect.fail(
+            new ColleagueLineError("RUNTIME_UNAVAILABLE", "Could not start Pi Runtime", {
+              cause: error,
+            }),
+          );
+        }),
+      ),
+      Effect.ensuring(
+        this.gate.withPermit(
+          Effect.sync(() => {
+            if (this.creations.get(session.id) === creation) this.creations.delete(session.id);
+            if (!committed) this.occupied--;
+          }),
+        ),
+      ),
+    );
   }
 
-  private async retireCreations(predicate: (creation: RuntimeCreation) => boolean): Promise<void> {
-    const matching = [...this.creations.values()].filter(predicate);
-    for (const creation of matching) creation.retired = true;
-    await this.waitForRetiredCreations(matching);
-  }
-
-  private async waitForRetiredCreations(creations: RuntimeCreation[]): Promise<void> {
-    if (creations.length === 0) return;
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    const completed = await Promise.race([
-      Promise.allSettled(creations.map((creation) => creation.promise)).then(() => true),
-      new Promise<false>((resolve) => {
-        timer = setTimeout(
-          () => resolve(false),
-          this.options.creationRetireTimeoutMs ?? ABORT_SETTLE_TIMEOUT_MS,
+  private evictEffect(entry: RuntimeEntry): Effect.Effect<void, unknown> {
+    return Effect.uninterruptibleMask(() =>
+      Effect.gen(this, function* () {
+        const removed = yield* this.gate.withPermit(
+          Effect.sync(() => {
+            for (const [id, candidate] of this.entries) {
+              if (candidate !== entry) continue;
+              this.entries.delete(id);
+              return true;
+            }
+            return false;
+          }),
         );
+        if (removed) yield* this.retireRemovedEntryEffect(entry, false);
       }),
-    ]);
-    clearTimeout(timer);
-    if (completed) return;
-    const error = new Error("Pi Runtime Session creation did not settle during retirement");
-    if (this.options.fatal) this.options.fatal(error);
-    else process.exit(1);
-    throw error;
+    );
   }
 
-  private async sweepIdle(): Promise<void> {
-    const cutoff = this.now() - (this.options.idleTimeoutMs ?? 600_000);
-    for (const [id, entry] of this.entries) {
-      if (entry.busy || entry.waiting > 0 || entry.lastUsed > cutoff) continue;
-      await this.retireEntry(id, entry, false);
-    }
+  private retireEntryEffect(
+    id: string,
+    entry: RuntimeEntry,
+    abort: boolean,
+  ): Effect.Effect<void, unknown> {
+    return Effect.uninterruptibleMask(() =>
+      Effect.gen(this, function* () {
+        const removed = yield* this.gate.withPermit(
+          Effect.sync(() => {
+            if (this.entries.get(id) !== entry) return false;
+            this.entries.delete(id);
+            return true;
+          }),
+        );
+        if (removed) yield* this.retireRemovedEntryEffect(entry, abort);
+      }),
+    );
+  }
+
+  private retireRemovedEntryEffect(
+    entry: RuntimeEntry,
+    abort: boolean,
+  ): Effect.Effect<void, unknown> {
+    return Effect.uninterruptibleMask((restore) =>
+      Effect.gen(this, function* () {
+        const retirement = (abort ? this.abortSessionEffect(entry.session) : Effect.void).pipe(
+          Effect.andThen(this.disposeSessionEffect(entry.session)),
+          Effect.ensuring(
+            this.gate.withPermit(
+              Effect.sync(() => {
+                this.occupied--;
+              }),
+            ),
+          ),
+        );
+        const fiber = yield* Effect.forkIn(retirement, this.scope, { startImmediately: true });
+        yield* this.gate.withPermit(Effect.sync(() => this.retirements.add(fiber)));
+        const exit = yield* restore(Fiber.await(fiber)).pipe(
+          Effect.ensuring(
+            Fiber.await(fiber).pipe(
+              Effect.andThen(
+                this.gate.withPermit(Effect.sync(() => this.retirements.delete(fiber))),
+              ),
+            ),
+          ),
+        );
+        return yield* exit;
+      }),
+    );
+  }
+
+  disposeClientEffect(clientId: string): Effect.Effect<void, unknown> {
+    return Effect.gen(this, function* () {
+      yield* this.retireCreationsEffect((creation) => creation.clientId === clientId);
+      const entries = yield* this.gate.withPermit(
+        Effect.sync(() => [...this.entries].filter(([, entry]) => entry.clientId === clientId)),
+      );
+      yield* Effect.all(
+        entries.map(([id, entry]) =>
+          this.retireEntryEffect(id, entry, entry.busy || entry.waiting > 0),
+        ),
+        { concurrency: "unbounded" },
+      );
+    });
+  }
+
+  disposeWorkspaceEffect(workspaceId: string): Effect.Effect<void, unknown> {
+    return Effect.gen(this, function* () {
+      yield* this.retireCreationsEffect((creation) => creation.workspaceId === workspaceId);
+      const entries = yield* this.gate.withPermit(
+        Effect.sync(() =>
+          [...this.entries].filter(([, entry]) => entry.workspaceId === workspaceId),
+        ),
+      );
+      yield* Effect.all(
+        entries.map(([id, entry]) =>
+          this.retireEntryEffect(id, entry, entry.busy || entry.waiting > 0),
+        ),
+        { concurrency: "unbounded" },
+      );
+    });
+  }
+
+  private retireCreationsEffect(
+    predicate: (creation: RuntimeCreation) => boolean,
+  ): Effect.Effect<void, unknown> {
+    return Effect.gen(this, function* () {
+      const matching = yield* this.gate.withPermit(
+        Effect.sync(() => {
+          const active = [...this.creations.values()].filter(predicate);
+          for (const creation of active) creation.retired = true;
+          return active;
+        }),
+      );
+      yield* this.waitForRetiredCreationsEffect(matching);
+    });
+  }
+
+  private waitForRetiredCreationsEffect(
+    creations: ReadonlyArray<RuntimeCreation>,
+  ): Effect.Effect<void, unknown> {
+    if (creations.length === 0) return Effect.void;
+    return Fiber.awaitAll(creations.map((creation) => creation.fiber)).pipe(
+      Effect.asVoid,
+      Effect.timeoutOrElse({
+        duration: Duration.millis(this.options.creationRetireTimeoutMs ?? ABORT_SETTLE_TIMEOUT_MS),
+        orElse: () =>
+          this.fatalFailureEffect(
+            new Error("Pi Runtime Session creation did not settle during retirement"),
+          ),
+      }),
+    );
+  }
+
+  disposeEffect(): Effect.Effect<void, unknown> {
+    return Effect.gen(this, function* () {
+      const creations = yield* this.gate.withPermit(
+        Effect.sync(() => {
+          this.disposed = true;
+          const active = [...this.creations.values()];
+          for (const creation of active) creation.retired = true;
+          return active;
+        }),
+      );
+      yield* Fiber.interrupt(this.sweepFiber);
+      yield* this.waitForRetiredCreationsEffect(creations);
+      const entries = yield* this.gate.withPermit(Effect.sync(() => [...this.entries]));
+      yield* Effect.all(
+        entries.map(([id, entry]) =>
+          this.retireEntryEffect(id, entry, entry.busy || entry.waiting > 0),
+        ),
+        { concurrency: "unbounded" },
+      );
+      const retirements = yield* this.gate.withPermit(Effect.sync(() => [...this.retirements]));
+      yield* Fiber.awaitAll(retirements);
+      yield* Scope.close(this.scope, Exit.void);
+    });
+  }
+
+  private sweepLoopEffect(): Effect.Effect<never, never> {
+    return Effect.forever(
+      Effect.sleep(Duration.millis(Math.min(this.options.idleTimeoutMs ?? 600_000, 60_000))).pipe(
+        Effect.andThen(this.sweepIdleEffect()),
+        Effect.catch((error) =>
+          Effect.sync(() => this.reportFatal(error)).pipe(Effect.andThen(Effect.never)),
+        ),
+      ),
+    );
+  }
+
+  private sweepIdleEffect(): Effect.Effect<void, unknown> {
+    return Effect.gen(this, function* () {
+      const cutoff = this.now() - (this.options.idleTimeoutMs ?? 600_000);
+      while (true) {
+        const idle = yield* this.gate.withPermit(
+          Effect.sync(() =>
+            [...this.entries].find(
+              ([, entry]) => !entry.busy && entry.waiting === 0 && entry.lastUsed <= cutoff,
+            ),
+          ),
+        );
+        if (!idle) return;
+        yield* this.retireEntryEffect(idle[0], idle[1], false);
+      }
+    });
+  }
+
+  private promptSessionEffect(session: PiRpcSessionEffect, question: string) {
+    return session.promptEffect(question);
+  }
+
+  private clearQueueSessionEffect(session: PiRpcSessionEffect) {
+    return session.clearQueueEffect();
+  }
+
+  private abortPiSessionEffect(session: PiRpcSessionEffect) {
+    return session.abortEffect();
+  }
+
+  private waitForIdleSessionEffect(session: PiRpcSessionEffect) {
+    return session.waitForIdleEffect();
+  }
+
+  private disposeSessionEffect(session: PiRpcSessionEffect) {
+    return session.disposeEffect();
+  }
+
+  private fatalFailureEffect(error: Error): Effect.Effect<never, Error> {
+    return Effect.sync(() => this.reportFatal(error)).pipe(Effect.andThen(Effect.fail(error)));
+  }
+
+  private reportFatal(error: unknown): void {
+    const failure = error instanceof Error ? error : new Error(String(error));
+    if (this.options.fatal) this.options.fatal(failure);
+    else process.exit(1);
   }
 
   private now(): number {
@@ -397,28 +554,11 @@ export class PiRuntime {
   }
 }
 
-function deferred() {
-  let resolve!: () => void;
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-  });
-  return { promise, resolve };
-}
-
-function waitFor<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
-  if (signal.aborted) return Promise.reject(signal.reason);
-  return new Promise<T>((resolve, reject) => {
-    const onAbort = () => reject(signal.reason);
-    signal.addEventListener("abort", onAbort, { once: true });
-    void promise.then(
-      (value) => {
-        signal.removeEventListener("abort", onAbort);
-        resolve(value);
-      },
-      (error) => {
-        signal.removeEventListener("abort", onAbort);
-        reject(error);
-      },
-    );
+function abortEffect(signal: AbortSignal): Effect.Effect<never, unknown> {
+  return Effect.callback((resume) => {
+    const abort = () => resume(Effect.fail(signal.reason));
+    if (signal.aborted) abort();
+    else signal.addEventListener("abort", abort, { once: true });
+    return Effect.sync(() => signal.removeEventListener("abort", abort));
   });
 }

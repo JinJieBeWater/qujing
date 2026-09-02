@@ -1,11 +1,11 @@
 import { expect, test } from "bun:test";
+import { Effect } from "effect";
 import {
   ClientApplication,
   lineFingerprint,
   type LineRuntimeClient,
 } from "../src/client-application";
 import type { ClientConfig, LineConfig } from "../src/client-config";
-import { LineRuntime } from "../src/line-runtime";
 
 const now = new Date().toISOString();
 const line = (id: string): LineConfig => ({
@@ -21,10 +21,11 @@ const line = (id: string): LineConfig => ({
 });
 
 function runtime(
-  fn: LineRuntime["listWorkspaces"],
-  ask: LineRuntime["ask"] = async (workspace, question) => ({ workspace, answer: question }),
+  listWorkspacesEffect: LineRuntimeClient["listWorkspacesEffect"],
+  askEffect: LineRuntimeClient["askEffect"] = (workspace, question) =>
+    Effect.succeed({ workspace, answer: question }),
 ) {
-  return { listWorkspaces: fn, ask, close: async () => {} } as LineRuntimeClient;
+  return { listWorkspacesEffect, askEffect, closeEffect: () => Effect.void };
 }
 
 test("aggregates Lines in config order and isolates unavailable Line", async () => {
@@ -35,15 +36,15 @@ test("aggregates Lines in config order and isolates unavailable Line", async () 
     lines: [line("one"), line("two")],
   };
   const app = new ClientApplication({
-    config: { read: async () => config },
+    config: { readEffect: () => Effect.succeed(config) },
     createRuntime: (entry) =>
-      runtime(async () =>
+      runtime(() =>
         entry.id === "one"
-          ? { owner: { id: "owner-one", name: "One" }, workspaces: [] }
-          : Promise.reject(new Error("private")),
+          ? Effect.succeed({ owner: { id: "owner-one", name: "One" }, workspaces: [] })
+          : Effect.fail(new Error("private")),
       ),
   });
-  expect(await app.listLines()).toEqual([
+  expect(await Effect.runPromise(app.listLinesEffect())).toEqual([
     { id: "one", available: true, owner: { id: "owner-one", name: "One" }, workspaces: [] },
     { id: "two", available: false, workspaces: [] },
   ]);
@@ -61,34 +62,33 @@ test("routes ask to exact Line and closes only changed runtime", async () => {
   const calls: string[] = [];
   const closed: string[] = [];
   const app = new ClientApplication({
-    config: { read: async () => config },
+    config: { readEffect: () => Effect.succeed(config) },
     createRuntime: (entry) =>
       ({
-        listWorkspaces: async () => ({
-          owner: { id: entry.expectedOwnerId, name: entry.id },
-          workspaces: [],
-        }),
-        ask: async (workspace, question) => {
-          calls.push(entry.id);
-          return { workspace, answer: question };
-        },
-        close: async () => {
-          closed.push(entry.id);
-        },
+        listWorkspacesEffect: () =>
+          Effect.succeed({ owner: { id: entry.expectedOwnerId, name: entry.id }, workspaces: [] }),
+        askEffect: (workspace, question) =>
+          Effect.sync(() => {
+            calls.push(entry.id);
+            return { workspace, answer: question };
+          }),
+        closeEffect: () => Effect.sync(() => closed.push(entry.id)),
       }) as LineRuntimeClient,
   });
-  expect(await app.ask({ line: "two", workspace: "w", question: "q" })).toEqual({
+  expect(
+    await Effect.runPromise(app.askEffect({ line: "two", workspace: "w", question: "q" })),
+  ).toEqual({
     line: "two",
     workspace: "w",
     answer: "q",
   });
   expect(calls).toEqual(["two"]);
   config = { ...config, lines: [{ ...first, remoteBearer: "new" }, second] };
-  await app.reconcile();
+  await Effect.runPromise(app.reconcileEffect());
   expect(closed).toEqual([]);
-  await app.listLines();
+  await Effect.runPromise(app.listLinesEffect());
   config = { ...config, lines: [{ ...config.lines[0]!, remoteBearer: "newer" }, second] };
-  await app.reconcile();
+  await Effect.runPromise(app.reconcileEffect());
   expect(closed).toEqual(["one"]);
 });
 
@@ -101,24 +101,27 @@ test("cancellation reaches every Line", async () => {
   };
   let aborted = 0;
   const app = new ClientApplication({
-    config: { read: async () => config },
+    config: { readEffect: () => Effect.succeed(config) },
     createRuntime: () =>
-      runtime(
-        async (signal) =>
-          new Promise((_resolve, reject) =>
-            signal?.addEventListener(
-              "abort",
-              () => {
-                aborted++;
-                reject(new DOMException("Aborted", "AbortError"));
-              },
-              { once: true },
+      runtime((signal) =>
+        Effect.tryPromise({
+          try: () =>
+            new Promise((_resolve, reject) =>
+              signal?.addEventListener(
+                "abort",
+                () => {
+                  aborted++;
+                  reject(new DOMException("Aborted", "AbortError"));
+                },
+                { once: true },
+              ),
             ),
-          ),
+          catch: (error) => error,
+        }),
       ),
   });
   const controller = new AbortController();
-  const pending = app.listLines(controller.signal);
+  const pending = Effect.runPromise(app.listLinesEffect(controller.signal));
   await Bun.sleep(1);
   controller.abort();
   await expect(pending).rejects.toMatchObject({ name: "AbortError" });
@@ -133,42 +136,45 @@ test("serializes config snapshots so stale runtimes cannot survive reconciliatio
   const closed: string[] = [];
   const app = new ClientApplication({
     config: {
-      read: async () => {
-        reads++;
-        if (reads === 1)
-          await new Promise<void>((resolve) => {
-            releaseFirst = resolve;
-          });
-        return {
-          version: 1,
-          server: { host: "127.0.0.1", port: 1 },
-          localBearerHash: "a".repeat(64),
-          lines: [reads === 1 ? oldLine : newLine],
-        };
-      },
+      readEffect: () =>
+        Effect.tryPromise({
+          try: async () => {
+            reads++;
+            if (reads === 1)
+              await new Promise<void>((resolve) => {
+                releaseFirst = resolve;
+              });
+            return {
+              version: 1,
+              server: { host: "127.0.0.1", port: 1 },
+              localBearerHash: "a".repeat(64),
+              lines: [reads === 1 ? oldLine : newLine],
+            };
+          },
+          catch: (error) => error,
+        }),
     },
     createRuntime: (entry) =>
       ({
-        listWorkspaces: async () => ({
-          owner: { id: entry.expectedOwnerId, name: entry.remoteBearer },
-          workspaces: [],
-        }),
-        ask: async (workspace, question) => ({ workspace, answer: question }),
-        close: async () => {
-          closed.push(entry.remoteBearer);
-        },
+        listWorkspacesEffect: () =>
+          Effect.succeed({
+            owner: { id: entry.expectedOwnerId, name: entry.remoteBearer },
+            workspaces: [],
+          }),
+        askEffect: (workspace, question) => Effect.succeed({ workspace, answer: question }),
+        closeEffect: () => Effect.sync(() => closed.push(entry.remoteBearer)),
       }) satisfies LineRuntimeClient,
   });
 
-  const oldRequest = app.listLines();
+  const oldRequest = Effect.runPromise(app.listLinesEffect());
   while (!releaseFirst) await Bun.sleep(1);
-  const reconcile = app.reconcile();
+  const reconcile = Effect.runPromise(app.reconcileEffect());
   releaseFirst();
   await oldRequest;
   await reconcile;
   expect(closed).toEqual(["one"]);
-  expect((await app.listLines())[0]?.owner?.name).toBe("new");
-  await app.close();
+  expect((await Effect.runPromise(app.listLinesEffect()))[0]?.owner?.name).toBe("new");
+  await Effect.runPromise(app.closeEffect());
 });
 
 test("close is terminal and catches a concurrent runtime acquisition", async () => {
@@ -180,21 +186,22 @@ test("close is terminal and catches a concurrent runtime acquisition", async () 
   };
   let closed = 0;
   const app = new ClientApplication({
-    config: { read: async () => config },
+    config: { readEffect: () => Effect.succeed(config) },
     createRuntime: () =>
       ({
-        listWorkspaces: async () => ({ owner: { id: "owner-one", name: "One" }, workspaces: [] }),
-        ask: async (workspace, question) => ({ workspace, answer: question }),
-        close: async () => {
-          closed++;
-        },
+        listWorkspacesEffect: () =>
+          Effect.succeed({ owner: { id: "owner-one", name: "One" }, workspaces: [] }),
+        askEffect: (workspace, question) => Effect.succeed({ workspace, answer: question }),
+        closeEffect: () => Effect.sync(() => closed++),
       }) satisfies LineRuntimeClient,
   });
 
-  await app.listLines();
-  await app.close();
+  await Effect.runPromise(app.listLinesEffect());
+  await Effect.runPromise(app.closeEffect());
   expect(closed).toBe(1);
-  await expect(app.listLines()).rejects.toMatchObject({ code: "LINE_UNAVAILABLE" });
+  await expect(Effect.runPromise(app.listLinesEffect())).rejects.toMatchObject({
+    code: "LINE_UNAVAILABLE",
+  });
 });
 
 test("retires one Line only after active work settles and blocks old credentials", async () => {
@@ -209,44 +216,48 @@ test("retires one Line only after active work settles and blocks old credentials
   const active = new Promise<void>((resolve) => {
     started = resolve;
   });
-  let settled = false;
-  let closed = false;
+  const retirementEvents: string[] = [];
   const app = new ClientApplication({
-    config: { read: async () => config },
+    config: { readEffect: () => Effect.succeed(config) },
     createRuntime: () => ({
-      listWorkspaces: async () => ({ owner: { id: "owner-one", name: "One" }, workspaces: [] }),
-      ask: async (_workspace, _question, signal) => {
-        started();
-        return new Promise((_resolve, reject) =>
-          signal?.addEventListener(
-            "abort",
-            async () => {
-              await Bun.sleep(10);
-              settled = true;
-              reject(signal.reason);
-            },
-            { once: true },
-          ),
-        );
-      },
-      close: async () => {
-        closed = true;
-      },
+      listWorkspacesEffect: () =>
+        Effect.succeed({ owner: { id: "owner-one", name: "One" }, workspaces: [] }),
+      askEffect: (_workspace, _question, signal) =>
+        Effect.tryPromise({
+          try: () => {
+            started();
+            return new Promise((_resolve, reject) =>
+              signal?.addEventListener(
+                "abort",
+                async () => {
+                  await Bun.sleep(10);
+                  retirementEvents.push("settled");
+                  reject(signal.reason);
+                },
+                { once: true },
+              ),
+            );
+          },
+          catch: (error) => error,
+        }),
+      closeEffect: () => Effect.sync(() => retirementEvents.push("closed")),
     }),
   });
-  const pending = app.ask({ line: "one", workspace: "docs", question: "wait" });
+  const pending = Effect.runPromise(
+    app.askEffect({ line: "one", workspace: "docs", question: "wait" }),
+  );
   await active;
-  await app.retireLine(oldLine.id, lineFingerprint(oldLine));
-  expect({ settled, closed }).toEqual({ settled: true, closed: true });
+  await Effect.runPromise(app.retireLineEffect(oldLine.id, lineFingerprint(oldLine)));
+  expect(retirementEvents).toEqual(["settled", "closed"]);
   await expect(pending).rejects.toMatchObject({ code: "LINE_UNAVAILABLE" });
   await expect(
-    app.ask({ line: "one", workspace: "docs", question: "blocked" }),
+    Effect.runPromise(app.askEffect({ line: "one", workspace: "docs", question: "blocked" })),
   ).rejects.toMatchObject({ code: "LINE_UNAVAILABLE" });
 
   config = { ...config, lines: [{ ...oldLine, remoteBearer: "new" }] };
-  await app.reconcile();
-  expect((await app.listLines())[0]?.available).toBe(true);
-  await app.close();
+  await Effect.runPromise(app.reconcileEffect());
+  expect((await Effect.runPromise(app.listLinesEffect()))[0]?.available).toBe(true);
+  await Effect.runPromise(app.closeEffect());
 });
 
 test("does not complete Line retirement when runtime close fails", async () => {
@@ -258,20 +269,19 @@ test("does not complete Line retirement when runtime close fails", async () => {
     lines: [current],
   };
   const app = new ClientApplication({
-    config: { read: async () => config },
+    config: { readEffect: () => Effect.succeed(config) },
     createRuntime: () => ({
-      listWorkspaces: async () => ({ owner: { id: "owner-one", name: "One" }, workspaces: [] }),
-      ask: async (workspace, question) => ({ workspace, answer: question }),
-      close: async () => {
-        throw new Error("close failed");
-      },
+      listWorkspacesEffect: () =>
+        Effect.succeed({ owner: { id: "owner-one", name: "One" }, workspaces: [] }),
+      askEffect: (workspace, question) => Effect.succeed({ workspace, answer: question }),
+      closeEffect: () => Effect.fail(new Error("close failed")),
     }),
   });
-  await app.listLines();
-  await expect(app.retireLine(current.id, lineFingerprint(current))).rejects.toThrow(
-    "Line retirement failed",
-  );
+  await Effect.runPromise(app.listLinesEffect());
   await expect(
-    app.ask({ line: "one", workspace: "docs", question: "blocked" }),
+    Effect.runPromise(app.retireLineEffect(current.id, lineFingerprint(current))),
+  ).rejects.toThrow("Line retirement failed");
+  await expect(
+    Effect.runPromise(app.askEffect({ line: "one", workspace: "docs", question: "blocked" })),
   ).rejects.toMatchObject({ code: "LINE_UNAVAILABLE" });
 });

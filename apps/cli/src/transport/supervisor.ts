@@ -1,44 +1,46 @@
-import { readFile } from "node:fs/promises";
 import { join } from "node:path";
-import { z } from "zod";
-import { securePrivatePath, writePrivateJson } from "../private-files";
+import { Effect, Exit, Scope, Semaphore } from "effect";
+import { securePrivatePathEffect, writePrivateJsonEffect } from "../private-files";
+import { decode, TailcatState as TailcatStateSchema } from "../schemas";
 import {
-  startServerTransport,
+  startServerTransportEffect,
   type ServerTransportOptions,
   type TransportProcess,
 } from "./process";
 
-const stateSchema = z.object({
-  serverAddress: z.string().min(1),
-  remotePort: z.number().int().min(1).max(65_535),
-});
-export type TailcatState = z.infer<typeof stateSchema>;
-
-export async function readTailcatState(stateRoot: string): Promise<TailcatState | undefined> {
-  try {
-    return stateSchema.parse(
-      JSON.parse(await readFile(join(stateRoot, "transport", "server.json"), "utf8")),
-    );
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
-    throw error;
-  }
-}
-
+const parseTailcatState = decode(TailcatStateSchema);
+export const readTailcatStateEffect = (stateRoot: string) =>
+  Effect.tryPromise({
+    try: async () =>
+      parseTailcatState(
+        JSON.parse(await Bun.file(join(stateRoot, "transport", "server.json")).text()),
+      ),
+    catch: (error) => error,
+  }).pipe(
+    Effect.catchEager((error) =>
+      (error as NodeJS.ErrnoException).code === "ENOENT"
+        ? Effect.succeed(undefined)
+        : Effect.fail(error),
+    ),
+  );
 export interface TailcatSupervisorOptions {
   stateRoot: string;
   port: number;
   binary?: string;
-  start?: (options: ServerTransportOptions, binary?: string) => Promise<TransportProcess>;
+  startEffect?: (
+    options: ServerTransportOptions,
+    binary?: string,
+  ) => Effect.Effect<TransportProcess, unknown>;
   onFatal?: (error: Error) => void;
 }
 
 export class TailcatSupervisor {
   private readonly statePath: string;
   private readonly keyPath: string;
+  private readonly gate = Semaphore.makeUnsafe(1);
+  private readonly scope = Scope.makeUnsafe("sequential");
   private process: TransportProcess | undefined;
   private signature?: string;
-  private tail = Promise.resolve();
   private closed = false;
 
   constructor(private readonly options: TailcatSupervisorOptions) {
@@ -46,69 +48,84 @@ export class TailcatSupervisor {
     this.keyPath = join(options.stateRoot, "transport", "server-key.json");
   }
 
-  reload(allowedKeys: string[]): Promise<TailcatState> {
+  reloadEffect(allowedKeys: string[]) {
     const keys = [...new Set(allowedKeys)].sort();
     const signature = JSON.stringify(keys);
-    const operation = this.tail.then(async () => {
-      if (this.closed) throw new Error("Tailcat transport is closed");
-      if (signature === this.signature) return this.state();
-      const previousProcess = this.process;
-      this.process = undefined;
-      await previousProcess?.close();
-      const process = await (this.options.start ?? startServerTransport)(
-        {
+    return this.gate.withPermits(1)(
+      Effect.gen({ self: this }, function* () {
+        if (this.closed) return yield* Effect.fail(new Error("Tailcat transport is closed"));
+        if (signature === this.signature) return yield* this.stateEffect();
+        const previousProcess = this.process;
+        this.process = undefined;
+        yield* closeEffect(previousProcess);
+        const transportOptions = {
           keyPath: this.keyPath,
           port: this.options.port,
           allowedKeys: keys,
-        },
-        this.options.binary,
-      );
-      const serverAddress = process.ready.serverAddress;
-      if (!serverAddress) {
-        await process.close();
-        throw new Error("Tailcat transport returned no server address");
-      }
-      const previous = await this.readState();
-      if (previous && previous.serverAddress !== serverAddress) {
-        await process.close();
-        throw new Error("Tailcat server address changed despite persistent key");
-      }
-      const state = { serverAddress, remotePort: this.options.port };
-      await securePrivatePath(this.keyPath, false);
-      await writePrivateJson(this.statePath, state);
-      this.process = process;
-      this.signature = signature;
-      void process.exited.then((code) => {
-        if (this.closed || this.process !== process) return;
-        (this.options.onFatal ?? defaultFatal)(new Error(`Tailcat transport exited (${code})`));
-      });
-      return state;
-    });
-    this.tail = operation.then(
-      () => {},
-      () => {},
+        };
+        const transport = yield* this.options.startEffect
+          ? this.options.startEffect(transportOptions, this.options.binary)
+          : startServerTransportEffect(transportOptions, this.options.binary);
+        const serverAddress = transport.ready.serverAddress;
+        if (!serverAddress) {
+          yield* closeEffect(transport);
+          return yield* Effect.fail(new Error("Tailcat transport returned no server address"));
+        }
+        const previous = yield* readTailcatStateEffect(this.options.stateRoot);
+        if (previous && previous.serverAddress !== serverAddress) {
+          yield* closeEffect(transport);
+          return yield* Effect.fail(
+            new Error("Tailcat server address changed despite persistent key"),
+          );
+        }
+        const state = { serverAddress, remotePort: this.options.port };
+        yield* securePrivatePathEffect(this.keyPath, false);
+        yield* writePrivateJsonEffect(this.statePath, state);
+        this.process = transport;
+        this.signature = signature;
+        yield* this.watchEffect(transport);
+        return state;
+      }),
     );
-    return operation;
   }
 
-  async state(): Promise<TailcatState> {
-    const state = await this.readState();
-    if (!state) throw new Error("Tailcat server has not started");
-    return state;
+  stateEffect() {
+    return readTailcatStateEffect(this.options.stateRoot).pipe(
+      Effect.flatMap((state) =>
+        state ? Effect.succeed(state) : Effect.fail(new Error("Tailcat server has not started")),
+      ),
+    );
+  }
+  closeEffect() {
+    return this.gate.withPermits(1)(
+      Effect.gen({ self: this }, function* () {
+        this.closed = true;
+        yield* closeEffect(this.process);
+        this.process = undefined;
+        yield* Scope.close(this.scope, Exit.void);
+      }),
+    );
   }
 
-  async close(): Promise<void> {
-    this.closed = true;
-    await this.tail;
-    await this.process?.close();
-    this.process = undefined;
-  }
-
-  private async readState(): Promise<TailcatState | undefined> {
-    return readTailcatState(this.options.stateRoot);
+  private watchEffect(transport: TransportProcess) {
+    return Effect.forkIn(
+      transport.exitedEffect.pipe(
+        Effect.flatMap((code) =>
+          Effect.sync(() => {
+            if (!this.closed && this.process === transport)
+              (this.options.onFatal ?? defaultFatal)(
+                new Error(`Tailcat transport exited (${code})`),
+              );
+          }),
+        ),
+      ),
+      this.scope,
+    );
   }
 }
 
+const closeEffect = (transport?: TransportProcess) =>
+  transport ? transport.closeEffect().pipe(Effect.catchEager(() => Effect.void)) : Effect.void;
 function defaultFatal(): void {
   process.exit(1);
 }

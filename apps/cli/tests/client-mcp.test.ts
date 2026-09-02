@@ -4,7 +4,9 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { ClientApplication, type LineRuntimeClient } from "../src/client-application";
 import type { ClientConfig, LineConfig } from "../src/client-config";
 import { createClientMcp, type ClientMcpOptions } from "../src/client-mcp";
+import { ColleagueLineError } from "../src/errors";
 import type { McpGateway } from "../src/mcp";
+import { Effect } from "effect";
 
 const resources: Array<{ mcp: McpGateway; server: ReturnType<typeof Bun.serve>; client?: Client }> =
   [];
@@ -14,7 +16,7 @@ afterEach(async () => {
       server.stop(true);
       await Promise.all([
         Promise.race([client?.close().catch(() => {}), Bun.sleep(100)]),
-        Promise.race([mcp.close().catch(() => {}), Bun.sleep(100)]),
+        Promise.race([Effect.runPromise(mcp.closeEffect).catch(() => {}), Bun.sleep(100)]),
       ]);
     }),
   );
@@ -46,13 +48,15 @@ function fixture(
     lines: [line],
   };
   const app = new ClientApplication({
-    config: { read: async () => config },
+    config: { readEffect: () => Effect.succeed(config) },
     createRuntime:
       options.createRuntime ??
       (() => ({
-        listWorkspaces: async () => ({ owner: { id: "owner", name: "Owner" }, workspaces: [] }),
-        ask: async (workspace, question) => ({ workspace, answer: `answer:${question}` }),
-        close: async () => {},
+        listWorkspacesEffect: () =>
+          Effect.succeed({ owner: { id: "owner", name: "Owner" }, workspaces: [] }),
+        askEffect: (workspace, question) =>
+          Effect.succeed({ workspace, answer: `answer:${question}` }),
+        closeEffect: () => Effect.void,
       })),
   });
   let mcp!: McpGateway;
@@ -64,8 +68,10 @@ function fixture(
   mcp = createClientMcp({
     app,
     config: {
-      authenticateLocal: async (bearer) =>
-        bearer === "local" ? { id: "local-agent", credentialVersion: "v1" } : undefined,
+      authenticateLocalEffect: (bearer) =>
+        Effect.succeed(
+          bearer === "local" ? { id: "local-agent", credentialVersion: "v1" } : undefined,
+        ),
     },
     allowedHosts: ["127.0.0.1"],
     allowedOrigins: [],
@@ -84,6 +90,12 @@ test("Client MCP exposes only Client tools with local auth", async () => {
   await client.connect(transport as Parameters<Client["connect"]>[0]);
   const tools = (await client.listTools()).tools;
   expect(tools.map(({ name }) => name)).toEqual(["list_lines", "ask"]);
+  expect(tools.find(({ name }) => name === "list_lines")?.annotations).toEqual({
+    readOnlyHint: true,
+    idempotentHint: true,
+    destructiveHint: false,
+    openWorldHint: false,
+  });
   expect(tools.find(({ name }) => name === "ask")?.annotations).toEqual({
     readOnlyHint: false,
     idempotentHint: false,
@@ -113,6 +125,14 @@ test("Client MCP exposes only Client tools with local auth", async () => {
 
 test("Agent MCP cancellation reaches the selected Line runtime", async () => {
   let cancelled = false;
+  let markStarted!: () => void;
+  const started = new Promise<void>((resolve) => {
+    markStarted = resolve;
+  });
+  let markCancelled!: () => void;
+  const cancellationObserved = new Promise<void>((resolve) => {
+    markCancelled = resolve;
+  });
   const config: ClientConfig = {
     version: 1,
     server: { host: "127.0.0.1", port: 1 },
@@ -120,22 +140,29 @@ test("Agent MCP cancellation reaches the selected Line runtime", async () => {
     lines: [line],
   };
   const app = new ClientApplication({
-    config: { read: async () => config },
+    config: { readEffect: () => Effect.succeed(config) },
     createRuntime: () =>
       ({
-        listWorkspaces: async () => ({ owner: { id: "owner", name: "Owner" }, workspaces: [] }),
-        ask: async (_workspace, _question, signal) =>
-          new Promise((_resolve, reject) => {
-            signal?.addEventListener(
-              "abort",
-              () => {
-                cancelled = true;
-                reject(signal.reason);
-              },
-              { once: true },
-            );
+        listWorkspacesEffect: () =>
+          Effect.succeed({ owner: { id: "owner", name: "Owner" }, workspaces: [] }),
+        askEffect: (_workspace, _question, signal) =>
+          Effect.tryPromise({
+            try: () =>
+              new Promise((_resolve, reject) => {
+                markStarted();
+                signal?.addEventListener(
+                  "abort",
+                  () => {
+                    cancelled = true;
+                    markCancelled();
+                    reject(signal.reason);
+                  },
+                  { once: true },
+                );
+              }),
+            catch: (error) => error,
           }),
-        close: async () => {},
+        closeEffect: () => Effect.void,
       }) satisfies LineRuntimeClient,
   });
   let mcp!: McpGateway;
@@ -147,8 +174,10 @@ test("Agent MCP cancellation reaches the selected Line runtime", async () => {
   mcp = createClientMcp({
     app,
     config: {
-      authenticateLocal: async (bearer) =>
-        bearer === "local" ? { id: "local-agent", credentialVersion: "v1" } : undefined,
+      authenticateLocalEffect: (bearer) =>
+        Effect.succeed(
+          bearer === "local" ? { id: "local-agent", credentialVersion: "v1" } : undefined,
+        ),
     },
     allowedHosts: ["127.0.0.1"],
     allowedOrigins: [],
@@ -166,12 +195,42 @@ test("Agent MCP cancellation reaches the selected Line runtime", async () => {
     undefined,
     { signal: controller.signal },
   );
-  await Bun.sleep(10);
+  await started;
   controller.abort();
 
   await expect(pending).rejects.toBeDefined();
-  await Bun.sleep(10);
+  await cancellationObserved;
   expect(cancelled).toBe(true);
+});
+
+test("forwards raw questions to the Owner Line for domain validation", async () => {
+  let received: string | undefined;
+  const { mcp, server, url } = fixture({
+    createRuntime: () => ({
+      listWorkspacesEffect: () =>
+        Effect.succeed({ owner: { id: "owner", name: "Owner" }, workspaces: [] }),
+      askEffect: (_workspace, question) =>
+        Effect.sync(() => {
+          received = question;
+          throw new ColleagueLineError("INVALID_QUESTION", "Remote request failed");
+        }),
+      closeEffect: () => Effect.void,
+    }),
+  });
+  const transport = new StreamableHTTPClientTransport(url, {
+    requestInit: { headers: { Authorization: "Bearer local" } },
+  });
+  const client = new Client({ name: "test", version: "1" });
+  resources[0] = { mcp, server, client };
+  await client.connect(transport as Parameters<Client["connect"]>[0]);
+
+  const result = await client.callTool({
+    name: "ask",
+    arguments: { line: "line", workspace: "ws", question: "   " },
+  });
+
+  expect(received).toBe("   ");
+  expect(result).toMatchObject({ isError: true });
 });
 
 test("Agent MCP lists two Lines independently and routes each ask exactly", async () => {
@@ -192,18 +251,19 @@ test("Agent MCP lists two Lines independently and routes each ask exactly", asyn
   const { mcp, server, url } = fixture({
     config,
     createRuntime: (entry) => ({
-      listWorkspaces: async () => {
-        if (entry.id === "second") throw new Error("offline");
-        return {
-          owner: { id: entry.expectedOwnerId, name: "Owner" },
-          workspaces: [{ id: "docs", name: "Docs", summary: "Docs", available: true }],
-        };
-      },
-      ask: async (workspace, question) => {
-        routed.push(entry.id);
-        return { workspace, answer: `${entry.id}:${question}` };
-      },
-      close: async () => {},
+      listWorkspacesEffect: () =>
+        entry.id === "second"
+          ? Effect.fail(new Error("offline"))
+          : Effect.succeed({
+              owner: { id: entry.expectedOwnerId, name: "Owner" },
+              workspaces: [{ id: "docs", name: "Docs", summary: "Docs", available: true }],
+            }),
+      askEffect: (workspace, question) =>
+        Effect.sync(() => {
+          routed.push(entry.id);
+          return { workspace, answer: `${entry.id}:${question}` };
+        }),
+      closeEffect: () => Effect.void,
     }),
   });
   const transport = new StreamableHTTPClientTransport(url, {

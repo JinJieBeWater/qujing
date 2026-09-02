@@ -72,7 +72,7 @@ colleague-line client serve
 colleague-line client line key-create jason
 ```
 
-只把输出的 public key 发给 Owner。Owner 注册一个 remote Client identity：
+只把输出的 public key 发给 Owner。Owner 注册一个 remote Gateway Client identity：
 
 ```bash
 colleague-line gateway client add alice-jason --tailcat-key 'nodekey:...'
@@ -99,8 +99,9 @@ printf '%s' '<remote-bearer>' | colleague-line client line add jason \
 - Gateway、Client 和临时 Connectors 只绑定 loopback；Tailcat 只转发 Gateway port。
 - Agent 本机 bearer 与每条 Line 的 Tailcat key、remote bearer 均独立。
 - Client 每次重建 upstream MCP session 都验证 expected Owner ID。
-- Gateway 直接运行 Owner 的全局 `pi --mode rpc --approve`，使用默认模型、认证、settings、skills、extensions、builtin tools 和 `~/.pi/agent/sessions/`。
-- 每个已配对 remote Client 因此获得 Owner-level Pi 能力，包括 shell、文件修改，以及 Pi 选择访问时的 Workspace 外内容。
+- Gateway 直接运行 Owner 的完整全局 `pi --mode rpc --approve`，使用默认模型、认证、settings、skills、extensions、builtin tools 和 `~/.pi/agent/sessions/`。
+- Colleague Line 只附加固定咨询提示词，引导 Pi 按问题获取相关上下文并保持只读行为；它不替换或过滤 Owner 的 Pi 配置。提示词是行为指导，不是安全边界。
+- 每个已配对 remote Gateway Client 因此获得 Owner-level Pi 能力，包括 shell、文件修改，以及 Pi 选择访问时的 Workspace 外内容。
 - Runtime Session ID 仍按 remote Gateway Client 与 Workspace 隔离。撤销只删除绑定，不删除 Owner 的全局 Pi archive。
 - Colleague Line 默认日志不记录凭据、地址、roots、问题、回答或文件内容。
 

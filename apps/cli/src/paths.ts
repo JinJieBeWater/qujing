@@ -5,46 +5,32 @@ export function defaultPaths(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ) {
-  if (platform === "win32") {
-    const configHome = env.APPDATA ?? join(homedir(), "AppData", "Roaming");
-    const dataHome = env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
-    return {
-      configPath: join(configHome, "ColleagueLine", "config.json"),
-      stateRoot: join(dataHome, "ColleagueLine"),
-    };
-  }
-  return {
-    configPath: join(
-      env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
-      "colleague-line",
-      "config.json",
-    ),
-    stateRoot: join(env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "colleague-line"),
-  };
+  const roots = defaultRoots(env, platform);
+  return { configPath: join(roots.config, "config.json"), stateRoot: roots.state };
 }
 
 export function defaultClientPaths(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ) {
+  const roots = defaultRoots(env, platform);
+  return {
+    clientConfigPath: join(roots.config, "client.json"),
+    clientStateRoot: join(roots.state, "client"),
+  };
+}
+
+function defaultRoots(env: NodeJS.ProcessEnv, platform: NodeJS.Platform) {
   if (platform === "win32") {
     const configHome = env.APPDATA ?? join(homedir(), "AppData", "Roaming");
     const dataHome = env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
     return {
-      clientConfigPath: join(configHome, "ColleagueLine", "client.json"),
-      clientStateRoot: join(dataHome, "ColleagueLine", "client"),
+      config: join(configHome, "ColleagueLine"),
+      state: join(dataHome, "ColleagueLine"),
     };
   }
   return {
-    clientConfigPath: join(
-      env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
-      "colleague-line",
-      "client.json",
-    ),
-    clientStateRoot: join(
-      env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"),
-      "colleague-line",
-      "client",
-    ),
+    config: join(env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "colleague-line"),
+    state: join(env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "colleague-line"),
   };
 }

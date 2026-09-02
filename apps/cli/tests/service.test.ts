@@ -1,5 +1,6 @@
 import { describe, expect, test } from "bun:test";
-import { removeUserService, serviceDefinition } from "../src/service";
+import { Effect } from "effect";
+import { removeUserServiceEffect, serviceDefinition } from "../src/service";
 
 describe("role user service definitions", () => {
   test("creates separate restartable macOS LaunchAgents", () => {
@@ -38,14 +39,12 @@ describe("role user service definitions", () => {
 
 test("removes Linux unit before daemon reload", async () => {
   const events: string[] = [];
-  await removeUserService("client", "linux", {
-    run: async (command) => {
-      events.push(command.join(" "));
-    },
-    remove: async () => {
-      events.push("remove");
-    },
-  });
+  await Effect.runPromise(
+    removeUserServiceEffect("client", "linux", {
+      run: (command) => Effect.sync(() => void events.push(command.join(" "))),
+      remove: () => Effect.sync(() => void events.push("remove")),
+    }),
+  );
   expect(events).toEqual([
     "systemctl --user disable --now colleague-line-client.service",
     "remove",

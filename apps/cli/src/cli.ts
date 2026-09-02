@@ -1,26 +1,34 @@
 #!/usr/bin/env bun
 
 import { resolve, join } from "node:path";
+import { Deferred, Effect, Scope } from "effect";
 import { ClientConfigStore, type LineConfig, type LineInput } from "./client-config";
 import {
-  cancelClientLineRetirement,
-  requestClientLineRetirement,
-  waitForClientLineRetirement,
+  cancelClientLineRetirementEffect,
+  requestClientLineRetirementEffect,
+  waitForClientLineRetirementEffect,
 } from "./client-control";
-import { runClientDoctor } from "./client-doctor";
-import { startClientServer } from "./client-server";
-import { ConfigStore } from "./config";
-import { runDoctor, type DoctorReport } from "./doctor";
-import { waitForClientReload, waitForGatewayReload } from "./gateway-reload";
+import { runClientDoctorEffect } from "./client-doctor";
+import { startClientServerEffect } from "./client-server";
+import { ConfigStore, type Config } from "./config";
+import { runDoctorEffect, type DoctorReport } from "./doctor";
+import { waitForClientReloadEffect, waitForGatewayReloadEffect } from "./gateway-reload";
 import { LineRuntime } from "./line-runtime";
 import { defaultClientPaths, defaultPaths } from "./paths";
-import { acquireProcessLock, processLockActive } from "./process-lock";
-import { purgeClientRuntimeSessions, purgeWorkspaceRuntimeSessions } from "./runtime/cleanup";
+import { acquireProcessLockEffect, processLockActiveEffect } from "./process-lock";
+import {
+  purgeClientRuntimeSessionsEffect,
+  purgeWorkspaceRuntimeSessionsEffect,
+} from "./runtime/cleanup";
 import { RuntimeSessionStore } from "./runtime/sessions";
-import { currentServeCommand, installUserService, removeUserService } from "./service";
-import { startServer } from "./server";
-import { createTransportKey, startConnector, validateTransportKey } from "./transport/process";
-import { readTailcatState } from "./transport/supervisor";
+import { currentServeCommand, installUserServiceEffect, removeUserServiceEffect } from "./service";
+import { startServerEffect } from "./server";
+import {
+  createTransportKeyEffect,
+  startConnectorEffect,
+  validateTransportKeyEffect,
+} from "./transport/process";
+import { readTailcatStateEffect } from "./transport/supervisor";
 
 export interface CliIo {
   configPath: string;
@@ -29,12 +37,12 @@ export interface CliIo {
   clientStateRoot: string;
   writeOut(text: string): void;
   writeError(text: string): void;
-  readStdin(): Promise<string>;
+  readStdinEffect(): Effect.Effect<string, unknown>;
   transportBinary?: string;
   gatewayReloadTimeoutMs?: number;
-  validateTailcatKey?: (key: string) => Promise<void>;
-  verifyLine?: (line: LineConfig) => Promise<void>;
-  clientDoctor?: () => Promise<DoctorReport>;
+  validateTailcatKeyEffect(key: string): Effect.Effect<void, unknown>;
+  verifyLineEffect(line: LineConfig): Effect.Effect<void, unknown>;
+  clientDoctorEffect(): Effect.Effect<DoctorReport, unknown>;
 }
 
 class UsageError extends Error {}
@@ -222,284 +230,349 @@ Examples:
 `,
 };
 
-export async function runCli(args: string[], io: CliIo = defaultIo()): Promise<number> {
-  try {
-    const command = commandKey(args);
+/** Authoritative CLI orchestration. */
+export function runCliEffect(args: string[], io: CliIo = defaultIo()) {
+  return Effect.gen(function* () {
+    const command = yield* Effect.try({
+      try: () => commandKey(args),
+      catch: (error) => error,
+    });
     if (args.length === 0 || args.includes("--help") || args.includes("-h")) {
       io.writeOut(command ? (help[command] ?? rootHelp) : rootHelp);
       return 0;
     }
-    const parsed = parseArgs(args.slice(command.split(" ").length));
-    validateArgs(command, parsed, help[command] ?? rootHelp);
-    if (command.startsWith("gateway ")) return await runGateway(command, parsed, io);
-    if (command.startsWith("client ")) return await runClient(command, parsed, io);
-    throw new UsageError(rootHelp);
-  } catch (error) {
-    if (error instanceof UsageError) {
-      io.writeError(`${error.message.endsWith("\n") ? error.message : `${error.message}\n`}`);
-      return 2;
-    }
-    io.writeError(`Error: ${error instanceof Error ? error.message : "Unknown failure"}\n`);
-    return 1;
-  }
+    const parsed = yield* Effect.try({
+      try: () => {
+        const parsed = parseArgs(args.slice(command.split(" ").length));
+        validateArgs(command, parsed, help[command] ?? rootHelp);
+        return parsed;
+      },
+      catch: (error) => error,
+    });
+    if (command.startsWith("gateway ")) return yield* runGatewayEffect(command, parsed, io);
+    if (command.startsWith("client ")) return yield* runClientEffect(command, parsed, io);
+    return yield* Effect.fail(new UsageError(rootHelp));
+  }).pipe(
+    Effect.scoped,
+    Effect.catchEager((error) =>
+      Effect.sync(() => {
+        if (error instanceof UsageError) {
+          io.writeError(`${error.message.endsWith("\n") ? error.message : `${error.message}\n`}`);
+          return 2;
+        }
+        io.writeError(`Error: ${error instanceof Error ? error.message : "Unknown failure"}\n`);
+        return 1;
+      }),
+    ),
+  );
 }
 
-async function runGateway(command: string, parsed: ParsedArgs, io: CliIo): Promise<number> {
+function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
   const store = new ConfigStore(io);
-  switch (command) {
-    case "gateway init":
-      await store.init({ owner: ownerInput(parsed, help[command]!) });
-      out(io, `initialized Gateway: ${io.configPath}`);
-      return 0;
-    case "gateway workspace add": {
-      const id = positional(parsed, 0, help[command]!);
-      await store.addWorkspace({
-        id,
-        name: required(parsed, "name", help[command]!),
-        root: required(parsed, "root", help[command]!),
-        summary: required(parsed, "summary", help[command]!),
-      });
-      out(io, `workspace: ${id}`);
-      return 0;
-    }
-    case "gateway workspace list": {
-      const config = await store.readEffective();
-      const availability = new Map(
-        (await store.listPublicWorkspaces()).map((workspace) => [
-          workspace.id,
-          workspace.available,
-        ]),
-      );
-      printRows(
-        io,
-        config.workspaces.map((workspace) => ({
-          ...workspace,
-          available: availability.get(workspace.id) ?? false,
-        })),
-        parsed.flags.has("json"),
-      );
-      return 0;
-    }
-    case "gateway workspace update": {
-      const id = positional(parsed, 0, help[command]!);
-      const name = parsed.values.get("name");
-      const summary = parsed.values.get("summary");
-      if (name === undefined && summary === undefined) throw new UsageError(help[command]!);
-      await store.updateWorkspace(id, {
-        ...(name === undefined ? {} : { name }),
-        ...(summary === undefined ? {} : { summary }),
-      });
-      out(io, `workspace: ${id}`);
-      return 0;
-    }
-    case "gateway workspace remove": {
-      confirm(parsed, help[command]!);
-      const id = positional(parsed, 0, help[command]!);
-      if (!(await store.removeWorkspace(id))) throw new Error(`Workspace not found: ${id}`);
-      const handled = await waitIfGatewayRunning(
-        store,
-        io,
-        (config) => !config.workspaces.some((workspace) => workspace.id === id),
-      );
-      if (!handled) await purgeWorkspaceRuntimeSessions(id, new RuntimeSessionStore(io.stateRoot));
-      out(io, `removed workspace: ${id}`);
-      return 0;
-    }
-    case "gateway client add": {
-      const id = positional(parsed, 0, help[command]!);
-      const tailcatKey = await inputValue(required(parsed, "tailcat-key", help[command]!), io);
-      await (io.validateTailcatKey ?? ((key) => validateTransportKey(key, io.transportBinary)))(
-        tailcatKey,
-      );
-      const result = await store.addClient({ id, tailcatKey });
-      out(io, `remote-client: ${id}\nbearer: ${result.bearer}`);
-      await waitIfGatewayRunning(store, io, (config) =>
-        config.clients.some((client) => client.id === id && client.tailcatKey === tailcatKey),
-      );
-      const tailcat = await readTailcatState(io.stateRoot);
-      if (tailcat) out(io, `tailcat: ${tailcat.serverAddress}\nremote-port: ${tailcat.remotePort}`);
-      return 0;
-    }
-    case "gateway client list":
-      printRows(
-        io,
-        (await store.readEffective()).clients.map(({ id, createdAt, updatedAt }) => ({
+  return Effect.gen(function* () {
+    switch (command) {
+      case "gateway init":
+        yield* store.initEffect({ owner: ownerInput(parsed, help[command]!) });
+        out(io, `initialized Gateway: ${io.configPath}`);
+        return 0;
+      case "gateway workspace add": {
+        const id = positional(parsed, 0, help[command]!);
+        yield* store.addWorkspaceEffect({
           id,
-          createdAt,
-          updatedAt,
-        })),
-        parsed.flags.has("json"),
-      );
-      return 0;
-    case "gateway client rotate": {
-      confirm(parsed, help[command]!);
-      const id = positional(parsed, 0, help[command]!);
-      const tailcatKey = await inputValue(required(parsed, "tailcat-key", help[command]!), io);
-      await (io.validateTailcatKey ?? ((key) => validateTransportKey(key, io.transportBinary)))(
-        tailcatKey,
-      );
-      const result = await store.rotateClient(id, tailcatKey);
-      out(io, `remote-client: ${id}\nbearer: ${result.bearer}`);
-      await waitIfGatewayRunning(store, io, (config) =>
-        config.clients.some((client) => client.id === id && client.tailcatKey === tailcatKey),
-      );
-      return 0;
-    }
-    case "gateway client revoke": {
-      confirm(parsed, help[command]!);
-      const id = positional(parsed, 0, help[command]!);
-      if (!(await store.revokeClient(id))) throw new Error(`Remote Client not found: ${id}`);
-      const handled = await waitIfGatewayRunning(
-        store,
-        io,
-        (config) => !config.clients.some((client) => client.id === id),
-      );
-      if (!handled) await purgeClientRuntimeSessions(id, new RuntimeSessionStore(io.stateRoot));
-      out(io, `revoked remote-client: ${id}`);
-      return 0;
-    }
-    case "gateway doctor":
-      return printDoctor(io, await runDoctor(io), parsed.flags.has("json"));
-    case "gateway serve": {
-      const running = await startServer(io);
-      out(io, "gateway: ready");
-      await serveUntilSignal(running.close);
-      return 0;
-    }
-    case "gateway service install":
-      confirm(parsed, help[command]!);
-      out(io, `service: ${await installUserService(currentServeCommand("gateway"), "gateway")}`);
-      return 0;
-    case "gateway service remove":
-      confirm(parsed, help[command]!);
-      out(io, `removed service: ${await removeUserService("gateway")}`);
-      return 0;
-    default:
-      throw new UsageError(rootHelp);
-  }
-}
-
-async function runClient(command: string, parsed: ParsedArgs, io: CliIo): Promise<number> {
-  const store = new ClientConfigStore({ configPath: io.clientConfigPath });
-  switch (command) {
-    case "client init": {
-      const port = portValue(parsed.values.get("port") ?? "43111", "port");
-      const result = await store.init({ port });
-      if (!result.initialized) {
-        out(io, `Client already initialized: ${io.clientConfigPath}`);
+          name: required(parsed, "name", help[command]!),
+          root: required(parsed, "root", help[command]!),
+          summary: required(parsed, "summary", help[command]!),
+        });
+        out(io, `workspace: ${id}`);
         return 0;
       }
-      out(
-        io,
-        `initialized Client: ${io.clientConfigPath}\nlocal-bearer: ${result.bearer}\nmcp: http://127.0.0.1:${port}/mcp`,
-      );
-      return 0;
-    }
-    case "client line key-create": {
-      const id = positional(parsed, 0, help[command]!);
-      const output = resolve(
-        parsed.values.get("output") ?? join(io.clientStateRoot, "keys", `${id}.json`),
-      );
-      const key = await createTransportKey(output, io.transportBinary);
-      out(io, `key: ${key.keyPath}\npublic-key: ${key.publicKey}`);
-      return 0;
-    }
-    case "client line add": {
-      const input: LineInput = {
-        id: positional(parsed, 0, help[command]!),
-        expectedOwnerId: required(parsed, "owner-id", help[command]!),
-        remoteClientId: required(parsed, "remote-client-id", help[command]!),
-        serverAddress: await inputValue(required(parsed, "server", help[command]!), io),
-        remotePort: portValue(required(parsed, "port", help[command]!), "port"),
-        keyPath: resolve(required(parsed, "key", help[command]!)),
-        remoteBearer: await inputValue(required(parsed, "bearer", help[command]!), io),
-      };
-      const validated = await store.validate(input);
-      await withClientMutation(io, async () => {
-        await verifyLine(
-          {
-            ...validated,
-            createdAt: new Date().toISOString(),
-            updatedAt: new Date().toISOString(),
-          },
+      case "gateway workspace list": {
+        const [config, workspaces] = yield* Effect.all(
+          [store.readEffectiveEffect(), store.listPublicWorkspacesEffect()],
+          { concurrency: "unbounded" },
+        );
+        const availability = new Map(
+          workspaces.map((workspace) => [workspace.id, workspace.available]),
+        );
+        printRows(
+          io,
+          config.workspaces.map((workspace) => ({
+            ...workspace,
+            available: availability.get(workspace.id) ?? false,
+          })),
+          parsed.flags.has("json"),
+        );
+        return 0;
+      }
+      case "gateway workspace update": {
+        const id = positional(parsed, 0, help[command]!);
+        const name = parsed.values.get("name");
+        const summary = parsed.values.get("summary");
+        if (name === undefined && summary === undefined) throw new UsageError(help[command]!);
+        yield* store.updateWorkspaceEffect(id, {
+          ...(name === undefined ? {} : { name }),
+          ...(summary === undefined ? {} : { summary }),
+        });
+        out(io, `workspace: ${id}`);
+        return 0;
+      }
+      case "gateway workspace remove": {
+        confirm(parsed, help[command]!);
+        const id = positional(parsed, 0, help[command]!);
+        if (!(yield* store.removeWorkspaceEffect(id)))
+          throw new Error(`Workspace not found: ${id}`);
+        const handled = yield* waitIfGatewayRunningEffect(
+          store,
+          io,
+          (config) => !config.workspaces.some((workspace) => workspace.id === id),
+        );
+        if (!handled)
+          yield* purgeWorkspaceRuntimeSessionsEffect(id, new RuntimeSessionStore(io.stateRoot));
+        out(io, `removed workspace: ${id}`);
+        return 0;
+      }
+      case "gateway client add": {
+        const id = positional(parsed, 0, help[command]!);
+        const tailcatKey = yield* inputValueEffect(
+          required(parsed, "tailcat-key", help[command]!),
           io,
         );
-        await store.add(validated);
-        await waitIfClientRunning(store, io);
-      });
-      out(io, `line: ${validated.id}`);
-      return 0;
+        yield* io.validateTailcatKeyEffect(tailcatKey);
+        const result = yield* store.addClientEffect({ id, tailcatKey });
+        out(io, `remote-client: ${id}\nbearer: ${result.bearer}`);
+        yield* waitIfGatewayRunningEffect(store, io, (config) =>
+          config.clients.some((client) => client.id === id && client.tailcatKey === tailcatKey),
+        );
+        const tailcat = yield* readTailcatStateEffect(io.stateRoot);
+        if (tailcat)
+          out(io, `tailcat: ${tailcat.serverAddress}\nremote-port: ${tailcat.remotePort}`);
+        return 0;
+      }
+      case "gateway client list": {
+        const config = yield* store.readEffectiveEffect();
+        printRows(
+          io,
+          config.clients.map(({ id, createdAt, updatedAt }) => ({
+            id,
+            createdAt,
+            updatedAt,
+          })),
+          parsed.flags.has("json"),
+        );
+        return 0;
+      }
+      case "gateway client rotate": {
+        confirm(parsed, help[command]!);
+        const id = positional(parsed, 0, help[command]!);
+        const tailcatKey = yield* inputValueEffect(
+          required(parsed, "tailcat-key", help[command]!),
+          io,
+        );
+        yield* io.validateTailcatKeyEffect(tailcatKey);
+        const result = yield* store.rotateClientEffect(id, tailcatKey);
+        out(io, `remote-client: ${id}\nbearer: ${result.bearer}`);
+        yield* waitIfGatewayRunningEffect(store, io, (config) =>
+          config.clients.some((client) => client.id === id && client.tailcatKey === tailcatKey),
+        );
+        return 0;
+      }
+      case "gateway client revoke": {
+        confirm(parsed, help[command]!);
+        const id = positional(parsed, 0, help[command]!);
+        if (!(yield* store.revokeClientEffect(id)))
+          throw new Error(`Remote Client not found: ${id}`);
+        const handled = yield* waitIfGatewayRunningEffect(
+          store,
+          io,
+          (config) => !config.clients.some((client) => client.id === id),
+        );
+        if (!handled)
+          yield* purgeClientRuntimeSessionsEffect(id, new RuntimeSessionStore(io.stateRoot));
+        out(io, `revoked remote-client: ${id}`);
+        return 0;
+      }
+      case "gateway doctor":
+        return printDoctor(io, yield* runDoctorEffect(io), parsed.flags.has("json"));
+      case "gateway serve": {
+        yield* startServerEffect(io, yield* Scope.Scope);
+        out(io, "gateway: ready");
+        yield* waitForShutdownEffect();
+        return 0;
+      }
+      case "gateway service install":
+        confirm(parsed, help[command]!);
+        out(
+          io,
+          `service: ${yield* installUserServiceEffect(currentServeCommand("gateway"), "gateway")}`,
+        );
+        return 0;
+      case "gateway service remove":
+        confirm(parsed, help[command]!);
+        out(io, `removed service: ${yield* removeUserServiceEffect("gateway")}`);
+        return 0;
+      default:
+        throw new UsageError(rootHelp);
     }
-    case "client line list":
-      printRows(io, await store.list(), parsed.flags.has("json"));
-      return 0;
-    case "client line update": {
-      confirm(parsed, help[command]!);
-      const id = positional(parsed, 0, help[command]!);
-      const credentials = await store.validateCredentials({
-        keyPath: resolve(required(parsed, "key", help[command]!)),
-        remoteBearer: await inputValue(required(parsed, "bearer", help[command]!), io),
-      });
-      await withClientMutation(io, async () => {
-        const current = await store.get(id);
-        if (!current) throw new Error(`Line not found: ${id}`);
-        await verifyLine({ ...current, ...credentials, updatedAt: new Date().toISOString() }, io);
-        await withRetiredClientLine(store, io, current, async () => {
-          await store.updateCredentials(id, credentials);
+  }).pipe(Effect.catchDefect((defect) => Effect.fail(defect)));
+}
+
+function runClientEffect(command: string, parsed: ParsedArgs, io: CliIo) {
+  const store = new ClientConfigStore({ configPath: io.clientConfigPath });
+  return Effect.gen(function* () {
+    switch (command) {
+      case "client init": {
+        const port = portValue(parsed.values.get("port") ?? "43111", "port");
+        const result = yield* store.initEffect({ port });
+        if (!result.initialized) {
+          out(io, `Client already initialized: ${io.clientConfigPath}`);
+          return 0;
+        }
+        out(
+          io,
+          `initialized Client: ${io.clientConfigPath}\nlocal-bearer: ${result.bearer}\nmcp: http://127.0.0.1:${port}/mcp`,
+        );
+        return 0;
+      }
+      case "client line key-create": {
+        const id = positional(parsed, 0, help[command]!);
+        const output = resolve(
+          parsed.values.get("output") ?? join(io.clientStateRoot, "keys", `${id}.json`),
+        );
+        const key = yield* createTransportKeyEffect(output, io.transportBinary);
+        out(io, `key: ${key.keyPath}\npublic-key: ${key.publicKey}`);
+        return 0;
+      }
+      case "client line add": {
+        const input: LineInput = {
+          id: positional(parsed, 0, help[command]!),
+          expectedOwnerId: required(parsed, "owner-id", help[command]!),
+          remoteClientId: required(parsed, "remote-client-id", help[command]!),
+          serverAddress: yield* inputValueEffect(required(parsed, "server", help[command]!), io),
+          remotePort: portValue(required(parsed, "port", help[command]!), "port"),
+          keyPath: resolve(required(parsed, "key", help[command]!)),
+          remoteBearer: yield* inputValueEffect(required(parsed, "bearer", help[command]!), io),
+        };
+        const validated = yield* store.validateEffect(input);
+        yield* withClientMutationEffect(
+          io,
+          verifyLineEffect(
+            {
+              ...validated,
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            },
+            io,
+          ).pipe(
+            Effect.andThen(store.addEffect(validated)),
+            Effect.andThen(waitIfClientRunningEffect(store, io)),
+          ),
+        );
+        out(io, `line: ${validated.id}`);
+        return 0;
+      }
+      case "client line list":
+        printRows(io, yield* store.listEffect(), parsed.flags.has("json"));
+        return 0;
+      case "client line update": {
+        confirm(parsed, help[command]!);
+        const id = positional(parsed, 0, help[command]!);
+        const credentials = yield* store.validateCredentialsEffect({
+          keyPath: resolve(required(parsed, "key", help[command]!)),
+          remoteBearer: yield* inputValueEffect(required(parsed, "bearer", help[command]!), io),
         });
-      });
-      out(io, `line: ${id}`);
-      return 0;
+        yield* withClientMutationEffect(
+          io,
+          Effect.gen(function* () {
+            const current = yield* store.getEffect(id);
+            if (!current) return yield* Effect.fail(new Error(`Line not found: ${id}`));
+            yield* withRetiredClientLineEffect(
+              store,
+              io,
+              current,
+              Effect.gen(function* () {
+                yield* verifyLineEffect(
+                  {
+                    ...current,
+                    ...credentials,
+                    updatedAt: new Date().toISOString(),
+                  },
+                  io,
+                );
+                return yield* store.updateCredentialsEffect(id, credentials);
+              }),
+            );
+          }),
+        );
+        out(io, `line: ${id}`);
+        return 0;
+      }
+      case "client line remove": {
+        confirm(parsed, help[command]!);
+        const id = positional(parsed, 0, help[command]!);
+        yield* withClientMutationEffect(
+          io,
+          Effect.gen(function* () {
+            const current = yield* store.getEffect(id);
+            if (!current) return yield* Effect.fail(new Error(`Line not found: ${id}`));
+            yield* withRetiredClientLineEffect(
+              store,
+              io,
+              current,
+              store
+                .removeEffect(id)
+                .pipe(
+                  Effect.flatMap((removed) =>
+                    removed ? Effect.void : Effect.fail(new Error(`Line not found: ${id}`)),
+                  ),
+                ),
+            );
+          }),
+        );
+        out(io, `removed line: ${id}`);
+        return 0;
+      }
+      case "client token rotate": {
+        const result = yield* withClientMutationEffect(
+          io,
+          store
+            .rotateLocalBearerEffect()
+            .pipe(Effect.tap(() => waitIfClientRunningEffect(store, io))),
+        );
+        out(io, `local-bearer: ${result.bearer}`);
+        return 0;
+      }
+      case "client doctor": {
+        const report = yield* io.clientDoctorEffect();
+        return printDoctor(io, report, parsed.flags.has("json"));
+      }
+      case "client serve": {
+        yield* startClientServerEffect(
+          {
+            configPath: io.clientConfigPath,
+            stateRoot: io.clientStateRoot,
+            ...(io.transportBinary === undefined ? {} : { transportBinary: io.transportBinary }),
+          },
+          yield* Scope.Scope,
+        );
+        out(io, "client: ready");
+        yield* waitForShutdownEffect();
+        return 0;
+      }
+      case "client service install":
+        confirm(parsed, help[command]!);
+        out(
+          io,
+          `service: ${yield* installUserServiceEffect(currentServeCommand("client"), "client")}`,
+        );
+        return 0;
+      case "client service remove":
+        confirm(parsed, help[command]!);
+        out(io, `removed service: ${yield* removeUserServiceEffect("client")}`);
+        return 0;
+      default:
+        throw new UsageError(rootHelp);
     }
-    case "client line remove": {
-      confirm(parsed, help[command]!);
-      const id = positional(parsed, 0, help[command]!);
-      await withClientMutation(io, async () => {
-        const current = await store.get(id);
-        if (!current) throw new Error(`Line not found: ${id}`);
-        await withRetiredClientLine(store, io, current, async () => {
-          if (!(await store.remove(id))) throw new Error(`Line not found: ${id}`);
-        });
-      });
-      out(io, `removed line: ${id}`);
-      return 0;
-    }
-    case "client token rotate": {
-      const result = await withClientMutation(io, async () => {
-        const rotated = await store.rotateLocalBearer();
-        await waitIfClientRunning(store, io);
-        return rotated;
-      });
-      out(io, `local-bearer: ${result.bearer}`);
-      return 0;
-    }
-    case "client doctor":
-      return printDoctor(
-        io,
-        await (io.clientDoctor ?? (() => runClientDoctor(io)))(),
-        parsed.flags.has("json"),
-      );
-    case "client serve": {
-      const running = await startClientServer({
-        configPath: io.clientConfigPath,
-        stateRoot: io.clientStateRoot,
-        ...(io.transportBinary === undefined ? {} : { transportBinary: io.transportBinary }),
-      });
-      out(io, "client: ready");
-      await serveUntilSignal(running.close);
-      return 0;
-    }
-    case "client service install":
-      confirm(parsed, help[command]!);
-      out(io, `service: ${await installUserService(currentServeCommand("client"), "client")}`);
-      return 0;
-    case "client service remove":
-      confirm(parsed, help[command]!);
-      out(io, `removed service: ${await removeUserService("client")}`);
-      return 0;
-    default:
-      throw new UsageError(rootHelp);
-  }
+  }).pipe(Effect.catchDefect((defect) => Effect.fail(defect)));
 }
 
 interface ParsedArgs {
@@ -514,14 +587,24 @@ interface CommandSpec {
 }
 
 const commandSpecs: Record<string, CommandSpec> = {
-  "gateway init": { positionals: 0, values: ["owner-id", "owner-name", "owner-summary"] },
-  "gateway workspace add": { positionals: 1, values: ["name", "root", "summary"] },
+  "gateway init": {
+    positionals: 0,
+    values: ["owner-id", "owner-name", "owner-summary"],
+  },
+  "gateway workspace add": {
+    positionals: 1,
+    values: ["name", "root", "summary"],
+  },
   "gateway workspace list": { positionals: 0, flags: ["json"] },
   "gateway workspace update": { positionals: 1, values: ["name", "summary"] },
   "gateway workspace remove": { positionals: 1, flags: ["yes"] },
   "gateway client add": { positionals: 1, values: ["tailcat-key"] },
   "gateway client list": { positionals: 0, flags: ["json"] },
-  "gateway client rotate": { positionals: 1, values: ["tailcat-key"], flags: ["yes"] },
+  "gateway client rotate": {
+    positionals: 1,
+    values: ["tailcat-key"],
+    flags: ["yes"],
+  },
   "gateway client revoke": { positionals: 1, flags: ["yes"] },
   "gateway doctor": { positionals: 0, flags: ["json"] },
   "gateway serve": { positionals: 0 },
@@ -534,7 +617,11 @@ const commandSpecs: Record<string, CommandSpec> = {
     values: ["owner-id", "remote-client-id", "server", "port", "key", "bearer"],
   },
   "client line list": { positionals: 0, flags: ["json"] },
-  "client line update": { positionals: 1, values: ["key", "bearer"], flags: ["yes"] },
+  "client line update": {
+    positionals: 1,
+    values: ["key", "bearer"],
+    flags: ["yes"],
+  },
   "client line remove": { positionals: 1, flags: ["yes"] },
   "client token rotate": { positionals: 0 },
   "client doctor": { positionals: 0, flags: ["json"] },
@@ -556,7 +643,11 @@ function commandKey(args: string[]): string {
 }
 
 function parseArgs(args: string[]): ParsedArgs {
-  const parsed: ParsedArgs = { positionals: [], values: new Map(), flags: new Set() };
+  const parsed: ParsedArgs = {
+    positionals: [],
+    values: new Map(),
+    flags: new Set(),
+  };
   for (let index = 0; index < args.length; index++) {
     const value = args[index]!;
     if (!value.startsWith("--")) {
@@ -609,11 +700,14 @@ function ownerInput(parsed: ParsedArgs, usage: string) {
   };
 }
 
-async function inputValue(value: string, io: CliIo): Promise<string> {
-  if (value !== "-") return value;
-  const input = (await io.readStdin()).trim();
-  if (!input) throw new UsageError("stdin value is empty");
-  return input;
+function inputValueEffect(value: string, io: CliIo) {
+  if (value !== "-") return Effect.succeed(value);
+  return io.readStdinEffect().pipe(
+    Effect.map((input) => input.trim()),
+    Effect.flatMap((input) =>
+      input ? Effect.succeed(input) : Effect.fail(new UsageError("stdin value is empty")),
+    ),
+  );
 }
 
 function portValue(value: string, name: string): number {
@@ -623,74 +717,97 @@ function portValue(value: string, name: string): number {
   return port;
 }
 
-async function verifyLine(line: LineConfig, io: CliIo): Promise<void> {
-  if (io.verifyLine) return io.verifyLine(line);
-  const runtime = new LineRuntime({
-    line,
-    startConnector: (connector, signal) => startConnector(connector, io.transportBinary, signal),
-  });
-  try {
-    await runtime.listWorkspaces(AbortSignal.timeout(15_000));
-  } finally {
-    await runtime.close();
-  }
+function verifyLineEffect(line: LineConfig, io: CliIo): Effect.Effect<void, unknown> {
+  return io.verifyLineEffect(line);
 }
 
-async function withClientMutation<T>(io: CliIo, operation: () => Promise<T>): Promise<T> {
-  const release = await acquireProcessLock(
-    join(io.clientStateRoot, "mutation.lock"),
-    "Another Client configuration change is in progress",
+function withClientMutationEffect<A, E, R>(
+  io: CliIo,
+  operation: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | unknown, R> {
+  return Effect.acquireUseRelease(
+    acquireProcessLockEffect(
+      join(io.clientStateRoot, "mutation.lock"),
+      "Another Client configuration change is in progress",
+    ),
+    () => operation,
+    (release) => release,
   );
-  try {
-    return await operation();
-  } finally {
-    await release();
-  }
 }
 
-async function withRetiredClientLine<T>(
+function withRetiredClientLineEffect<A, E, R>(
   store: ClientConfigStore,
   io: CliIo,
   line: LineConfig,
-  operation: () => Promise<T>,
-): Promise<T> {
-  const config = await store.read();
-  const running = await processLockActive(join(io.clientStateRoot, "client.lock"));
-  const request = running
-    ? await requestClientLineRetirement(io.clientStateRoot, config, line)
-    : undefined;
-  try {
-    if (request)
-      await waitForClientLineRetirement(
-        io.clientStateRoot,
-        request,
-        io.gatewayReloadTimeoutMs ?? 45_000,
-      );
-    const result = await operation();
-    await waitIfClientRunning(store, io);
-    return result;
-  } catch (error) {
-    if (request) await cancelClientLineRetirement(io.clientStateRoot, request).catch(() => {});
-    throw error;
-  }
+  operation: Effect.Effect<A, E, R>,
+): Effect.Effect<A, E | unknown, R> {
+  return Effect.gen(function* () {
+    const config = yield* store.readEffect();
+    const running = yield* processLockActiveEffect(join(io.clientStateRoot, "client.lock"));
+    const request = running
+      ? yield* requestClientLineRetirementEffect(io.clientStateRoot, config, line)
+      : undefined;
+    const guarded = Effect.gen(function* () {
+      if (request)
+        yield* waitForClientLineRetirementEffect(
+          io.clientStateRoot,
+          request,
+          io.gatewayReloadTimeoutMs ?? 45_000,
+        );
+      const result = yield* operation;
+      yield* waitIfClientRunningEffect(store, io);
+      return result;
+    });
+    return yield* guarded.pipe(
+      Effect.onError(() =>
+        request
+          ? cancelClientLineRetirementEffect(io.clientStateRoot, request).pipe(Effect.ignore)
+          : Effect.void,
+      ),
+    );
+  });
 }
 
-async function waitIfGatewayRunning(
+function waitIfGatewayRunningEffect(
   store: ConfigStore,
   io: CliIo,
-  predicate: (config: Awaited<ReturnType<ConfigStore["readEffective"]>>) => boolean,
-): Promise<boolean> {
-  if (!(await processLockActive(join(io.stateRoot, "gateway.lock")))) return false;
-  return waitForGatewayReload(store, io.stateRoot, predicate, io.gatewayReloadTimeoutMs ?? 45_000);
+  predicate: (config: Config) => boolean,
+): Effect.Effect<boolean, unknown> {
+  return processLockActiveEffect(join(io.stateRoot, "gateway.lock")).pipe(
+    Effect.flatMap((running) =>
+      running
+        ? waitForGatewayReloadEffect(
+            store,
+            io.stateRoot,
+            predicate,
+            io.gatewayReloadTimeoutMs ?? 45_000,
+          )
+        : Effect.succeed(false),
+    ),
+  );
 }
 
-async function waitIfClientRunning(store: ClientConfigStore, io: CliIo): Promise<boolean> {
-  if (!(await processLockActive(join(io.clientStateRoot, "client.lock")))) return false;
-  return waitForClientReload(
-    store,
-    io.clientStateRoot,
-    await store.read(),
-    io.gatewayReloadTimeoutMs ?? 45_000,
+function waitIfClientRunningEffect(
+  store: ClientConfigStore,
+  io: CliIo,
+): Effect.Effect<boolean, unknown> {
+  return processLockActiveEffect(join(io.clientStateRoot, "client.lock")).pipe(
+    Effect.flatMap((running) =>
+      running
+        ? store
+            .readEffect()
+            .pipe(
+              Effect.flatMap((config) =>
+                waitForClientReloadEffect(
+                  store,
+                  io.clientStateRoot,
+                  config,
+                  io.gatewayReloadTimeoutMs ?? 45_000,
+                ),
+              ),
+            )
+        : Effect.succeed(false),
+    ),
   );
 }
 
@@ -718,16 +835,6 @@ function printDoctor(io: CliIo, report: DoctorReport, json: boolean): number {
   return report.ok ? 0 : 1;
 }
 
-async function serveUntilSignal(close: () => Promise<void>): Promise<void> {
-  const shutdown = createShutdownWaiter();
-  try {
-    await shutdown.promise;
-  } finally {
-    shutdown.dispose();
-    await close();
-  }
-}
-
 function out(io: CliIo, text: string): void {
   io.writeOut(`${text}\n`);
 }
@@ -738,7 +845,25 @@ function defaultIo(): CliIo {
     ...defaultClientPaths(),
     writeOut: (text) => process.stdout.write(text),
     writeError: (text) => process.stderr.write(text),
-    readStdin: async () => Bun.stdin.text(),
+    readStdinEffect: () =>
+      Effect.tryPromise({
+        try: () => Bun.stdin.text(),
+        catch: (error) => error,
+      }),
+    validateTailcatKeyEffect: (key) => validateTransportKeyEffect(key),
+    verifyLineEffect: (line) => {
+      const runtime = new LineRuntime({
+        line,
+        startConnectorEffect: (connector, signal) =>
+          startConnectorEffect(connector, undefined, signal),
+      });
+      return Effect.acquireUseRelease(
+        Effect.succeed(runtime),
+        (active) => active.listWorkspacesEffect(AbortSignal.timeout(15_000)).pipe(Effect.asVoid),
+        (active) => active.closeEffect(),
+      );
+    },
+    clientDoctorEffect: () => runClientDoctorEffect(defaultClientPaths()),
   };
 }
 
@@ -747,28 +872,24 @@ interface SignalTarget {
   removeListener(event: "SIGINT" | "SIGTERM", listener: () => void): unknown;
 }
 
-export function createShutdownWaiter(target: SignalTarget = process): {
-  promise: Promise<void>;
-  dispose(): void;
-} {
-  let resolve!: () => void;
-  let disposed = false;
-  const dispose = () => {
-    if (disposed) return;
-    disposed = true;
-    target.removeListener("SIGINT", finish);
-    target.removeListener("SIGTERM", finish);
-  };
-  const finish = () => {
-    dispose();
-    resolve();
-  };
-  const promise = new Promise<void>((done) => {
-    resolve = done;
-    target.once("SIGINT", finish);
-    target.once("SIGTERM", finish);
+function waitForShutdownEffect(target: SignalTarget = process) {
+  return Effect.gen(function* () {
+    const shutdown = yield* Deferred.make<void>();
+    const finish = () => void Effect.runSync(Deferred.succeed(shutdown, undefined));
+    yield* Effect.acquireRelease(
+      Effect.sync(() => {
+        target.once("SIGINT", finish);
+        target.once("SIGTERM", finish);
+      }),
+      () =>
+        Effect.sync(() => {
+          target.removeListener("SIGINT", finish);
+          target.removeListener("SIGTERM", finish);
+        }),
+    );
+    yield* Deferred.await(shutdown);
   });
-  return { promise, dispose };
 }
 
-if (import.meta.main) process.exitCode = await runCli(process.argv.slice(2));
+if (import.meta.main)
+  process.exitCode = await Effect.runPromise(runCliEffect(process.argv.slice(2)));

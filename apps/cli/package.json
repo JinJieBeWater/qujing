@@ -9,14 +9,18 @@
   "scripts": {
     "check-types": "tsc --noEmit",
     "start": "bun src/cli.ts",
-    "test": "bun test",
+    "test": "bun test --path-ignore-patterns='**/*.effect.test.ts' --path-ignore-patterns='**/line-runtime.test.ts' && bun test tests/line-runtime.test.ts && bun --bun vitest run tests/*.effect.test.ts",
     "test:go": "cd native/transport && go test ./..."
   },
   "dependencies": {
+    "@effect/platform-bun": "4.0.0-rc.112",
     "@modelcontextprotocol/sdk": "1.29.0",
+    "effect": "4.0.0-rc.112",
     "zod": "4.1.12"
   },
   "devDependencies": {
-    "@colleague-line/config": "workspace:*"
+    "@colleague-line/config": "workspace:*",
+    "@effect/vitest": "4.0.0-rc.112",
+    "vitest": "4.1.11"
   }
 }

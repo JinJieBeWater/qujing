@@ -2,11 +2,12 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { chmod, mkdtemp, rm, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Effect } from "effect";
 import {
-  assertPrivatePath,
-  assertPrivateTree,
-  withFileLock,
-  writePrivateJson,
+  assertPrivatePathEffect,
+  assertPrivateTreeEffect,
+  withPrivateLock,
+  writePrivateJsonEffect,
 } from "../src/private-files";
 
 const roots: string[] = [];
@@ -24,8 +25,10 @@ async function fixture(): Promise<string> {
 describe("private state", () => {
   test("writes durable private JSON and validates the tree", async () => {
     const root = await fixture();
-    await writePrivateJson(join(root, "nested", "state.json"), { ok: true });
-    await expect(assertPrivateTree(root)).resolves.toBeUndefined();
+    await Effect.runPromise(
+      writePrivateJsonEffect(join(root, "nested", "state.json"), { ok: true }),
+    );
+    await expect(Effect.runPromise(assertPrivateTreeEffect(root))).resolves.toBeUndefined();
   });
 
   test("rejects permissive files and symlinks", async () => {
@@ -34,11 +37,15 @@ describe("private state", () => {
     const file = join(root, "state.json");
     await writeFile(file, "{}", { mode: 0o600 });
     await chmod(file, 0o644);
-    await expect(assertPrivatePath(file, false)).rejects.toThrow("permissions");
+    await expect(Effect.runPromise(assertPrivatePathEffect(file, false))).rejects.toThrow(
+      "permissions",
+    );
     await chmod(file, 0o600);
     const link = join(root, "link.json");
     await symlink(file, link);
-    await expect(assertPrivatePath(link, false)).rejects.toThrow("symlink");
+    await expect(Effect.runPromise(assertPrivatePathEffect(link, false))).rejects.toThrow(
+      "symlink",
+    );
   });
 
   test("never steals an old lock from a live process", async () => {
@@ -52,17 +59,30 @@ describe("private state", () => {
     const started = new Promise<void>((resolve) => {
       markStarted = resolve;
     });
-    const first = withFileLock(path, async () => {
-      markStarted();
-      await firstGate;
-    });
+    const first = Effect.runPromise(
+      withPrivateLock(
+        path,
+        Effect.tryPromise({
+          try: async () => {
+            markStarted();
+            await firstGate;
+          },
+          catch: (error) => error,
+        }),
+      ),
+    );
     await started;
     const old = new Date(Date.now() - 120_000);
     await utimes(`${path}.lock`, old, old);
     let secondEntered = false;
-    const second = withFileLock(path, async () => {
-      secondEntered = true;
-    });
+    const second = Effect.runPromise(
+      withPrivateLock(
+        path,
+        Effect.sync(() => {
+          secondEntered = true;
+        }),
+      ),
+    );
     await Bun.sleep(100);
     expect(secondEntered).toBe(false);
     releaseFirst();
@@ -77,9 +97,14 @@ describe("private state", () => {
       mode: 0o600,
     });
     let entered = false;
-    await withFileLock(path, async () => {
-      entered = true;
-    });
+    await Effect.runPromise(
+      withPrivateLock(
+        path,
+        Effect.sync(() => {
+          entered = true;
+        }),
+      ),
+    );
     expect(entered).toBe(true);
   });
 

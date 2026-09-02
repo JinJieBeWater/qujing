@@ -12,7 +12,7 @@
 
 **Workspace**: Owner-registered canonical root directory with public ID, name, and summary. Its root never changes; deleted IDs never return.
 
-**Runtime**: Owner's full global Pi environment answering Workspace questions with Owner-level tools, settings, authentication, extensions, skills, and session access.
+**Runtime**: Owner's full global Pi environment answering Workspace questions under Colleague Line's consultation prompt, with Owner-level tools, settings, authentication, extensions, skills, and session access.
 
 **Runtime Session**: Private continuous history for one authenticated Gateway Client and one Workspace. No public ID, topic switching, or reset.
 

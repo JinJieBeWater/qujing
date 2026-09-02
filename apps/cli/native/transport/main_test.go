@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"net"
 	"os"
 	"path/filepath"
@@ -36,6 +37,38 @@ func TestKeyCreate(t *testing.T) {
 	}
 	if err := keyCreate([]string{"--output", path}); err == nil {
 		t.Fatal("duplicate key creation succeeded")
+	}
+}
+
+func TestWriteNewPrivateJSONDoesNotOverwriteConcurrently(t *testing.T) {
+	path := filepath.Join(t.TempDir(), "client.json")
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, value := range []string{"first", "second"} {
+		go func() {
+			<-start
+			results <- writeNewPrivateJSON(path, map[string]string{"value": value})
+		}()
+	}
+	close(start)
+	succeeded := 0
+	for range 2 {
+		if err := <-results; err == nil {
+			succeeded++
+		} else if !errors.Is(err, os.ErrExist) {
+			t.Fatal(err)
+		}
+	}
+	if succeeded != 1 {
+		t.Fatalf("successful writes = %d; want 1", succeeded)
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var stored map[string]string
+	if err := json.Unmarshal(data, &stored); err != nil || (stored["value"] != "first" && stored["value"] != "second") {
+		t.Fatalf("invalid stored value: %q (%v)", data, err)
 	}
 }
 

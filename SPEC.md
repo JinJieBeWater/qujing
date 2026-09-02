@@ -1,6 +1,6 @@
 # Colleague Line specification
 
-Status: Client multiplexing is verified on macOS Apple Silicon and Linux x64. Full global Pi Runtime replacement requires acceptance again. Windows x64 remains Preview.
+Status: Client multiplexing and the full global Pi Runtime are verified on macOS Apple Silicon and Linux x64. The consultation prompt is unit-verified and awaits cross-device acceptance. Windows x64 remains Preview.
 
 ## 1. Topology
 
@@ -46,7 +46,7 @@ ask(input: { line: string; workspace: string; question: string }): {
 
 `list_lines()` queries every configured Line independently and returns each verified Owner with that Gateway's public Workspaces. It never flattens Workspaces across Owners. An unreachable, unauthorized, or identity-mismatched Line remains in the result with `available: false`, no `owner`, and an empty `workspaces`; one failed Line cannot fail the whole result.
 
-`line` must exactly match local Line ID. `workspace` is interpreted only by selected Gateway. Client does not expose `list_workspaces()`, route by question, merge Workspace namespaces, or retry an accepted ask. `ask` advances selected Gateway Runtime Session and may cause any action available to Owner's full Pi, including shell commands and file changes; it is not idempotent.
+`line` must exactly match local Line ID. `workspace` is interpreted only by selected Gateway. Client does not expose `list_workspaces()`, route by question, merge Workspace namespaces, or retry an accepted ask. `ask` advances selected Gateway Runtime Session and may cause any action available to Owner's full Pi, including shell commands and file changes; it is not idempotent. Its consultation prompt asks Pi to behave read-only, but MCP metadata remains `readOnlyHint: false` and `destructiveHint: true` because prompts are not permission controls.
 
 Client may render safe remote failure codes and line identity, never remote bearer, private-key path, Tailcat address, Owner path, Runtime details, or internal Gateway diagnostics.
 
@@ -117,9 +117,13 @@ Windows state: %LOCALAPPDATA%\ColleagueLine\
 Pi global state and sessions: ~/.pi/agent/
 ```
 
-Config includes Owner, loopback server, Workspaces, and remote Gateway Clients with bearer hashes and Tailcat public keys. State binds `remote Gateway Client + Workspace` to one Pi session ID. Pi owns session files in its default global session store. Revoking a Client or removing a Workspace retires active processes and removes Colleague Line bindings but does not delete Owner's global Pi archive. Atomic JSON writes and idempotent desired-state reconciliation apply. No database, automatic history deletion, public reset, knowledge index, or session adapter exists.
+Config includes Owner, loopback server, Workspaces, and remote Gateway Clients with bearer hashes and Tailcat public keys. State binds `remote Gateway Client + Workspace` to one Pi session ID. Pi owns session files in its default global session store. Revoking a Gateway Client or removing a Workspace retires active processes and removes Colleague Line bindings but does not delete Owner's global Pi archive. Atomic JSON writes and idempotent desired-state reconciliation apply. No database, automatic history deletion, public reset, knowledge index, or session adapter exists.
 
-Gateway launches Owner's installed global Pi CLI directly. It passes no model, provider, settings, resource, tool, extension, skill, or session-directory override. `--approve` loads trusted Workspace resources in non-interactive RPC mode. Pi therefore uses Owner's default model and authentication, global settings, skills, extensions, full builtin tools, and `~/.pi/agent/sessions/`. Colleague Line does not confine filesystem access, filter tools, parse other agents' histories, or mediate Pi actions. This is a trusted remote-control capability, not a read-only security boundary.
+Gateway launches Owner's installed global Pi CLI directly with a fixed appended system prompt. It passes no model, provider, settings, resource, tool, extension, skill, or session-directory override. `--approve` loads trusted Workspace resources in non-interactive RPC mode. Pi therefore uses Owner's default model and authentication, global settings, skills, extensions, full builtin tools, and `~/.pi/agent/sessions/`.
+
+The appended prompt defines Colleague Line as private colleague consultation, asks Pi to remain read-only, and tells Pi to choose evidence according to the question from relevant code, project documents, Git, Skills, and Agent histories. It does not impose a fixed lookup order. Colleague Line does not parse, index, merge, or replay other agents' histories; Owner's Pi may inspect relevant records itself using its configured capabilities.
+
+The prompt does not confine filesystem access, filter tools, disable extensions, or mediate Pi actions. This remains a trusted remote-control capability, not a read-only security boundary.
 
 ## 6. Gateway lifecycle and errors
 
@@ -149,7 +153,7 @@ colleague-line client doctor [--json]
 colleague-line client serve
 ```
 
-Gateway Client add creates one remote Gateway Client identity and bearer for exactly one Line and configures its distinct Tailcat key in the allowlist. Client Line add consumes Owner-issued values through a secure channel; required flags allow noninteractive use and stdin carries secrets. `line update` replaces key path and bearer atomically after Gateway rotation. Removing a Line deletes only local routing and credentials; its local ID may be reused later because remote identity and history stay Owner-controlled. `gateway serve` is Owner service. `client serve` is Agent-local MCP service. `doctor` checks own role configuration, global Pi executable, and transport readiness without starting a model turn or reading Workspace content. Pi model, provider, authentication, settings, tools, skills, and extensions are managed through Owner's normal global Pi.
+Gateway Client add creates one remote Gateway Client identity and bearer for exactly one Line and configures its distinct Tailcat key in the allowlist. Client Line add consumes Owner-issued values through a secure channel; required flags allow noninteractive use and stdin carries secrets. `line update` replaces key path and bearer atomically after Gateway rotation. Removing a Line deletes only local routing and credentials; its local ID may be reused later because remote identity and history stay Owner-controlled. `gateway serve` is Owner service. `client serve` is Agent-local MCP service. `doctor` checks own role configuration, global Pi executable, and transport readiness without starting a model turn or reading Workspace content. Pi model, provider, authentication, settings, tools, skills, and extensions are managed through Owner's normal global Pi; Colleague Line adds only its fixed Runtime prompt.
 
 ## 8. Security
 
@@ -157,12 +161,12 @@ Gateway Client add creates one remote Gateway Client identity and bearer for exa
 - Gateway validates Host and Origin; non-browser MCP may omit Origin, supplied Origin must be allowed.
 - Server-generated identifiers; no paths, model, keys, tokens, usernames, Runtime IDs, session files, interface addresses, node metadata, questions, answers, or file contents in default logs.
 - Gateway Workspace registration is manual. Root immutable; duplicate canonical roots rejected; nested roots allowed; deletion tombstones ID.
-- Every remote Client is trusted with Owner-level Pi capability. Bearer or Tailcat-key compromise can expose or modify anything reachable by Owner's Pi.
+- Every remote Gateway Client is trusted with Owner-level Pi capability. Bearer or Tailcat-key compromise can expose or modify anything reachable by Owner's Pi.
 - Gateway remote-client revoke removes bearer and Tailcat key, terminates that remote client requests, cancels current Runtime, removes its binding, and tombstones identity. Owner's global Pi session archive remains. Rotation replaces key and bearer while keeping binding and history.
 
 ## 9. Platform and delivery
 
-Stack remains TypeScript, Bun, MCP SDK 1.29.x, Zod, global Pi RPC subprocesses, JSON files, Tailcat pinned commit `4d50a34f315d593d03c31f12a20ba8d163cbf321`, one small Go transport binary, and `bun test`. No database, ORM, DI framework, queue, web UI, vector store, transport plugin interface, or plugin framework.
+Stack remains TypeScript, Bun, Effect 4 RC, `@effect/platform-bun`, Effect Schema, Effect's native MCP server, MCP SDK 1.29.x for the upstream MCP client, global Pi RPC subprocesses, JSON files, Tailcat pinned commit `4d50a34f315d593d03c31f12a20ba8d163cbf321`, and one small Go transport binary. Zod has no source imports; its package remains only because the upstream MCP SDK declares it as a required peer. Bun contract tests and Vitest + `@effect/vitest` cover their respective runtime boundaries. No database, ORM, queue, web UI, vector store, transport plugin interface, or plugin framework.
 
 macOS Apple Silicon and Linux x64 are target platforms. Windows x64 cross-build remains **Preview**, pending native ACL, reparse/junction, path case/drive/UNC, Bun, Pi, MCP, Tailcat, Gateway, and Client smoke acceptance. Intel Mac and Linux arm64 unsupported.
 
@@ -180,6 +184,7 @@ New acceptance proves:
 - Line credentials, transport failure, cancellation, and Runtime history remain isolated;
 - selected ask traverses Agent → Client → Line → Gateway → Runtime and cancellation returns over both hops;
 - Gateway retains internal `list_workspaces()` and `ask({ workspace, question })`, full global Pi Runtime, per-binding Pi session IDs, and restart recovery;
+- Runtime loads the Colleague Line consultation prompt without replacing Owner tools, extensions, skills, model, authentication, settings, or session store;
 - Gateway and Client services restart and recover new connections; no accepted ask is retried;
 - Windows artifacts and release notes remain Preview.
 

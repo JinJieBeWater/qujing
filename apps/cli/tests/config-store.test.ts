@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Effect } from "effect";
 import { mkdtemp, mkdir, readFile, rm, stat, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -19,7 +20,7 @@ async function fixture() {
     configPath: join(root, "config", "config.json"),
     stateRoot: join(root, "state"),
   });
-  await store.init({ owner: { id: "jason", name: "Jason" } });
+  await Effect.runPromise(store.initEffect({ owner: { id: "jason", name: "Jason" } }));
   return { root, store, workspace };
 }
 
@@ -28,36 +29,48 @@ describe("ConfigStore", () => {
     const { store, workspace } = await fixture();
     const input = { id: "tooling", name: "Tooling", summary: "Pi tooling", root: workspace };
 
-    await store.addWorkspace(input);
-    await store.addWorkspace(input);
+    await Effect.runPromise(store.addWorkspaceEffect(input));
+    await Effect.runPromise(store.addWorkspaceEffect(input));
 
-    expect(await store.listPublicWorkspaces()).toEqual([
+    expect(await Effect.runPromise(store.listPublicWorkspacesEffect())).toEqual([
       { id: "tooling", name: "Tooling", summary: "Pi tooling", available: true },
     ]);
-    expect(JSON.stringify(await store.read())).toContain(workspace);
-    expect(JSON.stringify(await store.listPublicWorkspaces())).not.toContain(workspace);
+    expect(JSON.stringify(await Effect.runPromise(store.readEffect()))).toContain(workspace);
+    expect(
+      JSON.stringify(await Effect.runPromise(store.listPublicWorkspacesEffect())),
+    ).not.toContain(workspace);
   });
 
   test("rejects conflicting IDs and duplicate canonical roots", async () => {
     const { root, store, workspace } = await fixture();
     const other = join(root, "other");
     await mkdir(other);
-    await store.addWorkspace({ id: "one", name: "One", summary: "One", root: workspace });
+    await Effect.runPromise(
+      store.addWorkspaceEffect({ id: "one", name: "One", summary: "One", root: workspace }),
+    );
 
     await expect(
-      store.addWorkspace({ id: "one", name: "Changed", summary: "One", root: workspace }),
+      Effect.runPromise(
+        store.addWorkspaceEffect({ id: "one", name: "Changed", summary: "One", root: workspace }),
+      ),
     ).rejects.toThrow("Workspace ID already exists with different configuration");
     await expect(
-      store.addWorkspace({ id: "two", name: "Two", summary: "Two", root: workspace }),
+      Effect.runPromise(
+        store.addWorkspaceEffect({ id: "two", name: "Two", summary: "Two", root: workspace }),
+      ),
     ).rejects.toThrow("Workspace root is already registered");
   });
 
   test("stores only bearer hashes and authenticates active clients", async () => {
     const { root, store } = await fixture();
-    const { bearer } = await store.addClient({ id: "agent-one", tailcatKey: "public-key" });
+    const { bearer } = await Effect.runPromise(
+      store.addClientEffect({ id: "agent-one", tailcatKey: "public-key" }),
+    );
 
-    expect(await store.authenticate(bearer)).toMatchObject({ id: "agent-one" });
-    expect(await store.authenticate("wrong")).toBeUndefined();
+    expect(await Effect.runPromise(store.authenticateEffect(bearer))).toMatchObject({
+      id: "agent-one",
+    });
+    expect(await Effect.runPromise(store.authenticateEffect("wrong"))).toBeUndefined();
     const configText = await readFile(join(root, "config", "config.json"), "utf8");
     expect(configText).not.toContain(bearer);
     expect(configText).toContain("bearerHash");
@@ -73,67 +86,90 @@ describe("ConfigStore", () => {
   test("repeats identical initialization as an idempotent no-op", async () => {
     const { store } = await fixture();
 
-    await store.init({ owner: { id: "jason", name: "Jason" } });
+    await Effect.runPromise(store.initEffect({ owner: { id: "jason", name: "Jason" } }));
 
-    expect((await store.read()).owner).toEqual({ id: "jason", name: "Jason" });
+    expect((await Effect.runPromise(store.readEffect())).owner).toEqual({
+      id: "jason",
+      name: "Jason",
+    });
   });
 
   test("rotates credentials and permanently tombstones revoked client IDs", async () => {
     const { store } = await fixture();
-    const original = await store.addClient({ id: "agent", tailcatKey: "old-key" });
-    const rotated = await store.rotateClient("agent", "new-key");
-
-    expect(await store.authenticate(original.bearer)).toBeUndefined();
-    expect(await store.authenticate(rotated.bearer)).toMatchObject({ id: "agent" });
-    expect(await store.revokeClient("agent")).toBe(true);
-    expect(await store.authenticate(rotated.bearer)).toBeUndefined();
-    await expect(store.addClient({ id: "agent", tailcatKey: "third-key" })).rejects.toThrow(
-      "Client ID was revoked and cannot be reused",
+    const original = await Effect.runPromise(
+      store.addClientEffect({ id: "agent", tailcatKey: "old-key" }),
     );
+    const rotated = await Effect.runPromise(store.rotateClientEffect("agent", "new-key"));
+
+    expect(await Effect.runPromise(store.authenticateEffect(original.bearer))).toBeUndefined();
+    expect(await Effect.runPromise(store.authenticateEffect(rotated.bearer))).toMatchObject({
+      id: "agent",
+    });
+    expect(await Effect.runPromise(store.revokeClientEffect("agent"))).toBe(true);
+    expect(await Effect.runPromise(store.authenticateEffect(rotated.bearer))).toBeUndefined();
+    await expect(
+      Effect.runPromise(store.addClientEffect({ id: "agent", tailcatKey: "third-key" })),
+    ).rejects.toThrow("Client ID was revoked and cannot be reused");
   });
 
   test("permanently tombstones removed workspace IDs", async () => {
     const { store, workspace } = await fixture();
-    await store.addWorkspace({ id: "docs", name: "Docs", summary: "Docs", root: workspace });
+    await Effect.runPromise(
+      store.addWorkspaceEffect({ id: "docs", name: "Docs", summary: "Docs", root: workspace }),
+    );
 
-    expect(await store.removeWorkspace("docs")).toBe(true);
+    expect(await Effect.runPromise(store.removeWorkspaceEffect("docs"))).toBe(true);
     await expect(
-      store.addWorkspace({ id: "docs", name: "Docs", summary: "Docs", root: workspace }),
+      Effect.runPromise(
+        store.addWorkspaceEffect({ id: "docs", name: "Docs", summary: "Docs", root: workspace }),
+      ),
     ).rejects.toThrow("Workspace ID was removed and cannot be reused");
   });
 
   test("fails closed when a crash leaves a tombstoned client in config", async () => {
     const { root, store } = await fixture();
-    const { bearer } = await store.addClient({ id: "agent", tailcatKey: "key" });
+    const { bearer } = await Effect.runPromise(
+      store.addClientEffect({ id: "agent", tailcatKey: "key" }),
+    );
     await writeFile(
       join(root, "state", "tombstones.json"),
       JSON.stringify({ workspaces: [], clients: ["agent"] }),
     );
 
-    expect(await store.authenticate(bearer)).toBeUndefined();
-    expect((await store.readEffective()).clients).toEqual([]);
-    expect(await store.hasClient({ id: "agent", credentialVersion: "revoked" })).toBe(false);
+    expect(await Effect.runPromise(store.authenticateEffect(bearer))).toBeUndefined();
+    expect((await Effect.runPromise(store.readEffectiveEffect())).clients).toEqual([]);
+    expect(
+      await Effect.runPromise(store.hasClientEffect({ id: "agent", credentialVersion: "revoked" })),
+    ).toBe(false);
   });
 
   test("fails closed when security state is missing", async () => {
     const { root, store } = await fixture();
-    const { bearer } = await store.addClient({ id: "agent", tailcatKey: "key" });
+    const { bearer } = await Effect.runPromise(
+      store.addClientEffect({ id: "agent", tailcatKey: "key" }),
+    );
     await rm(join(root, "state", "tombstones.json"));
 
-    await expect(store.authenticate(bearer)).rejects.toThrow("Security state file not found");
+    await expect(Effect.runPromise(store.authenticateEffect(bearer))).rejects.toThrow(
+      "Security state file not found",
+    );
   });
 
   test("cannot rotate a client concurrently with revocation", async () => {
     const { store } = await fixture();
-    const original = await store.addClient({ id: "agent", tailcatKey: "key" });
+    const original = await Effect.runPromise(
+      store.addClientEffect({ id: "agent", tailcatKey: "key" }),
+    );
     const outcomes = await Promise.allSettled([
-      store.rotateClient("agent", "new-key"),
-      store.revokeClient("agent"),
+      Effect.runPromise(store.rotateClientEffect("agent", "new-key")),
+      Effect.runPromise(store.revokeClientEffect("agent")),
     ]);
     const rotated = outcomes[0].status === "fulfilled" ? outcomes[0].value.bearer : undefined;
 
-    expect(await store.authenticate(original.bearer)).toBeUndefined();
-    if (rotated) expect(await store.authenticate(rotated)).toBeUndefined();
-    expect(await store.hasClient({ id: "agent", credentialVersion: "revoked" })).toBe(false);
+    expect(await Effect.runPromise(store.authenticateEffect(original.bearer))).toBeUndefined();
+    if (rotated) expect(await Effect.runPromise(store.authenticateEffect(rotated))).toBeUndefined();
+    expect(
+      await Effect.runPromise(store.hasClientEffect({ id: "agent", credentialVersion: "revoked" })),
+    ).toBe(false);
   });
 });

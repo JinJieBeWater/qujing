@@ -1,46 +1,40 @@
 import { createHash } from "node:crypto";
 import { readFile, stat } from "node:fs/promises";
-import { dirname, isAbsolute } from "node:path";
-import { z } from "zod";
+import { dirname } from "node:path";
+import { Effect } from "effect";
 import { createBearer, hashBearer, sameBearerHash } from "./credentials";
 import {
-  assertPrivatePath,
-  ensurePrivateDirectory,
-  withFileLock,
-  writePrivateJson,
+  assertPrivatePathEffect,
+  ensurePrivateDirectoryEffect,
+  withPrivateLock,
+  writePrivateJsonEffect,
 } from "./private-files";
-import type { ClientIdentity } from "./types";
+import {
+  ClientConfig as ClientConfigSchema,
+  decode,
+  Identifier,
+  Line as LineSchema,
+  LineCredentials as LineCredentialsSchema,
+  LineInput as LineInputSchema,
+  type ClientConfig as ClientConfigData,
+  type Line as LineData,
+  type LineInput as LineInputData,
+} from "./schemas";
 
-const idSchema = z.string().regex(/^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/);
-const keyPathSchema = z.string().max(4_096).refine(isAbsolute, "Line key path must be absolute");
-const bearerSchema = z.string().min(1).max(4_096);
-const lineSchema = z.object({
-  id: idSchema,
-  expectedOwnerId: idSchema,
-  remoteClientId: idSchema,
-  serverAddress: z.string().min(1).max(4_096),
-  remotePort: z.number().int().min(1).max(65_535),
-  keyPath: keyPathSchema,
-  remoteBearer: bearerSchema,
-  createdAt: z.string().datetime(),
-  updatedAt: z.string().datetime(),
-});
-const configSchema = z.object({
-  version: z.literal(1),
-  server: z.object({ host: z.literal("127.0.0.1"), port: z.number().int().min(1).max(65_535) }),
-  localBearerHash: z.string().regex(/^[a-f0-9]{64}$/),
-  lines: z.array(lineSchema).max(64),
-});
+const parseConfig = decode(ClientConfigSchema);
+const parseIdentifier = decode(Identifier);
+const parseLine = decode(LineSchema);
+const parseLineInput = decode(LineInputSchema);
+const parseLineCredentials = decode(LineCredentialsSchema);
 
-export type ClientConfig = z.infer<typeof configSchema>;
-export type LineConfig = z.infer<typeof lineSchema>;
-export type LineInput = Omit<LineConfig, "createdAt" | "updatedAt">;
+export type ClientConfig = ClientConfigData;
+export type LineConfig = LineData;
+export type LineInput = LineInputData;
 export type PublicLine = Pick<
   LineConfig,
   "id" | "expectedOwnerId" | "remoteClientId" | "remotePort" | "createdAt" | "updatedAt"
 >;
 export const LOCAL_CLIENT_ID = "local-agent";
-
 export interface ClientConfigStorePaths {
   configPath: string;
 }
@@ -51,162 +45,232 @@ export type ClientInitResult =
 export class ClientConfigStore {
   constructor(readonly paths: ClientConfigStorePaths) {}
 
-  async init(input: { port?: number } = {}): Promise<ClientInitResult> {
-    await ensurePrivateDirectory(dirname(this.paths.configPath));
-    return withFileLock(this.paths.configPath, async () => {
-      try {
-        const current = await this.read();
-        if (input.port !== undefined && current.server.port !== input.port)
-          throw new Error("Client is already initialized with a different port");
-        return { initialized: false, alreadyInitialized: true };
-      } catch (error) {
-        if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
-      }
-      const bearer = createBearer();
-      await writePrivateJson(
-        this.paths.configPath,
-        configSchema.parse({
-          version: 1,
-          server: { host: "127.0.0.1", port: input.port ?? 43_111 },
-          localBearerHash: hashBearer(bearer),
-          lines: [],
-        }),
+  initEffect(input: { port?: number } = {}) {
+    return Effect.gen({ self: this }, function* () {
+      yield* ensurePrivateDirectoryEffect(dirname(this.paths.configPath));
+      return yield* this.withLockEffect(
+        this.readEffect().pipe(
+          Effect.matchEffect({
+            onFailure: (error) => {
+              if ((error as NodeJS.ErrnoException).code !== "ENOENT") return Effect.fail(error);
+              const bearer = createBearer();
+              return this.writeJsonEffect(
+                parseConfig({
+                  version: 1,
+                  server: { host: "127.0.0.1", port: input.port ?? 43_111 },
+                  localBearerHash: hashBearer(bearer),
+                  lines: [],
+                }),
+              ).pipe(Effect.as({ initialized: true as const, bearer }));
+            },
+            onSuccess: (current) =>
+              input.port !== undefined && current.server.port !== input.port
+                ? Effect.fail(new Error("Client is already initialized with a different port"))
+                : Effect.succeed({
+                    initialized: false as const,
+                    alreadyInitialized: true as const,
+                  }),
+          }),
+        ),
       );
-      return { initialized: true, bearer };
     });
   }
 
-  async read(): Promise<ClientConfig> {
-    await assertPrivatePath(dirname(this.paths.configPath), true);
-    await assertPrivatePath(this.paths.configPath, false);
-    return configSchema.parse(JSON.parse(await readFile(this.paths.configPath, "utf8")));
-  }
-
-  async rotateLocalBearer(): Promise<{ bearer: string }> {
-    return withFileLock(this.paths.configPath, async () => {
-      const config = await this.read();
-      const bearer = createBearer();
-      config.localBearerHash = hashBearer(bearer);
-      await writePrivateJson(this.paths.configPath, config);
-      return { bearer };
+  readEffect() {
+    return Effect.gen({ self: this }, function* () {
+      yield* assertPrivatePathEffect(dirname(this.paths.configPath), true);
+      yield* assertPrivatePathEffect(this.paths.configPath, false);
+      const text = yield* this.privateOperation(() => readFile(this.paths.configPath, "utf8"));
+      return yield* Effect.try({
+        try: () => parseConfig(JSON.parse(text)),
+        catch: (error) => error,
+      });
     });
   }
 
-  async authenticateLocal(bearer: string): Promise<ClientIdentity | undefined> {
-    const config = await this.read();
-    return sameBearerHash(config.localBearerHash, hashBearer(bearer))
-      ? { id: LOCAL_CLIENT_ID, credentialVersion: config.localBearerHash }
-      : undefined;
-  }
-
-  async validate(input: LineInput): Promise<LineInput> {
-    const line = lineSchema.omit({ createdAt: true, updatedAt: true }).parse(input);
-    await this.validateKey(line.keyPath);
-    return line;
-  }
-
-  async add(input: LineInput): Promise<void> {
-    const line = await this.validate(input);
-    const fingerprint = await this.validateKey(line.keyPath);
-    await withFileLock(this.paths.configPath, async () => {
-      const config = await this.read();
-      const existing = config.lines.find(({ id }) => id === line.id);
-      if (existing) {
-        const comparable = { ...existing, createdAt: undefined, updatedAt: undefined };
-        if (JSON.stringify(comparable) === JSON.stringify(line)) return;
-        throw new Error(`Line already exists with different configuration: ${line.id}`);
-      }
-      await this.assertDistinctCredentials(config.lines, line.id, line.remoteBearer, fingerprint);
-      const now = new Date().toISOString();
-      config.lines.push({ ...line, createdAt: now, updatedAt: now });
-      await writePrivateJson(this.paths.configPath, configSchema.parse(config));
-    });
-  }
-
-  async list(): Promise<PublicLine[]> {
-    return (await this.read()).lines.map(
-      ({ id, expectedOwnerId, remoteClientId, remotePort, createdAt, updatedAt }) => ({
-        id,
-        expectedOwnerId,
-        remoteClientId,
-        remotePort,
-        createdAt,
-        updatedAt,
+  rotateLocalBearerEffect() {
+    return this.withLockEffect(
+      Effect.gen({ self: this }, function* () {
+        const config = yield* this.readEffect();
+        const bearer = createBearer();
+        yield* this.writeJsonEffect(
+          parseConfig({ ...config, localBearerHash: hashBearer(bearer) }),
+        );
+        return { bearer };
       }),
     );
   }
 
-  async get(id: string): Promise<LineConfig | undefined> {
-    idSchema.parse(id);
-    return (await this.read()).lines.find((line) => line.id === id);
-  }
-
-  async validateCredentials(
-    input: Pick<LineConfig, "keyPath" | "remoteBearer">,
-  ): Promise<Pick<LineConfig, "keyPath" | "remoteBearer">> {
-    const credentials = z
-      .object({ keyPath: keyPathSchema, remoteBearer: bearerSchema })
-      .parse(input);
-    await this.validateKey(credentials.keyPath);
-    return credentials;
-  }
-
-  async updateCredentials(
-    id: string,
-    update: Pick<LineConfig, "keyPath" | "remoteBearer">,
-  ): Promise<void> {
-    idSchema.parse(id);
-    const credentials = await this.validateCredentials(update);
-    const fingerprint = await this.validateKey(credentials.keyPath);
-    await withFileLock(this.paths.configPath, async () => {
-      const config = await this.read();
-      const line = config.lines.find((entry) => entry.id === id);
-      if (!line) throw new Error(`Line not found: ${id}`);
-      await this.assertDistinctCredentials(config.lines, id, credentials.remoteBearer, fingerprint);
-      line.keyPath = credentials.keyPath;
-      line.remoteBearer = credentials.remoteBearer;
-      line.updatedAt = new Date().toISOString();
-      await writePrivateJson(this.paths.configPath, configSchema.parse(config));
+  authenticateLocalEffect(bearer: string) {
+    return Effect.gen({ self: this }, function* () {
+      const config = yield* this.readEffect();
+      return sameBearerHash(config.localBearerHash, hashBearer(bearer))
+        ? { id: LOCAL_CLIENT_ID, credentialVersion: config.localBearerHash }
+        : undefined;
     });
   }
 
-  async remove(id: string): Promise<boolean> {
-    idSchema.parse(id);
-    return withFileLock(this.paths.configPath, async () => {
-      const config = await this.read();
-      const lines = config.lines.filter((line) => line.id !== id);
-      if (lines.length === config.lines.length) return false;
-      config.lines = lines;
-      await writePrivateJson(this.paths.configPath, config);
-      return true;
+  validateEffect(input: LineInput) {
+    return this.validateLineEffect(input).pipe(Effect.map(({ line }) => line));
+  }
+
+  addEffect(input: LineInput) {
+    return Effect.gen({ self: this }, function* () {
+      const { line, fingerprint } = yield* this.validateLineEffect(input);
+      yield* this.withLockEffect(
+        Effect.gen({ self: this }, function* () {
+          const config = yield* this.readEffect();
+          const existing = config.lines.find(({ id }) => id === line.id);
+          if (existing) {
+            const { createdAt: _createdAt, updatedAt: _updatedAt, ...comparable } = existing;
+            if (JSON.stringify(comparable) === JSON.stringify(line)) return;
+            throw new Error(`Line already exists with different configuration: ${line.id}`);
+          }
+          yield* this.assertDistinctCredentialsEffect(
+            config.lines,
+            line.id,
+            line.remoteBearer,
+            fingerprint,
+          );
+          const now = new Date().toISOString();
+          yield* this.writeJsonEffect(
+            parseConfig({
+              ...config,
+              lines: [...config.lines, parseLine({ ...line, createdAt: now, updatedAt: now })],
+            }),
+          );
+        }),
+      );
     });
   }
 
-  private async validateKey(path: string): Promise<string> {
-    const key = await stat(path).catch(() => {
-      throw new Error(`Line key not found: ${path}`);
-    });
-    if (!key.isFile()) throw new Error(`Line key is not a file: ${path}`);
-    await assertPrivatePath(path, false).catch(() => {
-      throw new Error(`Line key permissions must be 0600: ${path}`);
-    });
-    return createHash("sha256")
-      .update(await readFile(path))
-      .digest("hex");
+  listEffect() {
+    return this.readEffect().pipe(
+      Effect.map((config) =>
+        config.lines.map(
+          ({ id, expectedOwnerId, remoteClientId, remotePort, createdAt, updatedAt }) => ({
+            id,
+            expectedOwnerId,
+            remoteClientId,
+            remotePort,
+            createdAt,
+            updatedAt,
+          }),
+        ),
+      ),
+    );
   }
 
-  private async assertDistinctCredentials(
-    lines: LineConfig[],
+  getEffect(id: string) {
+    return Effect.gen({ self: this }, function* () {
+      yield* Effect.sync(() => parseIdentifier(id));
+      return (yield* this.readEffect()).lines.find((line) => line.id === id);
+    });
+  }
+
+  validateCredentialsEffect(input: Pick<LineConfig, "keyPath" | "remoteBearer">) {
+    return this.validateCredentialInputEffect(input).pipe(
+      Effect.map(({ credentials }) => credentials),
+    );
+  }
+
+  updateCredentialsEffect(id: string, update: Pick<LineConfig, "keyPath" | "remoteBearer">) {
+    return Effect.gen({ self: this }, function* () {
+      yield* Effect.sync(() => parseIdentifier(id));
+      const { credentials, fingerprint } = yield* this.validateCredentialInputEffect(update);
+      yield* this.withLockEffect(
+        Effect.gen({ self: this }, function* () {
+          const config = yield* this.readEffect();
+          if (!config.lines.some((entry) => entry.id === id))
+            throw new Error(`Line not found: ${id}`);
+          yield* this.assertDistinctCredentialsEffect(
+            config.lines,
+            id,
+            credentials.remoteBearer,
+            fingerprint,
+          );
+          yield* this.writeJsonEffect(
+            parseConfig({
+              ...config,
+              lines: config.lines.map((line) =>
+                line.id === id
+                  ? { ...line, ...credentials, updatedAt: new Date().toISOString() }
+                  : line,
+              ),
+            }),
+          );
+        }),
+      );
+    });
+  }
+
+  removeEffect(id: string) {
+    return Effect.gen({ self: this }, function* () {
+      yield* Effect.sync(() => parseIdentifier(id));
+      return yield* this.withLockEffect(
+        Effect.gen({ self: this }, function* () {
+          const config = yield* this.readEffect();
+          const lines = config.lines.filter((line) => line.id !== id);
+          if (lines.length === config.lines.length) return false;
+          yield* this.writeJsonEffect(parseConfig({ ...config, lines }));
+          return true;
+        }),
+      );
+    });
+  }
+
+  private validateLineEffect(input: LineInput) {
+    return Effect.gen({ self: this }, function* () {
+      const line = yield* Effect.sync(() => parseLineInput(input));
+      return { line, fingerprint: yield* this.validateKeyEffect(line.keyPath) };
+    });
+  }
+  private validateCredentialInputEffect(input: Pick<LineConfig, "keyPath" | "remoteBearer">) {
+    return Effect.gen({ self: this }, function* () {
+      const credentials = yield* Effect.sync(() => parseLineCredentials(input));
+      return { credentials, fingerprint: yield* this.validateKeyEffect(credentials.keyPath) };
+    });
+  }
+  private validateKeyEffect(path: string) {
+    return Effect.gen(function* () {
+      const key = yield* Effect.tryPromise({
+        try: () => stat(path),
+        catch: () => new Error(`Line key not found: ${path}`),
+      });
+      if (!key.isFile()) throw new Error(`Line key is not a file: ${path}`);
+      yield* assertPrivatePathEffect(path, false).pipe(
+        Effect.mapError(() => new Error(`Line key permissions must be 0600: ${path}`)),
+      );
+      const contents = yield* Effect.tryPromise({
+        try: () => readFile(path),
+        catch: (error) => error,
+      });
+      return createHash("sha256").update(contents).digest("hex");
+    });
+  }
+  private assertDistinctCredentialsEffect(
+    lines: ReadonlyArray<LineConfig>,
     id: string,
     bearer: string,
     keyFingerprint: string,
-  ): Promise<void> {
-    for (const line of lines) {
-      if (line.id === id) continue;
-      if (sameBearerHash(hashBearer(line.remoteBearer), hashBearer(bearer)))
-        throw new Error("Each Line must use a distinct remote bearer");
-      if ((await this.validateKey(line.keyPath)) === keyFingerprint)
-        throw new Error("Each Line must use a distinct Tailcat key");
-    }
+  ) {
+    return Effect.gen({ self: this }, function* () {
+      for (const line of lines) {
+        if (line.id === id) continue;
+        if (sameBearerHash(hashBearer(line.remoteBearer), hashBearer(bearer)))
+          throw new Error("Each Line must use a distinct remote bearer");
+        if ((yield* this.validateKeyEffect(line.keyPath)) === keyFingerprint)
+          throw new Error("Each Line must use a distinct Tailcat key");
+      }
+    });
+  }
+  private writeJsonEffect(value: unknown) {
+    return writePrivateJsonEffect(this.paths.configPath, value);
+  }
+  private withLockEffect<A>(operation: Effect.Effect<A, unknown>): Effect.Effect<A, unknown> {
+    return withPrivateLock(this.paths.configPath, operation);
+  }
+  private privateOperation<A>(operation: () => Promise<A>) {
+    return Effect.tryPromise({ try: operation, catch: (error) => error });
   }
 }

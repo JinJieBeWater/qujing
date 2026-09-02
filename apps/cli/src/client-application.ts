@@ -1,259 +1,328 @@
 import { createHash } from "node:crypto";
-import { z } from "zod";
+import { Deferred, Effect, Ref, Semaphore } from "effect";
 import type { ClientConfig, ClientConfigStore, LineConfig } from "./client-config";
 import { ColleagueLineError } from "./errors";
-import { LineRuntime } from "./line-runtime";
-import type { OwnerMetadata, PublicWorkspace } from "./types";
-
-const questionSchema = z
-  .string()
-  .max(20_000)
-  .refine((value) => value.trim().length > 0);
-
-export interface ClientLine {
-  id: string;
-  available: boolean;
-  owner?: OwnerMetadata;
-  workspaces: PublicWorkspace[];
-}
-
-export interface ClientAskResult {
-  line: string;
-  workspace: string;
-  answer: string;
-}
+import { LineRuntime, type LineAskResult, type LineWorkspaces } from "./line-runtime";
+import type { ClientAskResult, ClientLine } from "./schemas";
+import { startConnectorEffect } from "./transport/process";
 
 export interface LineRuntimeClient {
-  listWorkspaces(signal?: AbortSignal): ReturnType<LineRuntime["listWorkspaces"]>;
-  ask(workspace: string, question: string, signal?: AbortSignal): ReturnType<LineRuntime["ask"]>;
-  close(): Promise<void>;
+  listWorkspacesEffect(signal?: AbortSignal): Effect.Effect<LineWorkspaces, unknown>;
+  askEffect(
+    workspace: string,
+    question: string,
+    signal?: AbortSignal,
+  ): Effect.Effect<LineAskResult, unknown>;
+  closeEffect(): Effect.Effect<void, unknown>;
 }
 
 export interface ClientApplicationOptions {
-  config: Pick<ClientConfigStore, "read">;
+  config: Pick<ClientConfigStore, "readEffect">;
   createRuntime?: (line: LineConfig) => LineRuntimeClient;
 }
-
 interface RuntimeEntry {
   fingerprint: string;
   runtime: LineRuntimeClient;
 }
-
 interface OperationLease {
   controller: AbortController;
   signal: AbortSignal;
-  settled: Promise<void>;
-  finish(): void;
+  settled: Deferred.Deferred<void>;
+}
+interface State {
+  runtimes: Map<string, RuntimeEntry>;
+  active: Map<string, Set<OperationLease>>;
+  blocked: Map<string, string>;
+  closed: boolean;
 }
 
+/** Effect owns coordination. */
 export class ClientApplication {
-  private readonly runtimes = new Map<string, RuntimeEntry>();
-  private readonly active = new Map<string, Set<OperationLease>>();
-  private readonly blocked = new Map<string, string>();
   private readonly createRuntime: (line: LineConfig) => LineRuntimeClient;
-  private gate = Promise.resolve();
-  private closed = false;
+  private readonly gate = Effect.runSync(Semaphore.make(1));
+  private readonly state = Effect.runSync(
+    Ref.make<State>({ runtimes: new Map(), active: new Map(), blocked: new Map(), closed: false }),
+  );
 
   constructor(private readonly options: ClientApplicationOptions) {
-    this.createRuntime = options.createRuntime ?? ((line) => new LineRuntime({ line }));
-  }
-
-  reconcile(): Promise<ClientConfig> {
-    return this.withGate(async () => {
-      this.assertOpen();
-      const config = await this.options.config.read();
-      await this.reconcileLocked(config);
-      return config;
-    });
-  }
-
-  async listLines(signal?: AbortSignal): Promise<ClientLine[]> {
-    signal?.throwIfAborted();
-    const lines = await this.withGate(async () => {
-      this.assertOpen();
-      const config = await this.options.config.read();
-      await this.reconcileLocked(config);
-      return config.lines.map((line) => {
-        if (this.blocked.has(line.id)) return { line };
-        return {
+    this.createRuntime =
+      options.createRuntime ??
+      ((line) =>
+        new LineRuntime({
           line,
-          runtime: this.runtimeLocked(line),
-          lease: this.beginOperationLocked(line.id, signal),
-        };
-      });
-    });
-    return Promise.all(
-      lines.map(async ({ line, runtime, lease }) => {
-        if (!runtime || !lease) return { id: line.id, available: false, workspaces: [] };
-        try {
-          const listed = await runtime.listWorkspaces(lease.signal);
-          return {
-            id: line.id,
-            available: true,
-            owner: owner(listed.owner),
-            workspaces: listed.workspaces,
-          };
-        } catch (error) {
-          if (isAbort(error)) throw error;
-          return { id: line.id, available: false, workspaces: [] };
-        } finally {
-          lease.finish();
-        }
+          startConnectorEffect: (options, signal) =>
+            startConnectorEffect(options, undefined, signal),
+        }));
+  }
+
+  reconcileEffect() {
+    return this.withGateEffect(
+      Effect.gen({ self: this }, function* () {
+        yield* this.assertOpenEffect();
+        const config = yield* this.readConfigEffect();
+        yield* this.reconcileLockedEffect(config);
+        return config;
       }),
     );
   }
 
-  async ask(
-    input: { line: string; workspace: string; question: string },
-    signal?: AbortSignal,
-  ): Promise<ClientAskResult> {
-    if (!questionSchema.safeParse(input.question).success)
-      throw new ColleagueLineError("INVALID_QUESTION", "Question is invalid");
-    signal?.throwIfAborted();
-    const { line, runtime, lease } = await this.withGate(async () => {
-      this.assertOpen();
-      const config = await this.options.config.read();
-      await this.reconcileLocked(config);
-      const line = config.lines.find((entry) => entry.id === input.line);
-      if (!line) throw new ColleagueLineError("LINE_NOT_FOUND", "Line not found");
-      if (this.blocked.has(line.id)) throw lineUnavailable();
-      return {
-        line,
-        runtime: this.runtimeLocked(line),
-        lease: this.beginOperationLocked(line.id, signal),
+  listLinesEffect(signal?: AbortSignal) {
+    return Effect.gen({ self: this }, function* () {
+      yield* throwIfAbortedEffect(signal);
+      const lines = yield* this.withGateEffect(
+        Effect.gen({ self: this }, function* () {
+          yield* this.assertOpenEffect();
+          const config = yield* this.readConfigEffect();
+          yield* this.reconcileLockedEffect(config);
+          const state = yield* Ref.get(this.state);
+          return yield* Effect.forEach(config.lines, (line) => {
+            if (state.blocked.has(line.id)) return Effect.succeed({ line });
+            return this.runtimeAndLeaseLockedEffect(line, signal).pipe(
+              Effect.map(({ runtime, lease }) => ({ line, runtime, lease })),
+            );
+          });
+        }),
+      );
+      return yield* Effect.all(
+        lines.map((entry) => {
+          const { line } = entry;
+          if (!("runtime" in entry))
+            return Effect.succeed<ClientLine>({ id: line.id, available: false, workspaces: [] });
+          const { runtime, lease } = entry as {
+            line: LineConfig;
+            runtime: LineRuntimeClient;
+            lease: OperationLease;
+          };
+          return this.listWorkspacesEffect(runtime, lease.signal).pipe(
+            Effect.map((listed): ClientLine => ({
+              id: line.id,
+              available: true,
+              owner: listed.owner,
+              workspaces: listed.workspaces,
+            })),
+            Effect.catchEager((error) =>
+              isAbort(error)
+                ? Effect.fail(error)
+                : Effect.succeed<ClientLine>({ id: line.id, available: false, workspaces: [] }),
+            ),
+            Effect.ensuring(this.finishLeaseEffect(line.id, lease)),
+          );
+        }),
+        { concurrency: "unbounded" },
+      );
+    });
+  }
+
+  askEffect(input: { line: string; workspace: string; question: string }, signal?: AbortSignal) {
+    return Effect.gen({ self: this }, function* () {
+      yield* throwIfAbortedEffect(signal);
+      const admitted = yield* this.withGateEffect(
+        Effect.gen({ self: this }, function* () {
+          yield* this.assertOpenEffect();
+          const config = yield* this.readConfigEffect();
+          yield* this.reconcileLockedEffect(config);
+          const line = config.lines.find((entry) => entry.id === input.line);
+          if (!line)
+            return yield* Effect.fail(new ColleagueLineError("LINE_NOT_FOUND", "Line not found"));
+          if ((yield* Ref.get(this.state)).blocked.has(line.id))
+            return yield* Effect.fail(lineUnavailable());
+          return yield* this.runtimeAndLeaseLockedEffect(line, signal).pipe(
+            Effect.map(({ runtime, lease }) => ({ line, runtime, lease })),
+          );
+        }),
+      );
+      return yield* this.askRuntimeEffect(
+        admitted.runtime,
+        input.workspace,
+        input.question,
+        admitted.lease.signal,
+      ).pipe(
+        Effect.map((result): ClientAskResult => ({
+          line: admitted.line.id,
+          workspace: result.workspace,
+          answer: result.answer,
+        })),
+        Effect.ensuring(this.finishLeaseEffect(admitted.line.id, admitted.lease)),
+      );
+    });
+  }
+
+  retireLineEffect(id: string, expectedFingerprint: string) {
+    return this.withGateEffect(
+      Effect.gen({ self: this }, function* () {
+        yield* this.assertOpenEffect();
+        const config = yield* this.readConfigEffect();
+        const line = config.lines.find((entry) => entry.id === id);
+        if (!line || lineFingerprint(line) !== expectedFingerprint)
+          return yield* Effect.fail(new Error("Line changed before retirement completed"));
+        yield* this.blockAndRetireLockedEffect(id, expectedFingerprint);
+      }),
+    );
+  }
+
+  resumeLineEffect(id: string, expectedFingerprint: string) {
+    return this.withGateEffect(
+      Ref.update(this.state, (state) =>
+        state.blocked.get(id) === expectedFingerprint
+          ? { ...state, blocked: without(state.blocked, id) }
+          : state,
+      ),
+    );
+  }
+
+  closeEffect() {
+    return this.withGateEffect(
+      Effect.gen({ self: this }, function* () {
+        const state = yield* Ref.get(this.state);
+        if (state.closed) return;
+        yield* Ref.update(this.state, (current) => ({ ...current, closed: true }));
+        const ids = new Set([...state.runtimes.keys(), ...state.active.keys()]);
+        yield* Effect.all(
+          [...ids].map((id) => this.retireRuntimeLockedEffect(id)),
+          { concurrency: "unbounded" },
+        );
+        yield* Ref.update(this.state, (current) => ({ ...current, blocked: new Map() }));
+      }),
+    );
+  }
+
+  private reconcileLockedEffect(config: ClientConfig) {
+    return Effect.gen({ self: this }, function* () {
+      const current = new Map(config.lines.map((line) => [line.id, lineFingerprint(line)]));
+      yield* Ref.update(this.state, (state) => ({
+        ...state,
+        blocked: new Map(
+          [...state.blocked].filter(([id, fingerprint]) => current.get(id) === fingerprint),
+        ),
+      }));
+      const stale = [...(yield* Ref.get(this.state)).runtimes]
+        .filter(([id, entry]) => current.get(id) !== entry.fingerprint)
+        .map(([id]) => id);
+      yield* Effect.all(
+        stale.map((id) => this.retireRuntimeLockedEffect(id)),
+        { concurrency: "unbounded" },
+      ).pipe(
+        Effect.catchEager((error) =>
+          Effect.fail(new AggregateError([error], "Line retirement failed")),
+        ),
+      );
+    });
+  }
+
+  private runtimeAndLeaseLockedEffect(line: LineConfig, signal?: AbortSignal) {
+    return Effect.gen({ self: this }, function* () {
+      const fingerprint = lineFingerprint(line);
+      const state = yield* Ref.get(this.state);
+      const runtime =
+        state.runtimes.get(line.id)?.fingerprint === fingerprint
+          ? state.runtimes.get(line.id)!.runtime
+          : this.createRuntime(line);
+      if (!state.runtimes.has(line.id) || state.runtimes.get(line.id)?.fingerprint !== fingerprint)
+        yield* Ref.update(this.state, (current) => ({
+          ...current,
+          runtimes: new Map(current.runtimes).set(line.id, { fingerprint, runtime }),
+        }));
+      const controller = new AbortController();
+      const lease = {
+        controller,
+        signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
+        settled: yield* Deferred.make<void>(),
       };
-    });
-    try {
-      const result = await runtime.ask(input.workspace, input.question, lease.signal);
-      return { line: line.id, workspace: result.workspace, answer: result.answer };
-    } finally {
-      lease.finish();
-    }
-  }
-
-  retireLine(id: string, expectedFingerprint: string): Promise<void> {
-    return this.withGate(async () => {
-      this.assertOpen();
-      const config = await this.options.config.read();
-      const line = config.lines.find((entry) => entry.id === id);
-      if (!line || lineFingerprint(line) !== expectedFingerprint)
-        throw new Error("Line changed before retirement completed");
-      this.blocked.set(id, expectedFingerprint);
-      await this.retireRuntimeLocked(id, lineUnavailable());
+      const leases = new Set((yield* Ref.get(this.state)).active.get(line.id) ?? []).add(lease);
+      yield* Ref.update(this.state, (current) => ({
+        ...current,
+        active: new Map(current.active).set(line.id, leases),
+      }));
+      return { runtime, lease };
     });
   }
 
-  resumeLine(id: string, expectedFingerprint: string): Promise<void> {
-    return this.withGate(async () => {
-      if (this.blocked.get(id) === expectedFingerprint) this.blocked.delete(id);
+  private blockAndRetireLockedEffect(id: string, fingerprint: string) {
+    return Ref.update(this.state, (state) => ({
+      ...state,
+      blocked: new Map(state.blocked).set(id, fingerprint),
+    })).pipe(Effect.andThen(this.retireRuntimeLockedEffect(id)));
+  }
+  private retireRuntimeLockedEffect(id: string) {
+    return Effect.gen({ self: this }, function* () {
+      const [entry, leases] = yield* Ref.modify(this.state, (state) => {
+        const active = [...(state.active.get(id) ?? [])];
+        for (const lease of active) lease.controller.abort(lineUnavailable());
+        return [
+          [state.runtimes.get(id), active] as const,
+          { ...state, runtimes: without(state.runtimes, id) },
+        ] as const;
+      });
+      yield* Effect.all(
+        leases.map((lease) => Deferred.await(lease.settled)),
+        { concurrency: "unbounded" },
+      ).pipe(
+        Effect.andThen(entry ? this.closeRuntimeEffect(entry.runtime) : Effect.void),
+        Effect.catchEager((error) =>
+          Effect.fail(new AggregateError([error], "Line retirement failed")),
+        ),
+      );
     });
   }
-
-  close(): Promise<void> {
-    return this.withGate(async () => {
-      if (this.closed) return;
-      this.closed = true;
-      const ids = new Set([...this.runtimes.keys(), ...this.active.keys()]);
-      await settleAll([...ids].map((id) => this.retireRuntimeLocked(id, lineUnavailable())));
-      this.blocked.clear();
-    });
+  private finishLeaseEffect(id: string, lease: OperationLease) {
+    return Deferred.succeed(lease.settled, undefined).pipe(
+      Effect.andThen(
+        Ref.update(this.state, (state) => {
+          const active = new Map(state.active);
+          const leases = new Set(active.get(id));
+          leases.delete(lease);
+          if (leases.size) active.set(id, leases);
+          else active.delete(id);
+          return { ...state, active };
+        }),
+      ),
+    );
   }
-
-  private async reconcileLocked(config: ClientConfig): Promise<void> {
-    const current = new Map(config.lines.map((line) => [line.id, lineFingerprint(line)]));
-    for (const [id, expected] of this.blocked) {
-      if (current.get(id) !== expected) this.blocked.delete(id);
-    }
-    const stale = [...this.runtimes].filter(([id, entry]) => current.get(id) !== entry.fingerprint);
-    await Promise.allSettled(stale.map(([id]) => this.retireRuntimeLocked(id, lineUnavailable())));
+  private readConfigEffect() {
+    return this.options.config.readEffect();
   }
-
-  private runtimeLocked(line: LineConfig): LineRuntimeClient {
-    const fingerprint = lineFingerprint(line);
-    const current = this.runtimes.get(line.id);
-    if (current?.fingerprint === fingerprint) return current.runtime;
-    const runtime = this.createRuntime(line);
-    this.runtimes.set(line.id, { fingerprint, runtime });
-    return runtime;
+  private listWorkspacesEffect(runtime: LineRuntimeClient, signal: AbortSignal) {
+    return runtime.listWorkspacesEffect(signal);
   }
-
-  private beginOperationLocked(id: string, signal?: AbortSignal): OperationLease {
-    const controller = new AbortController();
-    let settle!: () => void;
-    let finished = false;
-    const settled = new Promise<void>((resolve) => {
-      settle = resolve;
-    });
-    const lease: OperationLease = {
-      controller,
-      signal: signal ? AbortSignal.any([signal, controller.signal]) : controller.signal,
-      settled,
-      finish: () => {
-        if (finished) return;
-        finished = true;
-        const leases = this.active.get(id);
-        leases?.delete(lease);
-        if (leases?.size === 0) this.active.delete(id);
-        settle();
-      },
-    };
-    const leases = this.active.get(id) ?? new Set<OperationLease>();
-    leases.add(lease);
-    this.active.set(id, leases);
-    return lease;
+  private askRuntimeEffect(
+    runtime: LineRuntimeClient,
+    workspace: string,
+    question: string,
+    signal: AbortSignal,
+  ) {
+    return runtime.askEffect(workspace, question, signal);
   }
-
-  private async retireRuntimeLocked(id: string, reason: Error): Promise<void> {
-    const entry = this.runtimes.get(id);
-    this.runtimes.delete(id);
-    const leases = [...(this.active.get(id) ?? [])];
-    for (const lease of leases) lease.controller.abort(reason);
-    await settleAll([
-      ...(entry ? [entry.runtime.close()] : []),
-      ...leases.map((lease) => lease.settled),
-    ]);
+  private closeRuntimeEffect(runtime: LineRuntimeClient) {
+    return runtime.closeEffect();
   }
-
-  private assertOpen(): void {
-    if (this.closed) throw new ColleagueLineError("LINE_UNAVAILABLE", "Client is stopped");
+  private assertOpenEffect() {
+    return Ref.get(this.state).pipe(
+      Effect.flatMap((state) =>
+        state.closed
+          ? Effect.fail(new ColleagueLineError("LINE_UNAVAILABLE", "Client is stopped"))
+          : Effect.void,
+      ),
+    );
   }
-
-  private async withGate<T>(operation: () => Promise<T>): Promise<T> {
-    const previous = this.gate;
-    let release!: () => void;
-    this.gate = new Promise<void>((resolve) => {
-      release = resolve;
-    });
-    await previous;
-    try {
-      return await operation();
-    } finally {
-      release();
-    }
+  private withGateEffect<A, E, R>(effect: Effect.Effect<A, E, R>) {
+    return this.gate.withPermit(effect);
   }
 }
 
 export function lineFingerprint(line: LineConfig): string {
   return createHash("sha256").update(JSON.stringify(line)).digest("hex");
 }
-
-async function settleAll(operations: Promise<unknown>[]): Promise<void> {
-  const failures = (await Promise.allSettled(operations))
-    .filter((result): result is PromiseRejectedResult => result.status === "rejected")
-    .map((result) => result.reason);
-  if (failures.length > 0) throw new AggregateError(failures, "Line retirement failed");
+function without<K, V>(map: Map<K, V>, key: K) {
+  const next = new Map(map);
+  next.delete(key);
+  return next;
 }
-
-function owner(value: { id: string; name: string; summary?: string | undefined }): OwnerMetadata {
-  return value.summary === undefined
-    ? { id: value.id, name: value.name }
-    : { ...value, summary: value.summary };
-}
-
 function lineUnavailable(): ColleagueLineError {
   return new ColleagueLineError("LINE_UNAVAILABLE", "Line unavailable");
 }
-
 function isAbort(error: unknown): error is DOMException {
   return error instanceof DOMException && error.name === "AbortError";
+}
+function throwIfAbortedEffect(signal?: AbortSignal) {
+  return Effect.try({ try: () => signal?.throwIfAborted(), catch: (error) => error });
 }

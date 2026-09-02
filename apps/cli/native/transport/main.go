@@ -141,13 +141,8 @@ func keyCreate(args []string) error {
 	if *output == "" {
 		return errors.New("key-create requires --output")
 	}
-	if _, err := os.Stat(*output); err == nil {
-		return fmt.Errorf("key already exists: %s", *output)
-	} else if !errors.Is(err, os.ErrNotExist) {
-		return err
-	}
 	privateKey := tailcat.NewPrivateKey()
-	if err := writePrivateJSON(*output, privateKey); err != nil {
+	if err := writeNewPrivateJSON(*output, privateKey); err != nil {
 		return err
 	}
 	return json.NewEncoder(os.Stdout).Encode(map[string]any{
@@ -440,6 +435,36 @@ func writePrivateJSON(path string, value any) error {
 		return err
 	}
 	if err := restrictPrivateFile(path); err != nil {
+		return err
+	}
+	return syncPrivateDirectory(directory)
+}
+
+func writeNewPrivateJSON(path string, value any) error {
+	directory := filepath.Dir(path)
+	if err := os.MkdirAll(directory, 0700); err != nil {
+		return err
+	}
+	staged, err := os.CreateTemp(directory, ".key-new-*")
+	if err != nil {
+		return err
+	}
+	stagedPath := staged.Name()
+	if err := staged.Close(); err != nil {
+		os.Remove(stagedPath)
+		return err
+	}
+	if err := os.Remove(stagedPath); err != nil {
+		return err
+	}
+	defer os.Remove(stagedPath)
+	if err := writePrivateJSON(stagedPath, value); err != nil {
+		return err
+	}
+	if err := os.Link(stagedPath, path); err != nil {
+		if errors.Is(err, os.ErrExist) {
+			return fmt.Errorf("key already exists: %s: %w", path, err)
+		}
 		return err
 	}
 	return syncPrivateDirectory(directory)

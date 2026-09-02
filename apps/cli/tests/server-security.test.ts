@@ -1,9 +1,10 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Context, Effect, Exit, Scope } from "effect";
 import { chmod, mkdtemp, mkdir, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigStore } from "../src/config";
-import { startServer } from "../src/server";
+import { startServerEffect } from "../src/server";
 
 const roots: string[] = [];
 afterEach(async () =>
@@ -20,12 +21,18 @@ describe("Gateway private-state boundary", () => {
       stateRoot: join(root, "state"),
     };
     await mkdir(join(root, "workspace"));
-    await new ConfigStore(paths).init({
-      owner: { id: "owner", name: "Owner" },
-    });
+    await Effect.runPromise(
+      new ConfigStore(paths).initEffect({ owner: { id: "owner", name: "Owner" } }),
+    );
     await chmod(paths.configPath, 0o644);
 
-    await expect(startServer(paths)).rejects.toThrow("Private state permissions");
+    const scope = await Effect.runPromise(Scope.make("sequential"));
+    await expect(
+      Effect.runPromise(
+        Effect.provide(startServerEffect(paths, scope), Context.make(Scope.Scope, scope)),
+      ),
+    ).rejects.toThrow("Private state permissions");
+    await Effect.runPromise(Scope.close(scope, Exit.void));
     expect(await Bun.file(join(paths.stateRoot, "gateway.lock")).exists()).toBe(false);
   });
 });

@@ -1,11 +1,14 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { Effect } from "effect";
 import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigStore, type WorkspaceConfig } from "../src/config";
+import { ColleagueLineError } from "../src/errors";
 import { RuntimeCoordinator } from "../src/runtime/coordinator";
-import { PiRuntime, type ManagedPiSession } from "../src/runtime/pi-runtime";
+import type { PiRpcSessionEffect } from "../src/runtime/pi-rpc";
 import { RuntimeSessionStore, type RuntimeSession } from "../src/runtime/sessions";
+import { makePiRuntime } from "./helpers/pi-runtime";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -13,28 +16,59 @@ afterEach(async () => {
 });
 
 async function fixture(
-  createSession: (
+  createSessionEffect: (
     workspace: WorkspaceConfig,
     session: RuntimeSession,
-  ) => ManagedPiSession | Promise<ManagedPiSession> = () => fakeSession(),
+  ) => Effect.Effect<PiRpcSessionEffect, unknown> = () => Effect.succeed(fakeSession()),
 ) {
   const root = await mkdtemp(join(tmpdir(), "colleague-line-coordinator-"));
   roots.push(root);
   const stateRoot = join(root, "state");
   const workspaceRoot = join(root, "workspace");
   await mkdir(workspaceRoot);
-  const config = new ConfigStore({ configPath: join(root, "config.json"), stateRoot });
-  await config.init({ owner: { id: "owner", name: "Owner" } });
-  await config.addWorkspace({ id: "docs", name: "Docs", summary: "Docs", root: workspaceRoot });
-  const added = await config.addClient({ id: "client", tailcatKey: "nodekey:first" });
-  const client = (await config.authenticate(added.bearer))!;
-  const sessions = new RuntimeSessionStore(stateRoot);
-  const runtime = new PiRuntime({
-    createSession: async (workspace, session) => createSession(workspace, session),
+  const config = new ConfigStore({
+    configPath: join(root, "config.json"),
+    stateRoot,
   });
-  const desired = await config.readEffective();
-  const coordinator = await RuntimeCoordinator.create({ config, sessions, runtime, desired });
-  return { root, stateRoot, config, sessions, runtime, coordinator, desired, client };
+  await Effect.runPromise(config.initEffect({ owner: { id: "owner", name: "Owner" } }));
+  await Effect.runPromise(
+    config.addWorkspaceEffect({
+      id: "docs",
+      name: "Docs",
+      summary: "Docs",
+      root: workspaceRoot,
+    }),
+  );
+  const added = await Effect.runPromise(
+    config.addClientEffect({
+      id: "client",
+      tailcatKey: "nodekey:first",
+    }),
+  );
+  const client = (await Effect.runPromise(config.authenticateEffect(added.bearer)))!;
+  const sessions = new RuntimeSessionStore(stateRoot);
+  const runtime = makePiRuntime({
+    createSessionEffect: (workspace, session) => createSessionEffect(workspace, session),
+  });
+  const desired = await Effect.runPromise(config.readEffectiveEffect());
+  const coordinator = await Effect.runPromise(
+    RuntimeCoordinator.createEffect({
+      config,
+      sessions,
+      runtime,
+      desired,
+    }),
+  );
+  return {
+    root,
+    stateRoot,
+    config,
+    sessions,
+    runtime,
+    coordinator,
+    desired,
+    client,
+  };
 }
 
 describe("RuntimeCoordinator", () => {
@@ -42,12 +76,75 @@ describe("RuntimeCoordinator", () => {
     const { coordinator, sessions, client } = await fixture();
     const signal = new AbortController().signal;
 
-    await coordinator.answer({ client, workspaceId: "docs", question: "one", signal });
-    const first = (await sessions.list())[0]!;
-    await coordinator.answer({ client, workspaceId: "docs", question: "two", signal });
+    await Effect.runPromise(
+      coordinator.answerEffect({
+        client,
+        workspaceId: "docs",
+        question: "one",
+        signal,
+      }),
+    );
+    const first = (await Effect.runPromise(sessions.listEffect()))[0]!;
+    await Effect.runPromise(
+      coordinator.answerEffect({
+        client,
+        workspaceId: "docs",
+        question: "two",
+        signal,
+      }),
+    );
 
-    expect((await sessions.list())[0]?.id).toBe(first.id);
-    await coordinator.close();
+    expect((await Effect.runPromise(sessions.listEffect()))[0]?.id).toBe(first.id);
+    await Effect.runPromise(coordinator.closeEffect());
+  });
+
+  test("validates questions after Client admission and before Workspace admission", async () => {
+    const { coordinator, client } = await fixture();
+    const signal = new AbortController().signal;
+
+    await expect(
+      Effect.runPromise(
+        coordinator.answerEffect({
+          client: { id: "revoked", credentialVersion: "revoked" },
+          workspaceId: "missing",
+          question: "",
+          signal,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
+    await expect(
+      Effect.runPromise(
+        coordinator.answerEffect({
+          client,
+          workspaceId: "missing",
+          question: "   ",
+          signal,
+        }),
+      ),
+    ).rejects.toEqual(new ColleagueLineError("INVALID_QUESTION", "Question must not be empty"));
+    await expect(
+      Effect.runPromise(
+        coordinator.answerEffect({
+          client,
+          workspaceId: "docs",
+          question: "x".repeat(20_001),
+          signal,
+        }),
+      ),
+    ).rejects.toEqual(
+      new ColleagueLineError("INVALID_QUESTION", "Question must not exceed 20,000 characters"),
+    );
+    await expect(
+      Effect.runPromise(
+        coordinator.answerEffect({
+          client,
+          workspaceId: "missing",
+          question: "hello",
+          signal,
+        }),
+      ),
+    ).rejects.toMatchObject({ code: "WORKSPACE_NOT_FOUND" });
+    await Effect.runPromise(coordinator.closeEffect());
   });
 
   test("aborts revocation and removes binding without deleting Pi archive", async () => {
@@ -57,42 +154,55 @@ describe("RuntimeCoordinator", () => {
       promptStarted = resolve;
     });
     const managed = fakeSession();
-    managed.prompt = () => {
+    managed.promptEffect = () => {
       promptStarted();
-      return new Promise<void>((_resolve, reject) => {
-        rejectPrompt = reject;
+      return Effect.tryPromise({
+        try: () =>
+          new Promise<void>((_resolve, reject) => {
+            rejectPrompt = reject;
+          }),
+        catch: (error) => error as Error,
       });
     };
-    managed.abort = async () => {
-      rejectPrompt?.(new DOMException("Aborted", "AbortError"));
-    };
-    const { root, coordinator, config, sessions, client } = await fixture(() => managed);
-    const pending = coordinator.answer({
-      client,
-      workspaceId: "docs",
-      question: "running",
-      signal: new AbortController().signal,
-    });
+    managed.abortEffect = () =>
+      Effect.promise(async () => {
+        rejectPrompt?.(new DOMException("Aborted", "AbortError"));
+      });
+    const { root, coordinator, config, sessions, client } = await fixture(() =>
+      Effect.succeed(managed),
+    );
+    const pending = Effect.runPromise(
+      coordinator.answerEffect({
+        client,
+        workspaceId: "docs",
+        question: "running",
+        signal: new AbortController().signal,
+      }),
+    );
     await started;
     const archive = join(root, "owner-global-pi-session.jsonl");
     await writeFile(archive, "history");
 
-    await config.revokeClient("client");
-    const reconciliation = coordinator.reconcile(await config.readEffective());
+    await Effect.runPromise(config.revokeClientEffect("client"));
+    const reconciliation = Effect.runPromise(
+      coordinator.reconcileEffect(await Effect.runPromise(config.readEffectiveEffect())),
+    );
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     await reconciliation;
 
-    expect(await sessions.list()).toEqual([]);
+    expect(await Effect.runPromise(sessions.listEffect())).toEqual([]);
     expect(await Bun.file(archive).text()).toBe("history");
     await expect(
-      coordinator.answer({
-        client,
-        workspaceId: "docs",
-        question: "late",
-        signal: new AbortController().signal,
-      }),
+      Effect.runPromise(
+        coordinator.answerEffect({
+          client,
+          workspaceId: "docs",
+          question: "late",
+          signal: new AbortController().signal,
+        }),
+      ),
     ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
-    await coordinator.close();
+    await Effect.runPromise(coordinator.closeEffect());
   });
 
   test("waits for in-flight Pi creation before removing a binding", async () => {
@@ -105,29 +215,36 @@ describe("RuntimeCoordinator", () => {
       creationStarted = resolve;
     });
     let disposals = 0;
-    const current = await fixture(async () => {
-      creationStarted();
-      await creationBarrier;
-      const managed = fakeSession();
-      managed.dispose = async () => {
-        disposals++;
-      };
-      return managed;
-    });
-    const pending = current.coordinator.answer({
-      client: current.client,
-      workspaceId: "docs",
-      question: "running",
-      signal: new AbortController().signal,
-    });
+    const current = await fixture(() =>
+      Effect.promise(async () => {
+        creationStarted();
+        await creationBarrier;
+        const managed = fakeSession();
+        managed.disposeEffect = () =>
+          Effect.promise(async () => {
+            disposals++;
+          });
+        return managed;
+      }),
+    );
+    const pending = Effect.runPromise(
+      current.coordinator.answerEffect({
+        client: current.client,
+        workspaceId: "docs",
+        question: "running",
+        signal: new AbortController().signal,
+      }),
+    );
     await started;
-    await current.config.revokeClient("client");
+    await Effect.runPromise(current.config.revokeClientEffect("client"));
     let reconciled = false;
-    const reconciliation = current.coordinator
-      .reconcile(await current.config.readEffective())
-      .then(() => {
-        reconciled = true;
-      });
+    const reconciliation = Effect.runPromise(
+      current.coordinator.reconcileEffect(
+        await Effect.runPromise(current.config.readEffectiveEffect()),
+      ),
+    ).then(() => {
+      reconciled = true;
+    });
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
     await Bun.sleep(0);
     expect(reconciled).toBe(false);
@@ -135,44 +252,52 @@ describe("RuntimeCoordinator", () => {
     releaseCreation();
     await reconciliation;
     expect(disposals).toBe(1);
-    expect(await current.sessions.list()).toEqual([]);
-    await current.coordinator.close();
+    expect(await Effect.runPromise(current.sessions.listEffect())).toEqual([]);
+    await Effect.runPromise(current.coordinator.closeEffect());
   });
 
   test("credential rotation restarts memory but preserves the Pi session ID", async () => {
     let creations = 0;
-    const { coordinator, config, sessions, client } = await fixture(() => {
-      creations++;
-      return fakeSession();
-    });
+    const { coordinator, config, sessions, client } = await fixture(() =>
+      Effect.sync(() => {
+        creations++;
+        return fakeSession();
+      }),
+    );
     const input = {
       client,
       workspaceId: "docs",
       question: "one",
       signal: new AbortController().signal,
     };
-    await coordinator.answer(input);
-    const before = (await sessions.list())[0]!;
+    await Effect.runPromise(coordinator.answerEffect(input));
+    const before = (await Effect.runPromise(sessions.listEffect()))[0]!;
 
-    const rotated = await config.rotateClient("client", "nodekey:second");
-    await coordinator.reconcile(await config.readEffective());
-    await expect(coordinator.answer({ ...input, question: "old" })).rejects.toMatchObject({
+    const rotated = await Effect.runPromise(config.rotateClientEffect("client", "nodekey:second"));
+    await Effect.runPromise(
+      coordinator.reconcileEffect(await Effect.runPromise(config.readEffectiveEffect())),
+    );
+    await expect(
+      Effect.runPromise(coordinator.answerEffect({ ...input, question: "old" })),
+    ).rejects.toMatchObject({
       code: "UNAUTHORIZED",
     });
-    await coordinator.answer({
-      ...input,
-      client: (await config.authenticate(rotated.bearer))!,
-      question: "two",
-    });
+    await Effect.runPromise(
+      coordinator.answerEffect({
+        ...input,
+        client: (await Effect.runPromise(config.authenticateEffect(rotated.bearer)))!,
+        question: "two",
+      }),
+    );
 
-    expect((await sessions.list())[0]?.id).toBe(before.id);
+    expect((await Effect.runPromise(sessions.listEffect()))[0]?.id).toBe(before.id);
     expect(creations).toBe(2);
-    await coordinator.close();
+    await Effect.runPromise(coordinator.closeEffect());
   });
 
   test("linearizes admission before credential rotation", async () => {
     const { coordinator, config, sessions, client } = await fixture();
-    const originalGetOrCreate = sessions.getOrCreate.bind(sessions);
+    const originalGetOrCreateEffect = sessions.getOrCreateEffect.bind(sessions);
     let entered!: () => void;
     const admissionEntered = new Promise<void>((resolve) => {
       entered = resolve;
@@ -181,22 +306,28 @@ describe("RuntimeCoordinator", () => {
     const admissionBarrier = new Promise<void>((resolve) => {
       release = resolve;
     });
-    sessions.getOrCreate = async (...arguments_) => {
-      entered();
-      await admissionBarrier;
-      return originalGetOrCreate(...arguments_);
-    };
-    const admitted = coordinator.answer({
-      client,
-      workspaceId: "docs",
-      question: "before rotation",
-      signal: new AbortController().signal,
-    });
+    sessions.getOrCreateEffect = (...arguments_) =>
+      Effect.gen(function* () {
+        const session = yield* originalGetOrCreateEffect(...arguments_);
+        entered();
+        yield* Effect.promise(() => admissionBarrier);
+        return session;
+      });
+    const admitted = Effect.runPromise(
+      coordinator.answerEffect({
+        client,
+        workspaceId: "docs",
+        question: "before rotation",
+        signal: new AbortController().signal,
+      }),
+    );
     await admissionEntered;
     let rotated = false;
-    const rotation = config.rotateClient("client", "nodekey:second").then(() => {
-      rotated = true;
-    });
+    const rotation = Effect.runPromise(config.rotateClientEffect("client", "nodekey:second")).then(
+      () => {
+        rotated = true;
+      },
+    );
     await Bun.sleep(10);
     expect(rotated).toBe(false);
 
@@ -204,55 +335,86 @@ describe("RuntimeCoordinator", () => {
     await admitted;
     await rotation;
     expect(rotated).toBe(true);
-    await coordinator.close();
+    await Effect.runPromise(coordinator.closeEffect());
   });
 
   test("Workspace removal purges only that binding scope", async () => {
     const { root, coordinator, config, sessions, client } = await fixture();
     const codeRoot = join(root, "code");
     await mkdir(codeRoot);
-    await config.addWorkspace({ id: "code", name: "Code", summary: "Code", root: codeRoot });
-    await coordinator.reconcile(await config.readEffective());
+    await Effect.runPromise(
+      config.addWorkspaceEffect({
+        id: "code",
+        name: "Code",
+        summary: "Code",
+        root: codeRoot,
+      }),
+    );
+    await Effect.runPromise(
+      coordinator.reconcileEffect(await Effect.runPromise(config.readEffectiveEffect())),
+    );
     const signal = new AbortController().signal;
-    await coordinator.answer({ client, workspaceId: "docs", question: "docs", signal });
-    await coordinator.answer({ client, workspaceId: "code", question: "code", signal });
-    const codeSession = (await sessions.list()).find((session) => session.workspaceId === "code")!;
+    await Effect.runPromise(
+      coordinator.answerEffect({
+        client,
+        workspaceId: "docs",
+        question: "docs",
+        signal,
+      }),
+    );
+    await Effect.runPromise(
+      coordinator.answerEffect({
+        client,
+        workspaceId: "code",
+        question: "code",
+        signal,
+      }),
+    );
+    const codeSession = (await Effect.runPromise(sessions.listEffect())).find(
+      (session) => session.workspaceId === "code",
+    )!;
 
-    await config.removeWorkspace("docs");
-    await coordinator.reconcile(await config.readEffective());
+    await Effect.runPromise(config.removeWorkspaceEffect("docs"));
+    await Effect.runPromise(
+      coordinator.reconcileEffect(await Effect.runPromise(config.readEffectiveEffect())),
+    );
 
-    expect(await sessions.list()).toEqual([codeSession]);
-    await coordinator.close();
+    expect(await Effect.runPromise(sessions.listEffect())).toEqual([codeSession]);
+    await Effect.runPromise(coordinator.closeEffect());
   });
 
   test("startup removes bindings for absent Clients and Workspaces", async () => {
     const initial = await fixture();
-    const keep = await initial.sessions.getOrCreate("client", "docs");
-    await initial.sessions.getOrCreate("revoked", "docs");
-    await initial.sessions.getOrCreate("client", "removed");
-    await initial.coordinator.close();
-    const runtime = new PiRuntime({ createSession: async () => fakeSession() });
+    const keep = await Effect.runPromise(initial.sessions.getOrCreateEffect("client", "docs"));
+    await Effect.runPromise(initial.sessions.getOrCreateEffect("revoked", "docs"));
+    await Effect.runPromise(initial.sessions.getOrCreateEffect("client", "removed"));
+    await Effect.runPromise(initial.coordinator.closeEffect());
+    const runtime = makePiRuntime({ createSessionEffect: () => Effect.succeed(fakeSession()) });
 
-    const coordinator = await RuntimeCoordinator.create({
-      config: initial.config,
-      sessions: initial.sessions,
-      runtime,
-      desired: await initial.config.readEffective(),
-    });
+    const coordinator = await Effect.runPromise(
+      RuntimeCoordinator.createEffect({
+        config: initial.config,
+        sessions: initial.sessions,
+        runtime,
+        desired: await Effect.runPromise(initial.config.readEffectiveEffect()),
+      }),
+    );
 
-    expect((await initial.sessions.list()).map(({ id }) => id)).toEqual([keep.id]);
-    await coordinator.close();
+    expect((await Effect.runPromise(initial.sessions.listEffect())).map(({ id }) => id)).toEqual([
+      keep.id,
+    ]);
+    await Effect.runPromise(coordinator.closeEffect());
   });
 });
 
-function fakeSession(): ManagedPiSession {
+function fakeSession(): PiRpcSessionEffect {
   return {
-    prompt: async () => {},
+    promptEffect: () => Effect.void,
     isAlive: () => true,
     getLastAssistantText: () => "answer",
-    clearQueue: async () => {},
-    abort: async () => {},
-    waitForIdle: async () => {},
-    dispose: async () => {},
+    clearQueueEffect: () => Effect.void,
+    abortEffect: () => Effect.void,
+    waitForIdleEffect: () => Effect.void,
+    disposeEffect: () => Effect.void,
   };
 }

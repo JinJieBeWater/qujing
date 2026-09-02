@@ -8,6 +8,8 @@ Release topology validated with one macOS Apple Silicon Client, one macOS Apple 
 - Two Lines listed in configured order with verified Owner and Workspace metadata.
 - Each ask reached selected Owner Workspace and returned its unique marker.
 - Same-Line follow-up retained remote Runtime history.
+- Global Pi restored same-session context after its RPC process restarted.
+- A real Pi bash tool call generated a random 24-hex marker, and the global Pi session record confirmed bash use.
 - Agent cancellation reached selected Line; later ask succeeded.
 - Client and Linux Gateway restart preserved both Lines' histories.
 - Stopping Linux Gateway left macOS Line available and Linux Line unavailable without failing `list_lines`.

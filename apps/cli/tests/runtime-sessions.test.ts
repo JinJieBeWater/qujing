@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { Effect } from "effect";
 import { RuntimeSessionStore } from "../src/runtime/sessions";
 
 const roots: string[] = [];
@@ -16,10 +17,12 @@ describe("RuntimeSessionStore", () => {
     const firstStore = new RuntimeSessionStore(root);
 
     const [first, concurrent] = await Promise.all([
-      firstStore.getOrCreate("client", "workspace"),
-      firstStore.getOrCreate("client", "workspace"),
+      Effect.runPromise(firstStore.getOrCreateEffect("client", "workspace")),
+      Effect.runPromise(firstStore.getOrCreateEffect("client", "workspace")),
     ]);
-    const restored = await new RuntimeSessionStore(root).getOrCreate("client", "workspace");
+    const restored = await Effect.runPromise(
+      new RuntimeSessionStore(root).getOrCreateEffect("client", "workspace"),
+    );
 
     expect(concurrent.id).toBe(first.id);
     expect(restored.id).toBe(first.id);
@@ -29,14 +32,18 @@ describe("RuntimeSessionStore", () => {
     const root = await mkdtemp(join(tmpdir(), "colleague-line-sessions-"));
     roots.push(root);
     const store = new RuntimeSessionStore(root);
-    await store.getOrCreate("one", "docs");
-    await store.getOrCreate("one", "code");
-    await store.getOrCreate("two", "docs");
+    await Effect.runPromise(store.getOrCreateEffect("one", "docs"));
+    await Effect.runPromise(store.getOrCreateEffect("one", "code"));
+    await Effect.runPromise(store.getOrCreateEffect("two", "docs"));
 
-    const removed = await store.matching((session) => session.clientId === "one");
-    await Promise.all(removed.map((session) => store.remove(session)));
+    const removed = await Effect.runPromise(
+      store.matchingEffect((session) => session.clientId === "one"),
+    );
+    await Promise.all(removed.map((session) => Effect.runPromise(store.removeEffect(session))));
 
     expect(removed).toHaveLength(2);
-    expect(await store.list()).toMatchObject([{ clientId: "two", workspaceId: "docs" }]);
+    expect(await Effect.runPromise(store.listEffect())).toMatchObject([
+      { clientId: "two", workspaceId: "docs" },
+    ]);
   });
 });
