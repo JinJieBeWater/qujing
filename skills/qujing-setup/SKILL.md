@@ -1,66 +1,68 @@
 ---
 name: qujing-setup
-description: "Install, pair, configure, verify, operate, or troubleshoot Qujing Owner Gateways, Agent Client, private Lines, services, and MCP Agent access. Not product development."
+description: "Qujing deployment and operations. Use for installing, pairing, verifying, operating, upgrading, or recovering Owner Gateway, Agent Client, private Lines, services, or MCP Agent access. Not product development."
 compatibility: "Qujing release bundle; macOS arm64 or Linux x64 supported, Windows x64 Preview; Owner global Pi CLI required."
 metadata:
-  version: 2.0.0
+  version: 0.1.1
   category: setup
   tags: [qujing, mcp, tailcat, pi]
 ---
 
 # Qujing Setup
 
-## Model
+## Operating model
 
-- **Owner**: real colleague. Runs Gateway, Pi Runtime, and manually registered Workspaces.
-- **Client**: one local service on Agent machine. Owns one local MCP endpoint and many private Lines.
+- **Owner**: real colleague. Runs Gateway, global Pi Runtime, and registered Workspaces.
+- **Client**: one local service on Agent machine. Owns one MCP endpoint and many private Lines.
 - **Line**: one Client-to-Owner pairing with distinct Tailcat key, remote Gateway Client ID, and remote bearer.
-- **Agent**: MCP caller. Configures Client once, then explicitly chooses Line and Workspace.
+- **Agent**: MCP caller. Configures Client once, then supplies exact Line and Workspace IDs.
 
-One person may operate both roles. Keep role commands and credentials separate. One Client serves one Agent and can reach many Owners; never create per-Owner Agent MCP entries.
+One machine may run both roles, but role commands, credentials, configs, locks, and services remain separate. One Client reaches many Owners; Agent still gets one MCP entry.
 
-## Procedure
+## Route by outcome
 
-### 1. Select operation
+Establish only relevant state with `qj --version`, selected role's `doctor`, and relevant `workspace list` or `line list`. Execute requested branch plus missing prerequisites; do not replay completed branches. If Owner identity was not supplied, use ID `jinjiebewater` and name `JinJieBeWater`.
 
-Collect only inputs needed for branch:
+Treat local bearer, remote bearer, Tailcat private keys, pairing bundles, server addresses, and Workspace roots as private. Keep secrets in current-user-only files or secret storage. Human performs cross-machine secret transfer through trusted channel. Redact secrets from commands echoed back and final report.
 
-- install, Owner setup, Client setup, pair Line, verify, rotate/revoke, upgrade, or recover
-- OS/architecture and release-bundle path
-- Owner ID/name and Workspace metadata
-- Client local port; default `43111`
-- local Line ID and remote Gateway Client ID
+### Install
 
-Treat local bearer, remote bearer, Tailcat private keys, server address, and Workspace roots as private. Ask humans to transfer remote bearer and Tailcat address through trusted channel; redact them from output.
+macOS Apple Silicon or Linux x64, preferred Homebrew path:
 
-### 2. Install matched release
+```bash
+brew tap jinjiebewater/tap
+brew trust --formula jinjiebewater/tap/qujing
+brew install qujing
+qj --version
+```
 
-On macOS Apple Silicon or Linux x64, install both matched binaries from GitHub Releases:
+Fallback installer:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.sh | sh
+export PATH="${QUJING_INSTALL_DIR:-$HOME/.local/bin}:$PATH"
 qj --version
 ```
 
-Windows PowerShell Preview:
+Windows x64 Preview:
 
 ```powershell
 irm https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.ps1 | iex
+$installDir = if ($env:QUJING_INSTALL_DIR) { $env:QUJING_INSTALL_DIR } else { "$HOME\.local\bin" }
+$env:Path = "$installDir;$env:Path"
 qj --version
 ```
 
-Set `QUJING_VERSION=v<version>` when a pinned release is required. Set `QUJING_INSTALL_DIR` when `~/.local/bin` is unsuitable. Review the installer first when local security policy forbids piped scripts. Stop on checksum failure, platform mismatch, missing transport binary, or unavailable Owner `pi` CLI. Windows Preview supports foreground `qj serve gateway` and `qj serve client` only; user-service install/remove is unsupported.
+Use `QUJING_VERSION=v<version>` for a pinned standalone install and `QUJING_INSTALL_DIR` when `~/.local/bin` is unsuitable. Review piped installers first when local policy requires it. Stop on checksum failure, unsupported platform, or mismatched/missing `qj` and `qujing-transport`.
 
-### 3. Configure Owner Gateway
+Completion: `qj --version` succeeds. On Owner machine, normal interactive `pi` also succeeds with Owner's default model and authentication.
 
-Owner needs a working global Pi. Client machine does not. Run normal interactive `pi`, confirm its default model and authentication work, then exit. Gateway will use that same global Pi environment without overrides.
+### Configure Owner Gateway
 
-Initialize Owner once and register each Workspace manually:
+Initialize only when Gateway config does not exist. Register each Workspace manually:
 
 ```bash
-qj init gateway \
-  --owner-id <owner-id> \
-  --owner-name <owner-name>
+qj init gateway --owner-id jinjiebewater --owner-name JinJieBeWater
 
 qj workspace add <workspace-id> \
   --name <display-name> \
@@ -71,54 +73,50 @@ qj workspace list --json
 qj doctor gateway
 ```
 
-Use summaries that let Agent choose Workspace without exposing roots. Choose one startup mode:
-
-- Foreground: hand off `qj serve gateway` in a separate terminal; wait for `gateway: ready` and keep it running.
-- Service (macOS/Linux only):
+Workspace summary should identify responsibility without exposing root. Start one mode:
 
 ```bash
+# foreground
+qj serve gateway
+
+# or macOS/Linux service
 qj service install gateway --yes
 ```
 
-Do not start both modes.
+Completion: `qj doctor gateway` succeeds and Gateway is running. Foreground output reaches `gateway: ready`; service mode remains active after command exits.
 
-Completion: Gateway doctor succeeds and Gateway is running.
+### Configure Agent Client
 
-### 4. Initialize Agent Client once
-
-Run on Agent machine:
+Initialize only when Client config does not exist:
 
 ```bash
 qj init client
 qj doctor client
 ```
 
-Capture `local-bearer` once into Agent’s private MCP configuration. Configure exactly one endpoint using [`references/mcp-clients.md`](references/mcp-clients.md).
+Capture printed local bearer once into Agent's private MCP configuration. Load [`references/mcp-clients.md`](references/mcp-clients.md) only for MCP client configuration or timeout verification. Start one mode:
 
-Choose one Client startup mode:
-
-- Foreground: hand off `qj serve client` in a separate terminal; wait for `client: ready` and keep it running.
-- Service (macOS/Linux only):
+If Client config exists but local bearer is unavailable, run `qj token rotate`, immediately update Agent's MCP secret, then continue. Do not reinitialize Client.
 
 ```bash
+# foreground
+qj serve client
+
+# or macOS/Linux service
 qj service install client --yes
 ```
 
-Do not start both modes.
+Completion: Client is running; Agent discovers exactly `list_lines` and `ask`. Empty `list_lines` is valid before pairing.
 
-Completion: Client is running and Agent sees exactly `list_lines` and `ask`. Empty `list_lines` is valid before pairing.
+### Pair one Line
 
-### 5. Pair one Line
-
-On Client machine, generate distinct key:
+Client creates one distinct Line key and sends only public key to Owner:
 
 ```bash
 qj line key-create <line-id>
 ```
 
-Send only printed `public-key` to Owner. Keep key path on Client.
-
-With Gateway still running on Owner machine, create remote Gateway Client identity for exactly this Line:
+With Gateway running, Owner creates one remote identity and private bundle:
 
 ```bash
 qj pair create <remote-client-id> \
@@ -126,45 +124,38 @@ qj pair create <remote-client-id> \
   --out ./<remote-client-id>.pairing.json
 ```
 
-The private pairing bundle contains:
-
-- expected Owner ID
-- remote Gateway Client ID
-- remote bearer
-- Tailcat server address
-- remote port
-
-Send the bundle to Client through trusted channel while preserving current-user-only permissions. On Client machine:
+Pairing bundle received through trusted channel is identity handoff. Human confirms it came from intended Owner. Client imports it, verifies remote Owner against bundle Owner ID, then removes its received copy:
 
 ```bash
-qj pair accept <line-id> \
-  --from ./<remote-client-id>.pairing.json
-
-rm ./<remote-client-id>.pairing.json
-
+qj pair accept <line-id> --from ./<remote-client-id>.pairing.json && rm ./<remote-client-id>.pairing.json
 qj line list --json
 qj doctor client
 ```
 
-`pair create` publishes the bundle only after live reload applies the new credentials. `pair accept` derives the standard key path from Line ID. Pass `--key <private-key-path>` only when `key-create --output` used a custom path. It connects and verifies exact Owner ID before persistence; Owner mismatch must leave no Line. Omit `--out` to emit JSON on stdout and use `--from -` to import from stdin. Remove every transferred bundle copy after import. Repeat this step for additional Owners; keep same Client endpoint and local bearer.
+After Client confirms success, Owner removes the source bundle. Remove every source, transferred, and intermediate copy.
 
-### 6. Verify end to end
+`pair accept` derives standard key path from Line ID. Use `--key <private-key-path>` only after custom `key-create --output`. For pipe handoff, Owner may omit `--out`; Client may use `--from -`. Owner mismatch must leave no Line.
 
-Require all:
+Completion: Line is persisted, remote Owner matches trusted bundle identity, every bundle copy is removed, and `qj doctor client` succeeds. Repeat only this branch for another Owner.
 
-1. `qj doctor gateway` succeeds on each Owner; `qj doctor client` succeeds on Agent machine.
-2. Agent discovers exactly `list_lines` and `ask`.
-3. `list_lines` includes every configured Line in local order. One unavailable Line does not hide healthy Lines.
-4. Each available Line returns expected Owner and public Workspace metadata, without roots, credentials, Runtime, model, session, or Tailcat details.
-5. `ask({ line, workspace, question })` answers from exact selected Owner Workspace.
-6. Follow-up with same Line and Workspace retains that remote Runtime Session history.
-7. Two Lines reach two different Owners without credential or answer crossover.
-8. Cancel active ask; cancellation reaches selected Gateway only.
-9. Restart one Owner Gateway and Client process/service; next ask reconnects without retrying prior accepted prompt.
+### Verify deployment
 
-TCP connectivity alone is insufficient.
+Verify evidence relevant to deployed topology:
 
-### 7. Daily operation
+1. Each selected role's doctor succeeds.
+2. Agent discovers exactly `list_lines` and `ask`; `list_workspaces` means wrong endpoint.
+3. `list_lines` returns each configured Line independently, with expected Owner and public Workspace metadata only.
+4. `ask({ line, workspace, question })` answers from exact selected Workspace.
+5. Follow-up on same Line and Workspace retains Runtime history.
+6. When multiple Lines exist, each reaches intended Owner without credential or answer crossover.
+7. Cancellation affects selected Line only.
+8. Restarted roles reconnect without retrying an accepted prompt.
+
+TCP connectivity alone is insufficient. Test only branches supported by current deployment; report untested multi-Line or restart behavior explicitly.
+
+Completion: every applicable check has observed evidence; skipped checks have concrete reason.
+
+### Operate
 
 ```bash
 # Owner
@@ -176,94 +167,20 @@ qj line list --json
 qj doctor client
 ```
 
-Agent calls `list_lines`, chooses exact Line and Workspace IDs, then calls `ask`. Client starts Connectors lazily; no per-Line foreground process or MCP config exists.
+Agent calls `list_lines`, chooses exact Line and Workspace IDs, then calls `ask`. Client starts Connectors lazily; no per-Line foreground process or MCP entry exists.
 
-### 8. Rotate or revoke
-
-Remote credential rotation preserves Owner Runtime history:
-
-1. Client creates new key at new path:
-
-```bash
-qj line key-create <line-id> --output <new-private-key-path>
-```
-
-2. Send new public key to Owner.
-3. Owner rotates remote credentials:
-
-```bash
-qj pair rotate <remote-client-id> --key '<new-public-key>' --yes
-```
-
-4. Transfer new remote bearer to Client.
-5. Client verifies and atomically replaces Line key/bearer:
-
-```bash
-printf '%s' '<new-remote-bearer>' | qj line update <line-id> \
-  --key <new-private-key-path> \
-  --bearer - \
-  --yes
-```
-
-Revoke Owner access first, then remove local Line:
-
-```bash
-# Owner
-qj pair revoke <remote-client-id> --yes
-
-# Client
-qj line remove <line-id> --yes
-```
-
-Rotate Agent-local bearer independently:
-
-```bash
-qj token rotate
-```
-
-Update Agent MCP secret immediately. Old local bearer and existing MCP sessions become invalid.
-
-### 9. Upgrade
-
-On macOS/Linux, stop/remove only installed role services on machine being upgraded:
-
-```bash
-qj service remove <role> --yes
-```
-
-Replace both Qujing binaries from same release, then reinstall required role services:
-
-```bash
-qj service install <role> --yes
-```
-
-On Windows Preview, stop foreground role processes, replace both `.exe` files, then restart required `serve` commands; do not call `service install/remove`.
-
-Run the selected role's doctor and repeat end-to-end verification. A machine running both roles upgrades and verifies each role separately.
-
-## Recovery
-
-- `UNAUTHORIZED`: distinguish Agent local bearer from Line remote bearer. Rotate correct layer; never redisplay stored secrets.
-- `LINE_NOT_FOUND`: Client checks `qj line list --json`.
-- `LINE_UNAVAILABLE`: Client checks Line key privacy, Tailcat path, Owner Gateway, remote bearer, and expected Owner ID.
-- `OWNER_ID_MISMATCH`: verify handoff reached intended Owner; do not bypass check.
-- `WORKSPACE_NOT_FOUND` / `WORKSPACE_UNAVAILABLE`: Owner checks `qj workspace list --json` and root.
-- `RUNTIME_UNAVAILABLE`: Owner runs normal global `pi`, fixes its default model/auth/extensions, then restarts Gateway.
-- `RUNTIME_TIMEOUT`: keep Agent timeout at least 135 seconds; inspect Owner model/network before manual retry.
-- `BUSY`: wait for selected request/capacity to settle. Do not add automatic ask retry.
-- Client startup failure: check `qj doctor client`, private `0600/0700` state, local port, and matched transport binary.
-- Tailcat failure: check public-key allowlist, distinct per-Line private key, Gateway availability, and outbound network. Do not alter personal Tailscale routes or DNS.
+For credential rotation, revoke, upgrade, or failure recovery, load [`references/maintenance.md`](references/maintenance.md) and enter only matching section.
 
 ## Report
 
 Return:
 
 - selected operation and machine role
-- commands completed
+- commands completed and observable checks
 - remaining human-only handoffs
 - single Client MCP URL without bearer
 - Line IDs and availability without private details
-- verification results
+- skipped verification with reason
 - next exact command when blocked
 
-Redact all bearers, private keys, Tailcat addresses, Workspace roots, questions, answers, and file contents.
+Never include bearers, private keys, pairing contents, Tailcat addresses, Workspace roots, questions, answers, or file contents.

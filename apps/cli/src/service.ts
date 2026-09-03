@@ -67,19 +67,25 @@ export const installUserServiceEffect = (command: string[], role: ServiceRole) =
       mode: 0o600,
     });
     if (process.platform === "darwin") {
-      yield* runEffect(
+      yield* runServiceCommandEffect(
         ["launchctl", "bootout", `gui/${process.getuid?.() ?? 0}/com.qujing.${role}`],
         true,
       );
-      yield* runEffect([
+      yield* runServiceCommandEffect([
         "launchctl",
         "bootstrap",
         `gui/${process.getuid?.() ?? 0}`,
         definition.path,
       ]);
     } else {
-      yield* runEffect(["systemctl", "--user", "daemon-reload"]);
-      yield* runEffect(["systemctl", "--user", "enable", "--now", `qujing-${role}.service`]);
+      yield* runServiceCommandEffect(["systemctl", "--user", "daemon-reload"]);
+      yield* runServiceCommandEffect([
+        "systemctl",
+        "--user",
+        "enable",
+        "--now",
+        `qujing-${role}.service`,
+      ]);
     }
     return definition.path;
   }).pipe(Effect.provide(ServiceLayer));
@@ -114,15 +120,18 @@ export const removeUserServiceEffect = (
   return Effect.gen(function* () {
     const fs = yield* FileSystem.FileSystem;
     if (platform === "darwin") {
-      yield* runEffect(
+      yield* runServiceCommandEffect(
         ["launchctl", "bootout", `gui/${process.getuid?.() ?? 0}/com.qujing.${role}`],
         true,
       );
       yield* fs.remove(definition.path, { force: true });
     } else {
-      yield* runEffect(["systemctl", "--user", "disable", "--now", `qujing-${role}.service`], true);
+      yield* runServiceCommandEffect(
+        ["systemctl", "--user", "disable", "--now", `qujing-${role}.service`],
+        true,
+      );
       yield* fs.remove(definition.path, { force: true });
-      yield* runEffect(["systemctl", "--user", "daemon-reload"]);
+      yield* runServiceCommandEffect(["systemctl", "--user", "daemon-reload"]);
     }
     return definition.path;
   }).pipe(Effect.provide(PlatformLayer));
@@ -133,16 +142,15 @@ export function currentServeCommand(role: ServiceRole): string[] {
     ? [process.execPath, script, "serve", role]
     : [process.execPath, "serve", role];
 }
-const runEffect = (command: string[], allowFailure = false) =>
+export const runServiceCommandEffect = (command: string[], allowFailure = false) =>
   Effect.scoped(
     Effect.gen(function* () {
-      const code = Number(
-        yield* ChildProcess.make(command[0]!, command.slice(1), {
-          stdin: "ignore",
-          stdout: "ignore",
-          stderr: "ignore",
-        }),
-      );
+      const handle = yield* ChildProcess.make(command[0]!, command.slice(1), {
+        stdin: "ignore",
+        stdout: "ignore",
+        stderr: "ignore",
+      });
+      const code = Number(yield* handle.exitCode);
       if (code !== 0 && !allowFailure)
         return yield* Effect.fail(new Error(`${command[0]} exited ${code}`));
     }),

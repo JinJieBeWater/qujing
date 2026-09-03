@@ -1,6 +1,10 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
-import { removeUserServiceEffect, serviceDefinition } from "../src/service";
+import {
+  removeUserServiceEffect,
+  runServiceCommandEffect,
+  serviceDefinition,
+} from "../src/service";
 
 describe("role user service definitions", () => {
   test("creates separate restartable macOS LaunchAgents", () => {
@@ -48,4 +52,14 @@ test("removes Linux unit before daemon reload", async () => {
     "remove",
     "systemctl --user daemon-reload",
   ]);
+});
+
+test("waits for service command exit codes", async () => {
+  await Effect.runPromise(runServiceCommandEffect([process.execPath, "-e", "process.exit(0)"]));
+  await expect(
+    Effect.runPromise(runServiceCommandEffect([process.execPath, "-e", "process.exit(7)"])),
+  ).rejects.toThrow(`${process.execPath} exited 7`);
+  await Effect.runPromise(
+    runServiceCommandEffect([process.execPath, "-e", "process.exit(7)"], true),
+  );
 });

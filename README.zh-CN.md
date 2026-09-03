@@ -44,23 +44,36 @@ Homebrew 6 对第三方 Tap 要求显式信任具体 Formula。也可以改用�
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.sh | sh
+export PATH="${QUJING_INSTALL_DIR:-$HOME/.local/bin}:$PATH"
 qj --version
 ```
 
 安装脚本会下载并校验匹配平台的 GitHub Release，然后把两个可执行文件安装到 `~/.local/bin`。可用 `QUJING_INSTALL_DIR` 更改目录。固定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.sh | QUJING_VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.sh | QUJING_VERSION=v0.1.1 sh
 ```
 
 Windows x64 Preview：
 
 ```powershell
 irm https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.ps1 | iex
+$installDir = if ($env:QUJING_INSTALL_DIR) { $env:QUJING_INSTALL_DIR } else { "$HOME\.local\bin" }
+$env:Path = "$installDir;$env:Path"
 qj --version
 ```
 
 本机安全策略要求审查脚本时，先阅读 [`install.sh`](install.sh) 或 [`install.ps1`](install.ps1) 再执行。手动安装包和 `SHA256SUMS` 仍可从 [GitHub Releases](https://github.com/JinJieBeWater/qujing/releases) 下载。
+
+### 让 Agent 协助配置
+
+先按上文安装 Qujing 二进制，再给 coding Agent 安装仓库内的运维 Skill：
+
+```bash
+bunx --bun skills add "JinJieBeWater/qujing@v$(qj --version)" --skill qujing-setup --global --yes
+```
+
+使用固定版本或离线发布包时，在解压目录改用 `bunx --bun skills add ./skills/qujing-setup --global --yes`。然后告诉 Agent：`使用 qujing-setup 部署、配对或诊断 Qujing。` Skill 会按当前目标选择所需分支、验证可观察状态，并从报告中排除秘密。参与产品开发的 Agent 应读取 [`AGENTS.md`](AGENTS.md)。
 
 ## 最小安装流程
 
@@ -69,7 +82,7 @@ qj --version
 ### 1. 启动 Owner Gateway
 
 ```bash
-qj init gateway --owner-id jason --owner-name Jason
+qj init gateway --owner-id jinjiebewater --owner-name JinJieBeWater
 qj workspace add pi-tooling --name "Pi Tooling" --root ~/src/pi --summary "Pi SDK and extensions"
 ```
 
@@ -97,34 +110,35 @@ qj serve client
 - Header：`Authorization: Bearer <local-bearer>`
 - Timeout：至少 `135` 秒
 
+如果 Client 已初始化但本机 bearer 丢失，运行 `qj token rotate`，然后替换 Agent 保存的 bearer。
+
 ### 3. 配对一条 Line
 
 在 Client 机器生成 Line key：
 
 ```bash
-qj line key-create jason
+qj line key-create jinjiebewater
 ```
 
 只把输出的 public key 发给 Owner。保持 Gateway 运行，由 Owner 注册一个 remote Gateway Client identity：
 
 ```bash
-qj pair create alice-jason \
+qj pair create alice-jinjiebewater \
   --key 'nodekey:...' \
-  --out ./alice-jason.pairing.json
+  --out ./alice-jinjiebewater.pairing.json
 ```
 
-通过可信渠道把私密 pairing bundle 传给 Client。Client 默认使用为 `jason` 创建的 key，验证 Owner 后保存 Line：
+通过可信渠道把私密 pairing bundle 传给 Client。Client 默认使用为 `jinjiebewater` 创建的 key，验证 Owner 后保存 Line：
 
 ```bash
-qj pair accept jason --from ./alice-jason.pairing.json
-rm ./alice-jason.pairing.json
+qj pair accept jinjiebewater --from ./alice-jinjiebewater.pairing.json && rm ./alice-jinjiebewater.pairing.json
 ```
 
-bundle 包含一次显示的 remote bearer 和 Tailcat 坐标；必须私密传输，导入后删除所有传输副本。省略 `--out` 会向 stdout 输出 JSON；`--from -` 可从 stdin 导入。
+Client 确认导入后，Owner 也要删除源文件 `alice-jinjiebewater.pairing.json`。bundle 包含一次显示的 remote bearer 和 Tailcat 坐标；必须私密传输，导入后删除源文件、传输副本和中间副本。省略 `--out` 会向 stdout 输出 JSON；`--from -` 可从 stdin 导入。
 
 增加更多 Owner 时只重复第 3 步。Agent endpoint 和本机 bearer 不变。
 
-完整安装、配对、轮换、撤销、服务和故障恢复流程见 [`skills/qujing-setup/SKILL.md`](skills/qujing-setup/SKILL.md)。
+需要 Agent 执行安装、配对、验证、凭据轮换、升级或故障恢复时，使用 [`skills/qujing-setup/SKILL.md`](skills/qujing-setup/SKILL.md)。
 
 ## 信任模型
 

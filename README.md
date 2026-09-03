@@ -44,23 +44,36 @@ Homebrew 6 requires the formula-specific trust step for third-party taps. To use
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.sh | sh
+export PATH="${QUJING_INSTALL_DIR:-$HOME/.local/bin}:$PATH"
 qj --version
 ```
 
 The installer downloads and verifies the matching GitHub Release, then installs both executables to `~/.local/bin`. Set `QUJING_INSTALL_DIR` to choose another directory. Pin a release with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.sh | QUJING_VERSION=v0.1.0 sh
+curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.sh | QUJING_VERSION=v0.1.1 sh
 ```
 
 Windows x64 Preview:
 
 ```powershell
 irm https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.ps1 | iex
+$installDir = if ($env:QUJING_INSTALL_DIR) { $env:QUJING_INSTALL_DIR } else { "$HOME\.local\bin" }
+$env:Path = "$installDir;$env:Path"
 qj --version
 ```
 
 Review [`install.sh`](install.sh) or [`install.ps1`](install.ps1) before execution when required by local security policy. Manual archives and `SHA256SUMS` remain available on [GitHub Releases](https://github.com/JinJieBeWater/qujing/releases).
+
+### Agent-assisted setup
+
+Install Qujing binaries above, then give your coding Agent the repository's operational skill:
+
+```bash
+bunx --bun skills add "JinJieBeWater/qujing@v$(qj --version)" --skill qujing-setup --global --yes
+```
+
+For a version-pinned or offline release bundle, run `bunx --bun skills add ./skills/qujing-setup --global --yes` from its extracted directory instead. Ask: `Use qujing-setup to deploy, pair, or diagnose Qujing.` The skill selects only the branch needed, verifies observable state, and keeps secrets out of its report. Product development agents should use [`AGENTS.md`](AGENTS.md) instead.
 
 ## Minimal setup
 
@@ -69,7 +82,7 @@ Both installation methods keep `qj` and `qujing-transport` from the same release
 ### 1. Start Owner Gateway
 
 ```bash
-qj init gateway --owner-id jason --owner-name Jason
+qj init gateway --owner-id jinjiebewater --owner-name JinJieBeWater
 qj workspace add pi-tooling --name "Pi Tooling" --root ~/src/pi --summary "Pi SDK and extensions"
 ```
 
@@ -97,34 +110,35 @@ qj serve client
 - Header: `Authorization: Bearer <local-bearer>`
 - Timeout: at least `135` seconds
 
+If Client was already initialized but its local bearer was lost, run `qj token rotate` and replace Agent's stored bearer.
+
 ### 3. Pair one Line
 
 On Client machine, create Line key:
 
 ```bash
-qj line key-create jason
+qj line key-create jinjiebewater
 ```
 
 Send printed public key to Owner. With Gateway still running, Owner registers one remote Gateway Client identity:
 
 ```bash
-qj pair create alice-jason \
+qj pair create alice-jinjiebewater \
   --key 'nodekey:...' \
-  --out ./alice-jason.pairing.json
+  --out ./alice-jinjiebewater.pairing.json
 ```
 
-Transfer the private pairing bundle to Client through a trusted channel. Client imports it, uses the key created for `jason` by default, verifies Owner, and saves Line:
+Transfer the private pairing bundle to Client through a trusted channel. Client imports it, uses the key created for `jinjiebewater` by default, verifies Owner, and saves Line:
 
 ```bash
-qj pair accept jason --from ./alice-jason.pairing.json
-rm ./alice-jason.pairing.json
+qj pair accept jinjiebewater --from ./alice-jinjiebewater.pairing.json && rm ./alice-jinjiebewater.pairing.json
 ```
 
-The bundle contains the one-time remote bearer and Tailcat coordinates. Keep it private and remove every transferred copy after import. Omit `--out` to emit JSON on stdout; use `--from -` to import from stdin.
+After Client confirms import, Owner also removes its source `alice-jinjiebewater.pairing.json`. The bundle contains the one-time remote bearer and Tailcat coordinates. Keep it private and remove every source, transferred, and intermediate copy after import. Omit `--out` to emit JSON on stdout; use `--from -` to import from stdin.
 
 Repeat only step 3 for more Owners. Agent endpoint and local bearer stay unchanged.
 
-Full install, pairing, rotation, revocation, service, and recovery workflow: [`skills/qujing-setup/SKILL.md`](skills/qujing-setup/SKILL.md).
+For agent-run installation, pairing, verification, credential rotation, upgrades, or recovery, use [`skills/qujing-setup/SKILL.md`](skills/qujing-setup/SKILL.md).
 
 ## Trust model
 

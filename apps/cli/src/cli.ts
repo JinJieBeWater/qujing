@@ -72,9 +72,9 @@ Commands:
   service <install|remove> <gateway|client>
 
 Examples:
-  qj init gateway --owner-id jason --owner-name Jason
+  qj init gateway --owner-id jinjiebewater --owner-name JinJieBeWater
   qj pair create alice-line --key - --out ./alice-line.pairing.json
-  qj pair accept jason --from ./alice-line.pairing.json
+  qj pair accept jinjiebewater --from ./alice-line.pairing.json
   qj serve client
 `;
 
@@ -114,7 +114,7 @@ Examples:
   "init gateway": `Usage: qj init gateway --owner-id <id> --owner-name <name> [--owner-summary <summary>]
 
 Examples:
-  qj init gateway --owner-id jason --owner-name Jason
+  qj init gateway --owner-id jinjiebewater --owner-name JinJieBeWater
 `,
   "init client": `Usage: qj init client [--port <loopback-port>]
 
@@ -150,8 +150,8 @@ Examples:
   "pair accept": `Usage: qj pair accept <line-id> --from <path|-> [--key <private-key-path>]
 
 Examples:
-  qj pair accept jason --from ./alice-line.pairing.json
-  cat ./alice-line.pairing.json | qj pair accept jason --from -
+  qj pair accept jinjiebewater --from ./alice-line.pairing.json
+  cat ./alice-line.pairing.json | qj pair accept jinjiebewater --from -
 `,
   "pair list": `Usage: qj pair list [--json]
 
@@ -171,7 +171,7 @@ Examples:
   "line key-create": `Usage: qj line key-create <line-id> [--output <private-key-path>]
 
 Examples:
-  qj line key-create jason
+  qj line key-create jinjiebewater
 `,
   "line list": `Usage: qj line list [--json]
 
@@ -181,12 +181,12 @@ Examples:
   "line update": `Usage: qj line update <line-id> --key <private-key-path> --bearer <token|-> --yes
 
 Examples:
-  printf '%s' '<new-remote-bearer>' | qj line update jason --key ~/.local/share/qujing/client/keys/jason.json --bearer - --yes
+  printf '%s' '<new-remote-bearer>' | qj line update jinjiebewater --key ~/.local/share/qujing/client/keys/jinjiebewater.json --bearer - --yes
 `,
   "line remove": `Usage: qj line remove <line-id> --yes
 
 Examples:
-  qj line remove jason --yes
+  qj line remove jinjiebewater --yes
 `,
   "token rotate": `Usage: qj token rotate
 
