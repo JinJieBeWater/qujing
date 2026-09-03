@@ -1,7 +1,7 @@
 import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import * as BunChildProcessSpawner from "@effect/platform-bun/BunChildProcessSpawner";
-import { Effect, FileSystem, Layer } from "effect";
+import { Effect, Exit, FileSystem, Layer } from "effect";
 import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import { PlatformLayer } from "./effect-runtime";
 
@@ -15,11 +15,12 @@ export function serviceDefinition(
   platform: NodeJS.Platform,
   command: string[],
   role: ServiceRole,
+  home = homedir(),
 ): ServiceDefinition {
   const label = `com.qujing.${role}`;
   if (platform === "darwin")
     return {
-      path: join(homedir(), "Library", "LaunchAgents", `${label}.plist`),
+      path: join(home, "Library", "LaunchAgents", `${label}.plist`),
       content: `<?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0"><dict>
@@ -35,7 +36,7 @@ export function serviceDefinition(
   if (platform === "linux")
     return {
       path: join(
-        process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
+        process.env.XDG_CONFIG_HOME ?? join(home, ".config"),
         "systemd",
         "user",
         `qujing-${role}.service`,
@@ -58,36 +59,72 @@ WantedBy=default.target
     };
   throw new Error(`User service installation is unsupported on ${platform}`);
 }
-export const installUserServiceEffect = (command: string[], role: ServiceRole) =>
+export interface InstallServiceOptions {
+  platform?: NodeJS.Platform;
+  home?: string;
+  executable?: string;
+  run?: (command: string[], allowFailure?: boolean) => Effect.Effect<void, unknown>;
+}
+export const installUserServiceEffect = (
+  command: string[],
+  role: ServiceRole,
+  options: InstallServiceOptions = {},
+) =>
   Effect.gen(function* () {
-    const definition = serviceDefinition(process.platform, command, role);
+    const platform = options.platform ?? process.platform;
+    const home = options.home ?? homedir();
+    const executable = options.executable ?? process.execPath;
+    const run = options.run ?? runServiceCommandEffect;
+    const definition = serviceDefinition(platform, command, role, home);
     const fs = yield* FileSystem.FileSystem;
-    yield* fs.makeDirectory(dirname(definition.path), { recursive: true });
-    yield* fs.writeFile(definition.path, new TextEncoder().encode(definition.content), {
-      mode: 0o600,
-    });
-    if (process.platform === "darwin") {
-      yield* runServiceCommandEffect(
-        ["launchctl", "bootout", `gui/${process.getuid?.() ?? 0}/com.qujing.${role}`],
-        true,
-      );
-      yield* runServiceCommandEffect([
-        "launchctl",
-        "bootstrap",
-        `gui/${process.getuid?.() ?? 0}`,
-        definition.path,
-      ]);
-    } else {
-      yield* runServiceCommandEffect(["systemctl", "--user", "daemon-reload"]);
-      yield* runServiceCommandEffect([
-        "systemctl",
-        "--user",
-        "enable",
-        "--now",
-        `qujing-${role}.service`,
-      ]);
+    let launcherRollback = Effect.void;
+    if (platform === "darwin") {
+      const launcher = serviceLauncherPath(role, home);
+      const temporary = `${launcher}.${process.pid}.tmp`;
+      yield* fs.makeDirectory(dirname(launcher), { recursive: true });
+      const replaceLauncher = (target: string) =>
+        fs
+          .remove(temporary, { force: true })
+          .pipe(
+            Effect.andThen(fs.symlink(target, temporary)),
+            Effect.andThen(fs.rename(temporary, launcher)),
+            Effect.ensuring(
+              fs.remove(temporary, { force: true }).pipe(Effect.catchEager(() => Effect.void)),
+            ),
+          );
+      const previousTarget = yield* fs
+        .readLink(launcher)
+        .pipe(
+          Effect.catchEager((error) =>
+            error.reason._tag === "NotFound"
+              ? Effect.succeed<string | undefined>(undefined)
+              : Effect.fail(error),
+          ),
+        );
+      yield* replaceLauncher(executable);
+      launcherRollback = (
+        previousTarget === undefined
+          ? fs.remove(launcher, { force: true })
+          : replaceLauncher(previousTarget)
+      ).pipe(Effect.orDie);
     }
-    return definition.path;
+    return yield* Effect.gen(function* () {
+      yield* fs.makeDirectory(dirname(definition.path), { recursive: true });
+      yield* fs.writeFile(definition.path, new TextEncoder().encode(definition.content), {
+        mode: 0o600,
+      });
+      if (platform === "darwin") {
+        yield* run(
+          ["launchctl", "bootout", `gui/${process.getuid?.() ?? 0}/com.qujing.${role}`],
+          true,
+        );
+        yield* run(["launchctl", "bootstrap", `gui/${process.getuid?.() ?? 0}`, definition.path]);
+      } else {
+        yield* run(["systemctl", "--user", "daemon-reload"]);
+        yield* run(["systemctl", "--user", "enable", "--now", `qujing-${role}.service`]);
+      }
+      return definition.path;
+    }).pipe(Effect.onExit((exit) => (Exit.isFailure(exit) ? launcherRollback : Effect.void)));
   }).pipe(Effect.provide(ServiceLayer));
 interface RemoveServiceOperations {
   run(command: string[], allowFailure?: boolean): Effect.Effect<void, unknown>;
@@ -107,6 +144,7 @@ export const removeUserServiceEffect = (
           true,
         );
         yield* operations.remove(definition.path);
+        yield* operations.remove(serviceLauncherPath(role));
       } else {
         yield* operations.run(
           ["systemctl", "--user", "disable", "--now", `qujing-${role}.service`],
@@ -125,6 +163,7 @@ export const removeUserServiceEffect = (
         true,
       );
       yield* fs.remove(definition.path, { force: true });
+      yield* fs.remove(serviceLauncherPath(role), { force: true });
     } else {
       yield* runServiceCommandEffect(
         ["systemctl", "--user", "disable", "--now", `qujing-${role}.service`],
@@ -136,11 +175,17 @@ export const removeUserServiceEffect = (
     return definition.path;
   }).pipe(Effect.provide(PlatformLayer));
 };
-export function currentServeCommand(role: ServiceRole): string[] {
-  const script = process.argv[1];
-  return script?.endsWith(".ts")
-    ? [process.execPath, script, "serve", role]
-    : [process.execPath, "serve", role];
+export function serviceLauncherPath(role: ServiceRole, home = homedir()): string {
+  return join(home, "Library", "Application Support", "Qujing", "bin", `qujing-${role}`);
+}
+export function currentServeCommand(
+  role: ServiceRole,
+  platform: NodeJS.Platform = process.platform,
+  executable = process.execPath,
+  script = process.argv[1],
+): string[] {
+  const program = platform === "darwin" ? serviceLauncherPath(role) : executable;
+  return script?.endsWith(".ts") ? [program, script, "serve", role] : [program, "serve", role];
 }
 export const runServiceCommandEffect = (command: string[], allowFailure = false) =>
   Effect.scoped(

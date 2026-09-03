@@ -161,7 +161,7 @@ qj service install gateway --yes
 qj service install client --yes
 ```
 
-Role services use separate launchd/systemd units on macOS/Linux; Windows Preview is foreground-only. Run `qj serve gateway` or `qj serve client` in foreground while diagnosing.
+Role services use separate launchd/systemd units on macOS/Linux. macOS Background Items identify them as `qujing-gateway` or `qujing-client`; terminal commands remain `qj`. Windows Preview is foreground-only. Run `qj serve gateway` or `qj serve client` in foreground while diagnosing.
 
 ## Source checkout
 

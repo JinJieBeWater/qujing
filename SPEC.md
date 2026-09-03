@@ -133,7 +133,7 @@ Agent-facing Client errors identify safe layer and Line without leaking secrets:
 
 ## 7. CLI and services
 
-The product remains Qujing; its only user-facing executable is `qj`. Commands are task-first, with role arguments only where an operation exists for both roles. No legacy role-prefixed command remains.
+The product remains Qujing; its only user-facing command is `qj`. Commands are task-first, with role arguments only where an operation exists for both roles. No legacy role-prefixed command remains. On macOS, service installation creates private `qujing-gateway` or `qujing-client` launchers so Background Items identify the role instead of displaying `qj`; these are not user commands.
 
 ```text
 qj init gateway --owner-id ... --owner-name ...

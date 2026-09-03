@@ -161,7 +161,7 @@ qj service install gateway --yes
 qj service install client --yes
 ```
 
-macOS/Linux 上两种角色使用独立 launchd/systemd 服务；Windows Preview 仅支持前台运行。排障时可运行 `qj serve gateway` 或 `qj serve client`。
+macOS/Linux 上两种角色使用独立 launchd/systemd 服务。macOS 后台项目显示 `qujing-gateway` 或 `qujing-client`，终端命令仍是 `qj`。Windows Preview 仅支持前台运行。排障时可运行 `qj serve gateway` 或 `qj serve client`。
 
 ## 源码仓库
 
