@@ -3,7 +3,7 @@ name: qujing-setup
 description: "Qujing deployment and operations. Use for installing, pairing, verifying, operating, upgrading, or recovering Owner Gateway, Agent Client, private Lines, services, or MCP Agent access. Not product development."
 compatibility: "Qujing release bundle; macOS arm64 or Linux x64 supported, Windows x64 Preview; Owner global Pi CLI required."
 metadata:
-  version: 0.1.1
+  version: 0.1.2
   category: setup
   tags: [qujing, mcp, tailcat, pi]
 ---
