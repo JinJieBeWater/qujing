@@ -100,7 +100,7 @@ export class ConfigStore {
               onSuccess: (current) => {
                 if (JSON.stringify(current) !== JSON.stringify(config))
                   return Effect.fail(
-                    new Error("Colleague Line is already initialized with different configuration"),
+                    new Error("Qujing is already initialized with different configuration"),
                   );
                 return this.readTombstonesEffect();
               },

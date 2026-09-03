@@ -21,7 +21,7 @@ it.live("runs CLI through Effect entrypoint", () =>
       clientDoctorEffect: () => Effect.succeed({ ok: true, checks: [] }),
     };
     expect(yield* runCliEffect(["--help"], io)).toBe(0);
-    expect(output).toContain("Usage: coll");
+    expect(output).toContain("Usage: qj");
   }),
 );
 

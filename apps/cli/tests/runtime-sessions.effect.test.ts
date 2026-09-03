@@ -9,7 +9,7 @@ import { RuntimeSessionStore } from "../src/runtime/sessions";
 it.live("runs RuntimeSessionStore Effect API", () =>
   Effect.gen(function* () {
     const root = yield* Effect.tryPromise({
-      try: () => mkdtemp(join(tmpdir(), "colleague-line-session-effect-test-")),
+      try: () => mkdtemp(join(tmpdir(), "qujing-session-effect-test-")),
       catch: (error) => error,
     });
     const store = new RuntimeSessionStore(root);

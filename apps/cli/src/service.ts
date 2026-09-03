@@ -16,7 +16,7 @@ export function serviceDefinition(
   command: string[],
   role: ServiceRole,
 ): ServiceDefinition {
-  const label = `com.colleague-line.${role}`;
+  const label = `com.qujing.${role}`;
   if (platform === "darwin")
     return {
       path: join(homedir(), "Library", "LaunchAgents", `${label}.plist`),
@@ -38,10 +38,10 @@ export function serviceDefinition(
         process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"),
         "systemd",
         "user",
-        `colleague-line-${role}.service`,
+        `qujing-${role}.service`,
       ),
       content: `[Unit]
-Description=Colleague Line ${role === "gateway" ? "Owner Gateway" : "Agent Client"}
+Description=Qujing ${role === "gateway" ? "Owner Gateway" : "Agent Client"}
 After=network-online.target
 
 [Service]
@@ -68,7 +68,7 @@ export const installUserServiceEffect = (command: string[], role: ServiceRole) =
     });
     if (process.platform === "darwin") {
       yield* runEffect(
-        ["launchctl", "bootout", `gui/${process.getuid?.() ?? 0}/com.colleague-line.${role}`],
+        ["launchctl", "bootout", `gui/${process.getuid?.() ?? 0}/com.qujing.${role}`],
         true,
       );
       yield* runEffect([
@@ -79,13 +79,7 @@ export const installUserServiceEffect = (command: string[], role: ServiceRole) =
       ]);
     } else {
       yield* runEffect(["systemctl", "--user", "daemon-reload"]);
-      yield* runEffect([
-        "systemctl",
-        "--user",
-        "enable",
-        "--now",
-        `colleague-line-${role}.service`,
-      ]);
+      yield* runEffect(["systemctl", "--user", "enable", "--now", `qujing-${role}.service`]);
     }
     return definition.path;
   }).pipe(Effect.provide(ServiceLayer));
@@ -103,13 +97,13 @@ export const removeUserServiceEffect = (
     return Effect.gen(function* () {
       if (platform === "darwin") {
         yield* operations.run(
-          ["launchctl", "bootout", `gui/${process.getuid?.() ?? 0}/com.colleague-line.${role}`],
+          ["launchctl", "bootout", `gui/${process.getuid?.() ?? 0}/com.qujing.${role}`],
           true,
         );
         yield* operations.remove(definition.path);
       } else {
         yield* operations.run(
-          ["systemctl", "--user", "disable", "--now", `colleague-line-${role}.service`],
+          ["systemctl", "--user", "disable", "--now", `qujing-${role}.service`],
           true,
         );
         yield* operations.remove(definition.path);
@@ -121,15 +115,12 @@ export const removeUserServiceEffect = (
     const fs = yield* FileSystem.FileSystem;
     if (platform === "darwin") {
       yield* runEffect(
-        ["launchctl", "bootout", `gui/${process.getuid?.() ?? 0}/com.colleague-line.${role}`],
+        ["launchctl", "bootout", `gui/${process.getuid?.() ?? 0}/com.qujing.${role}`],
         true,
       );
       yield* fs.remove(definition.path, { force: true });
     } else {
-      yield* runEffect(
-        ["systemctl", "--user", "disable", "--now", `colleague-line-${role}.service`],
-        true,
-      );
+      yield* runEffect(["systemctl", "--user", "disable", "--now", `qujing-${role}.service`], true);
       yield* fs.remove(definition.path, { force: true });
       yield* runEffect(["systemctl", "--user", "daemon-reload"]);
     }

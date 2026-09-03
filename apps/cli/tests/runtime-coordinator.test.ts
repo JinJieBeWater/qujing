@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigStore, type WorkspaceConfig } from "../src/config";
-import { ColleagueLineError } from "../src/errors";
+import { QujingError } from "../src/errors";
 import { RuntimeCoordinator } from "../src/runtime/coordinator";
 import type { PiRpcSessionEffect } from "../src/runtime/pi-rpc";
 import { RuntimeSessionStore, type RuntimeSession } from "../src/runtime/sessions";
@@ -21,7 +21,7 @@ async function fixture(
     session: RuntimeSession,
   ) => Effect.Effect<PiRpcSessionEffect, unknown> = () => Effect.succeed(fakeSession()),
 ) {
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-coordinator-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-coordinator-"));
   roots.push(root);
   const stateRoot = join(root, "state");
   const workspaceRoot = join(root, "workspace");
@@ -121,7 +121,7 @@ describe("RuntimeCoordinator", () => {
           signal,
         }),
       ),
-    ).rejects.toEqual(new ColleagueLineError("INVALID_QUESTION", "Question must not be empty"));
+    ).rejects.toEqual(new QujingError("INVALID_QUESTION", "Question must not be empty"));
     await expect(
       Effect.runPromise(
         coordinator.answerEffect({
@@ -132,7 +132,7 @@ describe("RuntimeCoordinator", () => {
         }),
       ),
     ).rejects.toEqual(
-      new ColleagueLineError("INVALID_QUESTION", "Question must not exceed 20,000 characters"),
+      new QujingError("INVALID_QUESTION", "Question must not exceed 20,000 characters"),
     );
     await expect(
       Effect.runPromise(

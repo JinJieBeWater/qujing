@@ -1,7 +1,7 @@
 import { dirname, join } from "node:path";
 import { Duration, Effect, Exit, Fiber, Ref, Scope } from "effect";
 import { pollEvery } from "./effect-runtime";
-import { createColleagueLine } from "./colleague-line";
+import { createQujing } from "./qujing";
 import { ConfigStore, type Config } from "./config";
 import { acknowledgeGatewayReloadEffect, configFingerprint } from "./gateway-reload";
 import { createMcpGateway } from "./mcp";
@@ -57,7 +57,7 @@ export function startServerEffect(paths: ServerOptions, scope: Scope.Scope) {
         Effect.map((coordinator) => ({
           coordinator,
           gateway: createMcpGateway({
-            app: createColleagueLine({ config, coordinator }),
+            app: createQujing({ config, coordinator }),
             authenticateEffect: (bearer) => config.authenticateEffect(bearer),
             allowedHosts: [effective.server.host, "localhost"],
             allowedOrigins: [],

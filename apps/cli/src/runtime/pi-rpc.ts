@@ -11,9 +11,12 @@ interface RpcResponse {
 
 type PendingRequest = Deferred.Deferred<RpcResponse, Error>;
 
-const COLLEAGUE_LINE_PROMPT = `你正在通过 Colleague Line 回答另一位同事的问题。
+const MAX_RPC_LINE_BYTES = 16 * 1024 * 1024;
+const MAX_RPC_STDOUT_BYTES = 32 * 1024 * 1024;
 
-Colleague Line 是同事之间的私密咨询通道。你可以查阅 Owner 的工作上下文，帮助对方理解项目、补充背景、找回决策和解决问题。
+const QUJING_PROMPT = `你正在通过取经（Qujing）回答另一位同事的问题。
+
+取经（Qujing）是同事之间的私密咨询通道。你可以查阅 Owner 的工作上下文，帮助对方理解项目、补充背景、找回决策和解决问题。
 
 回答前先按需取证：判断当前问题缺少什么证据，再选择最相关的来源。证据可能来自当前代码、项目文档、Git、可用 Skills，或与当前项目明确相关的 Agent 历史。
 
@@ -55,7 +58,7 @@ export const startPiRpcSessionEffect = (
               "rpc",
               "--approve",
               "--append-system-prompt",
-              COLLEAGUE_LINE_PROMPT,
+              QUJING_PROMPT,
               "--session-id",
               options.sessionId,
             ],
@@ -127,7 +130,12 @@ class ManagedPiRpcSession implements PiRpcSessionEffect {
 class GlobalPiRpcSession implements PiRpcSessionEffect {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly stdoutQueue = Effect.runSync(Queue.unbounded<Effect.Effect<void, Error>>());
-  private stdoutBuffer = Buffer.alloc(0);
+  private readonly stdoutFragments: Buffer[] = [];
+  private stdoutPartialBytes = 0;
+  private stdoutQueuedBytes = 0;
+  private stdoutProcessingBytes = 0;
+  private stdoutRejected = false;
+  private stdoutFailure: Error | undefined;
   private currentTurn: Deferred.Deferred<void, Error> | undefined;
   private lastAssistantText: string | undefined;
   private failed = false;
@@ -147,14 +155,39 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
   readonly readerEffect = Effect.acquireUseRelease(
     Effect.sync(() => {
       const onData = (chunk: Buffer) => {
-        Queue.offerUnsafe(this.stdoutQueue, this.readEffect(chunk));
+        if (this.stdoutRejected) return;
+        if (
+          this.stdoutPartialBytes +
+            this.stdoutQueuedBytes +
+            this.stdoutProcessingBytes +
+            chunk.byteLength >
+          MAX_RPC_STDOUT_BYTES
+        ) {
+          this.rejectStdout(new Error("Global Pi RPC stdout exceeded buffer limit"));
+          return;
+        }
+        this.stdoutQueuedBytes += chunk.byteLength;
+        Queue.offerUnsafe(
+          this.stdoutQueue,
+          Effect.sync(() => {
+            this.stdoutQueuedBytes -= chunk.byteLength;
+            this.stdoutProcessingBytes = chunk.byteLength;
+          }).pipe(
+            Effect.andThen(this.readEffect(chunk)),
+            Effect.ensuring(
+              Effect.sync(() => {
+                this.stdoutProcessingBytes = 0;
+              }),
+            ),
+          ),
+        );
       };
       const onEnd = () => {
         Queue.offerUnsafe(
           this.stdoutQueue,
           Effect.suspend(() =>
-            this.stdoutBuffer.length > 0
-              ? this.failEffect(new Error("Pi RPC ended with partial JSONL"))
+            this.stdoutPartialBytes > 0
+              ? Effect.fail(new Error("Pi RPC ended with partial JSONL"))
               : Effect.void,
           ),
         );
@@ -162,14 +195,14 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
       const onError = (error: Error) => {
         Queue.offerUnsafe(
           this.stdoutQueue,
-          this.failEffect(new Error("Could not start global Pi", { cause: error })),
+          Effect.fail(new Error("Could not start global Pi", { cause: error })),
         );
       };
       const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
         if (!this.stopped)
           Queue.offerUnsafe(
             this.stdoutQueue,
-            this.failEffect(new Error(`Global Pi exited (${code ?? signal ?? "unknown"})`)),
+            Effect.fail(new Error(`Global Pi exited (${code ?? signal ?? "unknown"})`)),
           );
       };
       this.child.stdout.on("data", onData);
@@ -181,10 +214,9 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
     }),
     () =>
       Queue.take(this.stdoutQueue).pipe(
-        Effect.flatMap((effect) =>
-          effect.pipe(Effect.catchEager((error) => this.failEffect(error))),
-        ),
+        Effect.flatMap((effect) => effect),
         Effect.forever,
+        Effect.catchEager((error) => this.failAndStopEffect(error)),
       ),
     ({ onData, onEnd, onError, onClose }) =>
       Effect.sync(() => {
@@ -238,7 +270,11 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
     );
   }
   disposeEffect(): Effect.Effect<void> {
-    return stopChildEffect(this.child).pipe(
+    return Effect.sync(() => {
+      this.stopped = true;
+      this.child.stdout.pause();
+    }).pipe(
+      Effect.andThen(stopChildEffect(this.child)),
       Effect.andThen(this.failEffect(new Error("Global Pi stopped"))),
     );
   }
@@ -261,17 +297,33 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
 
   private readEffect(chunk: Buffer): Effect.Effect<void, Error> {
     return Effect.gen({ self: this }, function* () {
-      this.stdoutBuffer = Buffer.concat([this.stdoutBuffer, chunk]);
-      let newline = this.stdoutBuffer.indexOf(0x0a);
+      let offset = 0;
+      let newline = chunk.indexOf(0x0a);
       while (newline !== -1) {
-        const line = this.stdoutBuffer.subarray(0, newline);
-        this.stdoutBuffer = this.stdoutBuffer.subarray(newline + 1);
-        if (line.includes(0x0d)) {
-          yield* this.failEffect(new Error("Global Pi emitted non-LF JSONL"));
-          return;
-        }
+        const fragment = chunk.subarray(offset, newline);
+        if (fragment.includes(0x0d))
+          return yield* Effect.fail(new Error("Global Pi emitted non-LF JSONL"));
+        const lineBytes = this.stdoutPartialBytes + fragment.byteLength;
+        if (lineBytes > MAX_RPC_LINE_BYTES)
+          return yield* Effect.fail(new Error("Global Pi RPC JSONL line exceeded byte limit"));
+        const line =
+          this.stdoutFragments.length === 0
+            ? fragment
+            : Buffer.concat([...this.stdoutFragments, fragment], lineBytes);
+        this.stdoutFragments.length = 0;
+        this.stdoutPartialBytes = 0;
         if (line.length > 0) yield* this.handleLineEffect(line.toString("utf8"));
-        newline = this.stdoutBuffer.indexOf(0x0a);
+        offset = newline + 1;
+        newline = chunk.indexOf(0x0a, offset);
+      }
+      const remainder = chunk.subarray(offset);
+      if (remainder.includes(0x0d))
+        return yield* Effect.fail(new Error("Global Pi emitted non-LF JSONL"));
+      if (this.stdoutPartialBytes + remainder.byteLength > MAX_RPC_LINE_BYTES)
+        return yield* Effect.fail(new Error("Global Pi RPC JSONL line exceeded byte limit"));
+      if (remainder.byteLength > 0) {
+        this.stdoutFragments.push(offset === 0 ? remainder : Buffer.from(remainder));
+        this.stdoutPartialBytes += remainder.byteLength;
       }
     });
   }
@@ -282,9 +334,7 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
       try {
         message = JSON.parse(line) as Record<string, unknown>;
       } catch (error) {
-        return yield* this.failEffect(
-          new Error("Global Pi emitted invalid JSONL", { cause: error }),
-        );
+        return yield* Effect.fail(new Error("Global Pi emitted invalid JSONL", { cause: error }));
       }
       if (message.type === "response" && typeof message.id === "string") {
         const pending = this.pending.get(message.id);
@@ -364,6 +414,25 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
       this.currentTurn = undefined;
       yield* Deferred.fail(this.failure, error);
     });
+  }
+
+  private failAndStopEffect(error: Error): Effect.Effect<void> {
+    const failure = this.stdoutFailure ?? error;
+    return Effect.sync(() => {
+      this.stdoutRejected = true;
+      this.stopped = true;
+      this.child.stdout.pause();
+    }).pipe(Effect.andThen(this.failEffect(failure)), Effect.andThen(stopChildEffect(this.child)));
+  }
+
+  private rejectStdout(error: Error): void {
+    if (this.stdoutRejected) return;
+    this.stdoutRejected = true;
+    this.stdoutFailure = error;
+    this.stopped = true;
+    this.child.stdout.pause();
+    this.child.kill("SIGTERM");
+    Queue.offerUnsafe(this.stdoutQueue, Effect.fail(error));
   }
 }
 

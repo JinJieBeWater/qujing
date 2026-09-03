@@ -24,7 +24,7 @@ const waitForFile = (path: string): Effect.Effect<void, unknown, never> =>
 it.live("releases Pi when scoped Effect completes", () =>
   Effect.gen(function* () {
     const root = yield* Effect.tryPromise({
-      try: () => mkdtemp(join(tmpdir(), "colleague-line-pi-effect-")),
+      try: () => mkdtemp(join(tmpdir(), "qujing-pi-effect-")),
       catch: (error) => error,
     });
     const binary = join(root, "pi");
@@ -77,7 +77,7 @@ for await (const chunk of Bun.stdin.stream()) for (const line of new TextDecoder
 it.live("serializes stdout chunks while UI response write blocks", () =>
   Effect.gen(function* () {
     const root = yield* Effect.tryPromise({
-      try: () => mkdtemp(join(tmpdir(), "colleague-line-pi-stdout-order-")),
+      try: () => mkdtemp(join(tmpdir(), "qujing-pi-stdout-order-")),
       catch: (error) => error,
     });
     const binary = join(root, "pi");

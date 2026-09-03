@@ -12,7 +12,7 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-test-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-test-"));
   roots.push(root);
   const workspace = join(root, "workspace");
   await mkdir(workspace);

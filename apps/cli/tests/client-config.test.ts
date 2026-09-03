@@ -11,7 +11,7 @@ afterEach(async () =>
 );
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-client-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-client-"));
   roots.push(root);
   const key = join(root, "key");
   await writeFile(key, "key-one");

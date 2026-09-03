@@ -7,7 +7,7 @@ import { Effect } from "effect";
 import { requestClientLineRetirementEffect } from "../src/client-control";
 
 test("removes stale acknowledgement before publishing a retirement request", async () => {
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-client-control-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-client-control-"));
   const now = new Date().toISOString();
   const line: LineConfig = {
     id: "line",

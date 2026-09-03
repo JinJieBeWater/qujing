@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { Deferred, Effect, Ref, Semaphore } from "effect";
 import type { ClientConfig, ClientConfigStore, LineConfig } from "./client-config";
-import { ColleagueLineError } from "./errors";
+import { QujingError } from "./errors";
 import { LineRuntime, type LineAskResult, type LineWorkspaces } from "./line-runtime";
 import type { ClientAskResult, ClientLine } from "./schemas";
 import { startConnectorEffect } from "./transport/process";
@@ -122,8 +122,7 @@ export class ClientApplication {
           const config = yield* this.readConfigEffect();
           yield* this.reconcileLockedEffect(config);
           const line = config.lines.find((entry) => entry.id === input.line);
-          if (!line)
-            return yield* Effect.fail(new ColleagueLineError("LINE_NOT_FOUND", "Line not found"));
+          if (!line) return yield* Effect.fail(new QujingError("LINE_NOT_FOUND", "Line not found"));
           if ((yield* Ref.get(this.state)).blocked.has(line.id))
             return yield* Effect.fail(lineUnavailable());
           return yield* this.runtimeAndLeaseLockedEffect(line, signal).pipe(
@@ -299,7 +298,7 @@ export class ClientApplication {
     return Ref.get(this.state).pipe(
       Effect.flatMap((state) =>
         state.closed
-          ? Effect.fail(new ColleagueLineError("LINE_UNAVAILABLE", "Client is stopped"))
+          ? Effect.fail(new QujingError("LINE_UNAVAILABLE", "Client is stopped"))
           : Effect.void,
       ),
     );
@@ -317,8 +316,8 @@ function without<K, V>(map: Map<K, V>, key: K) {
   next.delete(key);
   return next;
 }
-function lineUnavailable(): ColleagueLineError {
-  return new ColleagueLineError("LINE_UNAVAILABLE", "Line unavailable");
+function lineUnavailable(): QujingError {
+  return new QujingError("LINE_UNAVAILABLE", "Line unavailable");
 }
 function isAbort(error: unknown): error is DOMException {
   return error instanceof DOMException && error.name === "AbortError";

@@ -20,7 +20,7 @@ afterEach(async () =>
 
 describe("Gateway reload acknowledgement", () => {
   test("waits until Gateway acknowledges the effective config", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-reload-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-reload-"));
     roots.push(root);
     const store = new ConfigStore({
       configPath: join(root, "config.json"),
@@ -46,7 +46,7 @@ describe("Gateway reload acknowledgement", () => {
   });
 
   test("returns control for local cleanup if Gateway stops", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-reload-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-reload-"));
     roots.push(root);
     const store = new ConfigStore({
       configPath: join(root, "config.json"),
@@ -62,7 +62,7 @@ describe("Gateway reload acknowledgement", () => {
 });
 
 test("waits until running Client acknowledges exact config", async () => {
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-client-reload-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-client-reload-"));
   roots.push(root);
   const store = new ClientConfigStore({ configPath: join(root, "client.json") });
   await Effect.runPromise(store.initEffect());

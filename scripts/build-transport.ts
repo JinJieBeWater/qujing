@@ -6,11 +6,11 @@ import { join } from "node:path";
 const root = join(import.meta.dir, "..");
 const transport = join(root, "apps", "cli", "native", "transport");
 const output =
-  process.env.COLLEAGUE_LINE_TRANSPORT_OUT ??
+  process.env.QUJING_TRANSPORT_OUT ??
   join(
     transport,
     "bin",
-    process.platform === "win32" ? "colleague-line-transport.exe" : "colleague-line-transport",
+    process.platform === "win32" ? "qujing-transport.exe" : "qujing-transport",
   );
 await mkdir(join(transport, "bin"), { recursive: true });
 const tags = (await readFile(join(transport, "build-tags.txt"), "utf8")).trim();

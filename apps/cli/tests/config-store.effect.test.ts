@@ -8,7 +8,7 @@ import { ConfigStore } from "../src/config";
 it.live("runs ConfigStore Effect API", () =>
   Effect.gen(function* () {
     const root = yield* Effect.tryPromise({
-      try: () => mkdtemp(join(tmpdir(), "colleague-line-effect-test-")),
+      try: () => mkdtemp(join(tmpdir(), "qujing-effect-test-")),
       catch: (error) => error,
     });
     const workspace = join(root, "workspace");

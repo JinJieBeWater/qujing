@@ -1,7 +1,7 @@
 #!/bin/zsh
 set -euo pipefail
 
-root=$(mktemp -d /tmp/colleague-line-tailcat-e2e.XXXXXX)
+root=$(mktemp -d /tmp/qujing-tailcat-e2e.XXXXXX)
 http_pid= server_pid= connector_pid= unauthorized_pid=
 cleanup() {
   [[ -n "${unauthorized_pid}" ]] && kill "$unauthorized_pid" 2>/dev/null || true
@@ -13,7 +13,7 @@ cleanup() {
 }
 trap cleanup EXIT
 
-binary=${COLLEAGUE_LINE_TRANSPORT_BIN:-apps/cli/native/transport/bin/colleague-line-transport}
+binary=${QUJING_TRANSPORT_BIN:-apps/cli/native/transport/bin/qujing-transport}
 before=$(tailscale debug prefs 2>/dev/null | shasum -a 256 | cut -d' ' -f1 || true)
 "$binary" key-create --output "$root/client.json" > "$root/key.out"
 public_key=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["publicKey"])' "$root/key.out")

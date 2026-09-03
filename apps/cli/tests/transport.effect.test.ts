@@ -15,7 +15,7 @@ it.effect("runs service removal through Effect", () =>
       remove: () => Effect.sync(() => void events.push("remove")),
     });
     expect(events).toEqual([
-      "systemctl --user disable --now colleague-line-client.service",
+      "systemctl --user disable --now qujing-client.service",
       "remove",
       "systemctl --user daemon-reload",
     ]);
@@ -24,7 +24,7 @@ it.effect("runs service removal through Effect", () =>
 
 it.effect("runs transport readiness through Effect", () =>
   Effect.gen(function* () {
-    const root = yield* promise(() => mkdtemp(join(tmpdir(), "colleague-line-transport-effect-")));
+    const root = yield* promise(() => mkdtemp(join(tmpdir(), "qujing-transport-effect-")));
     const binary = join(root, "fake-transport");
     try {
       yield* promise(() =>
@@ -46,7 +46,7 @@ it.effect("runs transport readiness through Effect", () =>
 
 it.effect("serializes supervisor reload through Effect", () =>
   Effect.gen(function* () {
-    const root = yield* promise(() => mkdtemp(join(tmpdir(), "colleague-line-supervisor-effect-")));
+    const root = yield* promise(() => mkdtemp(join(tmpdir(), "qujing-supervisor-effect-")));
     const supervisor = new TailcatSupervisor({
       stateRoot: root,
       port: 43_110,

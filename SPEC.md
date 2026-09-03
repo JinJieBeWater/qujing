@@ -1,10 +1,10 @@
-# Colleague Line specification
+# Qujing specification
 
 Status: Client multiplexing and the full global Pi Runtime are verified on macOS Apple Silicon and Linux x64. The consultation prompt is unit-verified and awaits cross-device acceptance. Windows x64 remains Preview.
 
 ## 1. Topology
 
-One external Agent configures exactly one local Colleague Line Client MCP server. That Client manages multiple private Lines, each reaching a separate Owner Gateway. No central directory, automatic routing, shared history, compatibility layer for prior topology, or Agent-facing direct Gateway MCP connection exists.
+One external Agent configures exactly one local Qujing Client MCP server. That Client manages multiple private Lines, each reaching a separate Owner Gateway. No central directory, automatic routing, shared history, compatibility layer for prior topology, or Agent-facing direct Gateway MCP connection exists.
 
 ```text
 Agent
@@ -87,7 +87,7 @@ Each Line has two independent authentication layers:
 
 Local Client bearer is separate from all remote bearers. Each Line must use credentials not shared with another Line. Rotation or revoke on one Line never changes other Lines or local bearer. Private keys and Line storage are readable only by current OS user; remote bearer is never shown after Line creation or logged.
 
-Client persists its loopback port, local bearer hash, and private Line records in `~/.config/colleague-line/client.json` on macOS/Linux or `%APPDATA%\ColleagueLine\client.json` on Windows. Client process lock and reload state use `~/.local/share/colleague-line/client/` or `%LOCALAPPDATA%\ColleagueLine\client\`. Directories use `0700`, files `0600`, and Windows uses current-user ACL. Client config never stores local bearer plaintext; Line remote bearers remain private at rest and are redacted from list output.
+Client persists its loopback port, local bearer hash, and private Line records in `~/.config/qujing/client.json` on macOS/Linux or `%APPDATA%\Qujing\client.json` on Windows. Client process lock and reload state use `~/.local/share/qujing/client/` or `%LOCALAPPDATA%\Qujing\client\`. Directories use `0700`, files `0600`, and Windows uses current-user ACL. Client config never stores local bearer plaintext; Line remote bearers remain private at rest and are redacted from list output.
 
 Remote credential rotation keeps the remote Gateway Client ID and Runtime history but replaces that Line's Tailcat key and bearer. Gateway rotation invalidates old credentials first and returns the new bearer once through a trusted channel. Client then performs one atomic `line update`: abort and settle that Line's active requests, close its upstream MCP session and Connector, persist the new key path and bearer together, and reconnect. No old/new credential overlap or automatic ask retry is allowed.
 
@@ -110,18 +110,18 @@ Gateway Runtime Session is keyed by authenticated remote Gateway Client plus Wor
 Gateway persists JSON config, Runtime binding metadata, tombstones, Tailcat server key, and transport state under:
 
 ```text
-macOS/Linux: ~/.config/colleague-line/config.json
-macOS/Linux state: ~/.local/share/colleague-line/
-Windows config: %APPDATA%\ColleagueLine\config.json
-Windows state: %LOCALAPPDATA%\ColleagueLine\
+macOS/Linux: ~/.config/qujing/config.json
+macOS/Linux state: ~/.local/share/qujing/
+Windows config: %APPDATA%\Qujing\config.json
+Windows state: %LOCALAPPDATA%\Qujing\
 Pi global state and sessions: ~/.pi/agent/
 ```
 
-Config includes Owner, loopback server, Workspaces, and remote Gateway Clients with bearer hashes and Tailcat public keys. State binds `remote Gateway Client + Workspace` to one Pi session ID. Pi owns session files in its default global session store. Revoking a Gateway Client or removing a Workspace retires active processes and removes Colleague Line bindings but does not delete Owner's global Pi archive. Atomic JSON writes and idempotent desired-state reconciliation apply. No database, automatic history deletion, public reset, knowledge index, or session adapter exists.
+Config includes Owner, loopback server, Workspaces, and remote Gateway Clients with bearer hashes and Tailcat public keys. State binds `remote Gateway Client + Workspace` to one Pi session ID. Pi owns session files in its default global session store. Revoking a Gateway Client or removing a Workspace retires active processes and removes Qujing bindings but does not delete Owner's global Pi archive. Atomic JSON writes and idempotent desired-state reconciliation apply. No database, automatic history deletion, public reset, knowledge index, or session adapter exists.
 
 Gateway launches Owner's installed global Pi CLI directly with a fixed appended system prompt. It passes no model, provider, settings, resource, tool, extension, skill, or session-directory override. `--approve` loads trusted Workspace resources in non-interactive RPC mode. Pi therefore uses Owner's default model and authentication, global settings, skills, extensions, full builtin tools, and `~/.pi/agent/sessions/`.
 
-The appended prompt defines Colleague Line as private colleague consultation, asks Pi to remain read-only, and tells Pi to choose evidence according to the question from relevant code, project documents, Git, Skills, and Agent histories. It does not impose a fixed lookup order. Colleague Line does not parse, index, merge, or replay other agents' histories; Owner's Pi may inspect relevant records itself using its configured capabilities.
+The appended prompt defines Qujing as private colleague consultation, asks Pi to remain read-only, and tells Pi to choose evidence according to the question from relevant code, project documents, Git, Skills, and Agent histories. It does not impose a fixed lookup order. Qujing does not parse, index, merge, or replay other agents' histories; Owner's Pi may inspect relevant records itself using its configured capabilities.
 
 The prompt does not confine filesystem access, filter tools, disable extensions, or mediate Pi actions. This remains a trusted remote-control capability, not a read-only security boundary.
 
@@ -133,23 +133,23 @@ Agent-facing Client errors identify safe layer and Line without leaking secrets:
 
 ## 7. CLI and services
 
-The product remains Colleague Line; its only user-facing executable is `coll`. Commands are task-first, with role arguments only where an operation exists for both roles. No legacy role-prefixed command remains.
+The product remains Qujing; its only user-facing executable is `qj`. Commands are task-first, with role arguments only where an operation exists for both roles. No legacy role-prefixed command remains.
 
 ```text
-coll init gateway --owner-id ... --owner-name ...
-coll init client
-coll workspace add|list|update|remove ...
-coll pair create <id> --key ... [--out <path|->]
-coll pair accept <line-id> --from <path|-> [--key <private-key-path>]
-coll pair list|rotate|revoke ...
-coll line key-create|list|update|remove ...
-coll token rotate
-coll doctor gateway|client [--json]
-coll serve gateway|client
-coll service install|remove gateway|client --yes
+qj init gateway --owner-id ... --owner-name ...
+qj init client
+qj workspace add|list|update|remove ...
+qj pair create <id> --key ... [--out <path|->]
+qj pair accept <line-id> --from <path|-> [--key <private-key-path>]
+qj pair list|rotate|revoke ...
+qj line key-create|list|update|remove ...
+qj token rotate
+qj doctor gateway|client [--json]
+qj serve gateway|client
+qj service install|remove gateway|client --yes
 ```
 
-`pair create` requires a live Gateway, creates one remote Gateway Client identity and bearer for exactly one Line, and waits until Gateway applies its distinct Tailcat key before publishing one private pairing bundle. The bundle carries Owner ID, remote Gateway Client ID, Tailcat coordinates, and remote bearer as one exact handoff. `pair accept` reads that bundle from a private file or stdin, derives the standard key path from Line ID unless overridden, verifies the Owner, then persists the Line. `line update` replaces key path and bearer atomically after Gateway rotation. Removing a Line deletes only local routing and credentials; its local ID may be reused later because remote identity and history stay Owner-controlled. `serve gateway` is Owner service. `serve client` is Agent-local MCP service. `doctor` checks selected role configuration, global Pi executable, and transport readiness without starting a model turn or reading Workspace content. Pi model, provider, authentication, settings, tools, skills, and extensions are managed through Owner's normal global Pi; Colleague Line adds only its fixed Runtime prompt.
+`pair create` requires a live Gateway, creates one remote Gateway Client identity and bearer for exactly one Line, and waits until Gateway applies its distinct Tailcat key before publishing one private pairing bundle. The bundle carries Owner ID, remote Gateway Client ID, Tailcat coordinates, and remote bearer as one exact handoff. `pair accept` reads that bundle from a private file or stdin, derives the standard key path from Line ID unless overridden, verifies the Owner, then persists the Line. `line update` replaces key path and bearer atomically after Gateway rotation. Removing a Line deletes only local routing and credentials; its local ID may be reused later because remote identity and history stay Owner-controlled. `serve gateway` is Owner service. `serve client` is Agent-local MCP service. `doctor` checks selected role configuration, global Pi executable, and transport readiness without starting a model turn or reading Workspace content. Pi model, provider, authentication, settings, tools, skills, and extensions are managed through Owner's normal global Pi; Qujing adds only its fixed Runtime prompt.
 
 ## 8. Security
 
@@ -181,7 +181,7 @@ New acceptance proves:
 - Line credentials, transport failure, cancellation, and Runtime history remain isolated;
 - selected ask traverses Agent → Client → Line → Gateway → Runtime and cancellation returns over both hops;
 - Gateway retains internal `list_workspaces()` and `ask({ workspace, question })`, full global Pi Runtime, per-binding Pi session IDs, and restart recovery;
-- Runtime loads the Colleague Line consultation prompt without replacing Owner tools, extensions, skills, model, authentication, settings, or session store;
+- Runtime loads the Qujing consultation prompt without replacing Owner tools, extensions, skills, model, authentication, settings, or session store;
 - Gateway and Client services restart and recover new connections; no accepted ask is retried;
 - Windows artifacts and release notes remain Preview.
 

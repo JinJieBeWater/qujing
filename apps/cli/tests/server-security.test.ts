@@ -14,7 +14,7 @@ afterEach(async () =>
 describe("Gateway private-state boundary", () => {
   test("fails closed before Runtime startup when private state is permissive", async () => {
     if (process.platform === "win32") return;
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-server-security-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-server-security-"));
     roots.push(root);
     const paths = {
       configPath: join(root, "config", "config.json"),

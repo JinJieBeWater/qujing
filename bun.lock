@@ -3,9 +3,9 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "colleague-line",
+      "name": "qujing",
       "devDependencies": {
-        "@colleague-line/config": "workspace:*",
+        "@qujing/config": "workspace:*",
         "@types/bun": "1.3.14",
         "@types/node": "^26.2.0",
         "typescript": "^6.0.3",
@@ -13,10 +13,10 @@
       },
     },
     "apps/cli": {
-      "name": "@colleague-line/cli",
+      "name": "@qujing/cli",
       "version": "0.1.0",
       "bin": {
-        "colleague-line": "./src/cli.ts",
+        "qj": "./src/cli.ts",
       },
       "dependencies": {
         "@effect/platform-bun": "4.0.0-rc.112",
@@ -25,13 +25,13 @@
         "zod": "4.1.12",
       },
       "devDependencies": {
-        "@colleague-line/config": "workspace:*",
+        "@qujing/config": "workspace:*",
         "@effect/vitest": "4.0.0-rc.112",
         "vitest": "4.1.11",
       },
     },
     "packages/config": {
-      "name": "@colleague-line/config",
+      "name": "@qujing/config",
       "version": "0.0.0",
     },
   },
@@ -47,9 +47,9 @@
 
     "@blazediff/core": ["@blazediff/core@1.9.1", "", {}, "sha512-ehg3jIkYKulZh+8om/O25vkvSsXXwC+skXmyA87FFx6A/45eqOkZsBltMw/TVteb0mloiGT8oGRTcjRAz66zaA=="],
 
-    "@colleague-line/cli": ["@colleague-line/cli@workspace:apps/cli"],
+    "@qujing/cli": ["@qujing/cli@workspace:apps/cli"],
 
-    "@colleague-line/config": ["@colleague-line/config@workspace:packages/config"],
+    "@qujing/config": ["@qujing/config@workspace:packages/config"],
 
     "@effect/platform-bun": ["@effect/platform-bun@4.0.0-rc.112", "", { "dependencies": { "@effect/platform-node-shared": "^4.0.0-rc.112" }, "peerDependencies": { "effect": "^4.0.0-rc.112" } }, "sha512-Y5n2HhV/vsbrJls9ukX42RL7zqXQxISHegWFsP9njsCyDmGTnq7QYSO82rglwrLPwtTrv5dkSRTuGw4+oXxgMg=="],
 

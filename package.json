@@ -1,5 +1,5 @@
 {
-  "name": "colleague-line",
+  "name": "qujing",
   "private": true,
   "workspaces": [
     "apps/*",
@@ -23,7 +23,7 @@
     "hooks:setup": "vp config"
   },
   "devDependencies": {
-    "@colleague-line/config": "workspace:*",
+    "@qujing/config": "workspace:*",
     "@types/bun": "1.3.14",
     "@types/node": "^26.2.0",
     "typescript": "^6.0.3",

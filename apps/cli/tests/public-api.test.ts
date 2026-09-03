@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { ColleagueLineError, errorCodes } from "../src/errors";
+import { QujingError, errorCodes } from "../src/errors";
 
 describe("public API", () => {
   test("exposes stable external error codes", () => {
@@ -17,8 +17,8 @@ describe("public API", () => {
       "RUNTIME_FAILED",
       "BUSY",
     ]);
-    expect(new ColleagueLineError("BUSY", "busy")).toMatchObject({
-      name: "ColleagueLineError",
+    expect(new QujingError("BUSY", "busy")).toMatchObject({
+      name: "QujingError",
       code: "BUSY",
       message: "busy",
     });

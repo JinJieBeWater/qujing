@@ -12,8 +12,8 @@ afterEach(async () => {
 });
 
 describe("global Pi RPC", () => {
-  test("uses global Pi with Colleague Line context and strict LF JSONL", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-pi-rpc-"));
+  test("uses global Pi with Qujing context and strict LF JSONL", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qujing-pi-rpc-"));
     roots.push(root);
     const binary = join(root, "pi");
     await writeFile(
@@ -23,7 +23,7 @@ const sessionId = process.argv[process.argv.indexOf("--session-id") + 1];
 const systemPrompt = process.argv[process.argv.indexOf("--append-system-prompt") + 1];
 if (!process.argv.includes("--mode") || !process.argv.includes("rpc") || !process.argv.includes("--approve")) process.exit(2);
 const requiredPrompt = [
-  "Colleague Line 是同事之间的私密咨询通道",
+  "取经（Qujing）是同事之间的私密咨询通道",
   "回答前先按需取证",
   "当前代码",
   "可用 Skills",
@@ -81,7 +81,7 @@ for await (const chunk of Bun.stdin.stream()) {
   });
 
   test("kills a silent Pi after the startup deadline", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-pi-timeout-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-pi-timeout-"));
     roots.push(root);
     const binary = join(root, "pi");
     const pidFile = join(root, "pid");
@@ -109,7 +109,7 @@ while IFS= read -r line; do :; done
   });
 
   test("waits for agent_settled after abort", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-pi-settle-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-pi-settle-"));
     roots.push(root);
     const binary = join(root, "pi");
     const promptMarker = join(root, "prompted");
@@ -174,7 +174,7 @@ for await (const chunk of Bun.stdin.stream()) {
   });
 
   test("rejects CRLF from global Pi", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-pi-crlf-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-pi-crlf-"));
     roots.push(root);
     const binary = join(root, "pi");
     await writeFile(
@@ -206,5 +206,86 @@ for await (const chunk of Bun.stdin.stream()) {
         }),
       ),
     ).rejects.toThrow("non-LF JSONL");
+  });
+
+  test("bounds newline-less Pi output and stops the child", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qujing-pi-output-limit-"));
+    roots.push(root);
+    const binary = join(root, "pi");
+    const pidFile = join(root, "pid");
+    await writeFile(
+      binary,
+      `#!/usr/bin/env bun
+await Bun.write(${JSON.stringify(pidFile)}, String(process.pid));
+const sessionId = process.argv[process.argv.indexOf("--session-id") + 1];
+let buffer = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buffer += new TextDecoder().decode(chunk);
+  let newline;
+  while ((newline = buffer.indexOf("\\n")) >= 0) {
+    const message = JSON.parse(buffer.slice(0, newline));
+    buffer = buffer.slice(newline + 1);
+    if (message.type === "get_state") process.stdout.write("x".repeat(17 * 1024 * 1024));
+  }
+}
+`,
+    );
+    await chmod(binary, 0o700);
+
+    await expect(
+      Effect.runPromise(
+        startManagedPiRpcSessionEffect({
+          cwd: root,
+          sessionId: "00000000-0000-4000-8000-000000000127",
+          binary,
+          startupTimeoutMs: 3_000,
+        }),
+      ),
+    ).rejects.toThrow("exceeded");
+    const pid = Number(await readFile(pidFile, "utf8"));
+    expect(() => process.kill(pid, 0)).toThrow();
+  });
+
+  test("stops Pi when queued stdout exceeds its byte budget", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qujing-pi-queue-limit-"));
+    roots.push(root);
+    const binary = join(root, "pi");
+    await writeFile(
+      binary,
+      `#!/usr/bin/env bun
+const sessionId = process.argv[process.argv.indexOf("--session-id") + 1];
+let buffer = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buffer += new TextDecoder().decode(chunk);
+  let newline;
+  while ((newline = buffer.indexOf("\\n")) >= 0) {
+    const message = JSON.parse(buffer.slice(0, newline));
+    buffer = buffer.slice(newline + 1);
+    if (message.type === "get_state") {
+      console.log(JSON.stringify({ type: "response", id: message.id, success: true, data: { sessionId } }));
+    } else if (message.type === "prompt") {
+      console.log(JSON.stringify({ type: "response", id: message.id, success: true }));
+      process.stdin.pause();
+      process.stdout.write(JSON.stringify({ type: "extension_ui_request", id: "blocked", method: "editor", prefill: "x".repeat(10_000_000) }) + "\\n");
+      const noise = JSON.stringify({ type: "noise", value: "x".repeat(64 * 1024) }) + "\\n";
+      for (let i = 0; i < 600; i++) process.stdout.write(noise);
+    }
+  }
+}
+`,
+    );
+    await chmod(binary, 0o700);
+    const session = await Effect.runPromise(
+      startManagedPiRpcSessionEffect({
+        cwd: root,
+        sessionId: "00000000-0000-4000-8000-000000000128",
+        binary,
+      }),
+    );
+
+    await expect(Effect.runPromise(session.promptEffect("overflow"))).rejects.toThrow(
+      "stdout exceeded buffer limit",
+    );
+    await Effect.runPromise(session.disposeEffect());
   });
 });

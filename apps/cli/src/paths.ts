@@ -25,12 +25,12 @@ function defaultRoots(env: NodeJS.ProcessEnv, platform: NodeJS.Platform) {
     const configHome = env.APPDATA ?? join(homedir(), "AppData", "Roaming");
     const dataHome = env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
     return {
-      config: join(configHome, "ColleagueLine"),
-      state: join(dataHome, "ColleagueLine"),
+      config: join(configHome, "Qujing"),
+      state: join(dataHome, "Qujing"),
     };
   }
   return {
-    config: join(env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "colleague-line"),
-    state: join(env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "colleague-line"),
+    config: join(env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "qujing"),
+    state: join(env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "qujing"),
   };
 }

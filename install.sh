@@ -1,8 +1,8 @@
 #!/bin/sh
 set -eu
 
-repo="JinJieBeWater/colleague-line"
-install_dir="${COLL_INSTALL_DIR:-$HOME/.local/bin}"
+repo="JinJieBeWater/qujing"
+install_dir="${QUJING_INSTALL_DIR:-$HOME/.local/bin}"
 
 case "$(uname -s):$(uname -m)" in
   Darwin:arm64) target="darwin-arm64" ;;
@@ -13,17 +13,17 @@ esac
 command -v curl >/dev/null || { echo "curl is required" >&2; exit 1; }
 command -v tar >/dev/null || { echo "tar is required" >&2; exit 1; }
 
-version="${COLL_VERSION:-}"
+version="${QUJING_VERSION:-}"
 if [ -z "$version" ]; then
   version=$(curl -fsSL -o /dev/null -w '%{url_effective}' "https://github.com/$repo/releases/latest")
   version=${version##*/}
 fi
 case "$version" in v*) ;; *) version="v$version" ;; esac
 
-asset="colleague-line-$version-$target.tar.gz"
+asset="qujing-$version-$target.tar.gz"
 base="https://github.com/$repo/releases/download/$version"
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"; rm -f "$install_dir/.coll.$$" "$install_dir/.colleague-line-transport.$$"' EXIT HUP INT TERM
+trap 'rm -rf "$tmp"; rm -f "$install_dir/.qj.$$" "$install_dir/.qujing-transport.$$"' EXIT HUP INT TERM
 
 curl -fL --retry 3 -o "$tmp/$asset" "$base/$asset"
 curl -fL --retry 3 -o "$tmp/SHA256SUMS" "$base/SHA256SUMS"
@@ -37,15 +37,15 @@ fi
 [ "$actual" = "$expected" ] || { echo "Checksum mismatch for $asset" >&2; exit 1; }
 
 tar -xzf "$tmp/$asset" -C "$tmp"
-bundle="$tmp/colleague-line-${version#v}-$target"
+bundle="$tmp/qujing-${version#v}-$target"
 mkdir -p "$install_dir"
-install -m 0755 "$bundle/coll" "$install_dir/.coll.$$"
-install -m 0755 "$bundle/colleague-line-transport" "$install_dir/.colleague-line-transport.$$"
-mv -f "$install_dir/.coll.$$" "$install_dir/coll"
-mv -f "$install_dir/.colleague-line-transport.$$" "$install_dir/colleague-line-transport"
+install -m 0755 "$bundle/qj" "$install_dir/.qj.$$"
+install -m 0755 "$bundle/qujing-transport" "$install_dir/.qujing-transport.$$"
+mv -f "$install_dir/.qj.$$" "$install_dir/qj"
+mv -f "$install_dir/.qujing-transport.$$" "$install_dir/qujing-transport"
 
-echo "Installed Colleague Line $version to $install_dir"
+echo "Installed Qujing $version to $install_dir"
 case ":$PATH:" in
   *":$install_dir:"*) ;;
-  *) echo "Add $install_dir to PATH, then run: coll --version" ;;
+  *) echo "Add $install_dir to PATH, then run: qj --version" ;;
 esac

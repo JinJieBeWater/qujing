@@ -2,7 +2,7 @@ import { Effect, Layer, Schema } from "effect";
 import { McpServer, Tool, Toolkit } from "effect/unstable/ai";
 import { ClientApplication } from "./client-application";
 import type { ClientConfigStore } from "./client-config";
-import { ColleagueLineError } from "./errors";
+import { QujingError } from "./errors";
 import {
   createEffectMcpSession,
   createMcpHttpServer,
@@ -76,13 +76,13 @@ function createClientServer(
   const registrations = Layer.effectDiscard(McpServer.registerToolkit(toolkit)).pipe(
     Layer.provide(handlers),
   );
-  return createEffectMcpSession("colleague-line-client", registrations, allowedOrigins);
+  return createEffectMcpSession("qujing-client", registrations, allowedOrigins);
 }
 
 function clientToolFailure(error: unknown): McpToolFailure {
   return new McpToolFailure({
     message:
-      error instanceof ColleagueLineError
+      error instanceof QujingError
         ? `${error.code}: ${error.message}`
         : error instanceof DOMException && error.name === "AbortError"
           ? "CANCELLED: Request cancelled"

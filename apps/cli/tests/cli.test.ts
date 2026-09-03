@@ -16,7 +16,7 @@ afterEach(async () => {
 });
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-cli-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-cli-"));
   roots.push(root);
   const workspace = join(root, "workspace");
   await mkdir(workspace);
@@ -240,7 +240,7 @@ describe("task-first CLI", () => {
     expect(output().stdout).toContain("--from");
     clear();
     expect(await Effect.runPromise(runCliEffect(["gateway", "workspace", "list"], io))).toBe(2);
-    expect(output().stderr).toContain("Usage: coll");
+    expect(output().stderr).toContain("Usage: qj");
   });
 
   test("accepts secrets on stdin and rejects unknown or extra arguments", async () => {
@@ -259,7 +259,7 @@ describe("task-first CLI", () => {
     expect(output().stderr).toContain("Unknown option --bogus");
     clear();
     expect(await Effect.runPromise(runCliEffect(["line", "list", "extra"], io))).toBe(2);
-    expect(output().stderr).toContain("Usage: coll line list");
+    expect(output().stderr).toContain("Usage: qj line list");
     clear();
     expect(
       await Effect.runPromise(
@@ -485,6 +485,6 @@ describe("task-first CLI", () => {
         runCliEffect(["client", "line", "add", "legacy", "--pairing", "-"], io),
       ),
     ).toBe(2);
-    expect(output().stderr).toContain("Usage: coll");
+    expect(output().stderr).toContain("Usage: qj");
   });
 });

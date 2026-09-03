@@ -1,5 +1,5 @@
 {
-  "extends": "@colleague-line/config/tsconfig.base.json",
+  "extends": "@qujing/config/tsconfig.base.json",
   "compilerOptions": {
     "target": "ES2022",
     "noEmit": true,

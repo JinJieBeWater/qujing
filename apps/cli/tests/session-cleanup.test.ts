@@ -16,7 +16,7 @@ afterEach(async () => {
 
 describe("runtime session cleanup", () => {
   test("removes bindings for absent Clients and Workspaces", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-cleanup-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-cleanup-"));
     roots.push(root);
     const store = new RuntimeSessionStore(root);
     const keep = await Effect.runPromise(store.getOrCreateEffect("active", "docs"));
@@ -34,7 +34,7 @@ describe("runtime session cleanup", () => {
   });
 
   test("removes bindings without deleting Pi-owned session archives", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-cleanup-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-cleanup-"));
     roots.push(root);
     const store = new RuntimeSessionStore(root);
     await Effect.runPromise(store.getOrCreateEffect("client", "docs"));

@@ -17,7 +17,7 @@ afterEach(async () =>
 
 describe("process lock", () => {
   test("excludes another Gateway until released", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-lock-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-lock-"));
     roots.push(root);
     const path = join(root, "gateway.lock");
     const release = await Effect.runPromise(acquireProcessLockEffect(path));
@@ -30,7 +30,7 @@ describe("process lock", () => {
   });
 
   test("recovers a lock owned by a dead process", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-lock-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-lock-"));
     roots.push(root);
     const path = join(root, "gateway.lock");
     await writeFile(path, JSON.stringify({ pid: 999_999_999, nonce: "dead" }));
@@ -39,7 +39,7 @@ describe("process lock", () => {
   });
 
   test("recovers an interrupted stale-lock quarantine on the first restart", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-lock-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-lock-"));
     roots.push(root);
     const path = join(root, "gateway.lock");
     await writeFile(`${path}.recovering`, JSON.stringify({ pid: 999_999_999, nonce: "dead" }));
@@ -51,7 +51,7 @@ describe("process lock", () => {
   });
 
   test("does not delete a fresh lock whose owner write is incomplete", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-lock-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-lock-"));
     roots.push(root);
     const path = join(root, "gateway.lock");
     await writeFile(path, "");
@@ -63,7 +63,7 @@ describe("process lock", () => {
   });
 
   test("active check waits for a fresh owner write", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-lock-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-lock-"));
     roots.push(root);
     const path = join(root, "gateway.lock");
     await writeFile(path, "");
@@ -73,7 +73,7 @@ describe("process lock", () => {
     expect(await pending).toBe(true);
   });
   test("keeps Gateway and offline maintenance mutually exclusive", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-lock-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-lock-"));
     roots.push(root);
 
     const releaseMaintenance = await Effect.runPromise(acquireMaintenanceLockEffect(root));

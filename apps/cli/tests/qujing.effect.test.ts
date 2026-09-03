@@ -3,18 +3,18 @@ import { Effect } from "effect";
 import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createColleagueLine } from "../src/colleague-line";
+import { createQujing } from "../src/qujing";
 import { ConfigStore } from "../src/config";
 
-it.live("runs ColleagueLine Effect API", () =>
+it.live("runs Qujing Effect API", () =>
   Effect.gen(function* () {
-    const root = yield* node(() => mkdtemp(join(tmpdir(), "colleague-line-effect-api-")));
+    const root = yield* node(() => mkdtemp(join(tmpdir(), "qujing-effect-api-")));
     const workspace = join(root, "workspace");
     const config = new ConfigStore({
       configPath: join(root, "config.json"),
       stateRoot: join(root, "state"),
     });
-    const app = createColleagueLine({
+    const app = createQujing({
       config,
       coordinator: {
         answerEffect: ({ question }) => Effect.succeed(`answer:${question}`),

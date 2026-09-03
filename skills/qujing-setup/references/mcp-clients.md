@@ -4,13 +4,13 @@ Configure Agent’s native Streamable HTTP MCP support. Check installed Agent’
 
 ## Contract
 
-- URL: `http://127.0.0.1:43111/mcp` unless `coll init client --port` chose another loopback port
+- URL: `http://127.0.0.1:43111/mcp` unless `qj init client --port` chose another loopback port
 - Header: `Authorization: Bearer <local-bearer>`
 - Tool-call timeout: at least 135 seconds
 - Tools: exactly `list_lines`, `ask`
-- Prerequisite: `coll serve client` or Client role service running
+- Prerequisite: `qj serve client` or Client role service running
 
-Local bearer comes only from `coll init client` or `coll token rotate`. Store it in Agent secret storage or private user config. It is not any Line remote bearer. Never commit it.
+Local bearer comes only from `qj init client` or `qj token rotate`. Store it in Agent secret storage or private user config. It is not any Line remote bearer. Never commit it.
 
 Generic shape; verify Agent-specific schema:
 

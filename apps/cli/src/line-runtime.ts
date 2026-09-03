@@ -14,7 +14,7 @@ import {
 } from "effect";
 import packageJson from "../package.json";
 import type { LineConfig } from "./client-config";
-import { ColleagueLineError, type ErrorCode } from "./errors";
+import { QujingError, type ErrorCode } from "./errors";
 import {
   ErrorCodePayload,
   LineAskResult as LineAskResultSchema,
@@ -112,7 +112,7 @@ export class LineRuntime {
         });
         return {
           client: new Client({
-            name: "colleague-line-client",
+            name: "qujing-client",
             version: packageJson.version,
           }) as unknown as UpstreamClient,
           transport,
@@ -233,7 +233,7 @@ export class LineRuntime {
         }
         if (session) return session;
         if (!pending)
-          return yield* Effect.fail(new ColleagueLineError("LINE_UNAVAILABLE", "Line unavailable"));
+          return yield* Effect.fail(new QujingError("LINE_UNAVAILABLE", "Line unavailable"));
         const active = pending;
         return yield* restore(this.waitForSessionEffect(active, signal)).pipe(
           Effect.ensuring(
@@ -356,7 +356,7 @@ export class LineRuntime {
     ).pipe(
       Effect.flatMap((result) => Effect.try({ try: () => parse(result), catch: (error) => error })),
       Effect.catchEager((error): Effect.Effect<never, unknown> =>
-        isAbort(error) || error instanceof ColleagueLineError
+        isAbort(error) || error instanceof QujingError
           ? Effect.fail(error)
           : this.dropEffect(session).pipe(Effect.andThen(Effect.fail(this.safeFailure(error)))),
       ),
@@ -391,7 +391,7 @@ export class LineRuntime {
   private verifiedWorkspaces(result: Record<string, unknown>): LineWorkspaces {
     const workspaces = this.result(result, parseWorkspaces);
     if (workspaces.owner.id !== this.options.line.expectedOwnerId)
-      throw new ColleagueLineError("OWNER_ID_MISMATCH", "Owner identity mismatch");
+      throw new QujingError("OWNER_ID_MISMATCH", "Owner identity mismatch");
     return workspaces;
   }
   private result<T>(result: Record<string, unknown>, parse: (input: unknown) => T): T {
@@ -402,7 +402,7 @@ export class LineRuntime {
       throw new Error("Invalid upstream response", { cause: error });
     }
   }
-  private gatewayFailure(result: Record<string, unknown>): ColleagueLineError {
+  private gatewayFailure(result: Record<string, unknown>): QujingError {
     const structured = Option.getOrUndefined(parseErrorCode(result.structuredContent))?.code;
     const text = Array.isArray(result.content)
       ? result.content.find(
@@ -414,15 +414,15 @@ export class LineRuntime {
         )?.text
       : undefined;
     const code = structured ?? /^([A-Z_]+):/.exec(text ?? "")?.[1];
-    return new ColleagueLineError(
+    return new QujingError(
       safeCodes.has(code ?? "") ? (code as ErrorCode) : "RUNTIME_FAILED",
       "Remote request failed",
     );
   }
-  private safeFailure(error: unknown): ColleagueLineError {
-    return error instanceof ColleagueLineError
+  private safeFailure(error: unknown): QujingError {
+    return error instanceof QujingError
       ? error
-      : new ColleagueLineError("LINE_UNAVAILABLE", "Line unavailable");
+      : new QujingError("LINE_UNAVAILABLE", "Line unavailable");
   }
 }
 

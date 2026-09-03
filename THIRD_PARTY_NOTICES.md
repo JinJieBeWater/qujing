@@ -2,7 +2,7 @@
 
 ## Tailcat
 
-Colleague Line transport links `github.com/tailscale/tailcat` at commit `4d50a34f315d593d03c31f12a20ba8d163cbf321`.
+Qujing transport links `github.com/tailscale/tailcat` at commit `4d50a34f315d593d03c31f12a20ba8d163cbf321`.
 
 BSD 3-Clause License
 

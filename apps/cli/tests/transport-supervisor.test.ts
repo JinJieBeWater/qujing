@@ -13,7 +13,7 @@ afterEach(async () =>
 
 describe("TailcatSupervisor", () => {
   test("restarts transport only when allowlist changes and keeps server address stable", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-tailcat-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-tailcat-"));
     roots.push(root);
     const starts: string[][] = [];
     let closes = 0;
@@ -43,7 +43,7 @@ describe("TailcatSupervisor", () => {
   });
 
   test("rejects a changed server address after restart", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-tailcat-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-tailcat-"));
     roots.push(root);
     let count = 0;
     const supervisor = new TailcatSupervisor({
@@ -63,7 +63,7 @@ describe("TailcatSupervisor", () => {
   });
 
   test("does not treat an intentional reload exit as fatal", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-tailcat-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-tailcat-"));
     roots.push(root);
     const failures: string[] = [];
     const supervisor = new TailcatSupervisor({

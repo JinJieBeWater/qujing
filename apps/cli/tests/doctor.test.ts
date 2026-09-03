@@ -12,7 +12,7 @@ afterEach(async () =>
 );
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-doctor-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-doctor-"));
   roots.push(root);
   const paths = {
     configPath: join(root, "config", "config.json"),

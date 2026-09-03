@@ -4,7 +4,7 @@ import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/
 import { ClientApplication, type LineRuntimeClient } from "../src/client-application";
 import type { ClientConfig, LineConfig } from "../src/client-config";
 import { createClientMcp, type ClientMcpOptions } from "../src/client-mcp";
-import { ColleagueLineError } from "../src/errors";
+import { QujingError } from "../src/errors";
 import type { McpGateway } from "../src/mcp";
 import { Effect } from "effect";
 
@@ -212,7 +212,7 @@ test("forwards raw questions to the Owner Line for domain validation", async () 
       askEffect: (_workspace, question) =>
         Effect.sync(() => {
           received = question;
-          throw new ColleagueLineError("INVALID_QUESTION", "Remote request failed");
+          throw new QujingError("INVALID_QUESTION", "Remote request failed");
         }),
       closeEffect: () => Effect.void,
     }),

@@ -55,7 +55,7 @@ export function connectorArgs(profile: ConnectorOptions): string[] {
   ];
 }
 export function transportBinaryPath(env: NodeJS.ProcessEnv = process.env): string {
-  if (env.COLLEAGUE_LINE_TRANSPORT_BIN) return env.COLLEAGUE_LINE_TRANSPORT_BIN;
+  if (env.QUJING_TRANSPORT_BIN) return env.QUJING_TRANSPORT_BIN;
   const source = join(
     import.meta.dir,
     "..",
@@ -63,13 +63,13 @@ export function transportBinaryPath(env: NodeJS.ProcessEnv = process.env): strin
     "native",
     "transport",
     "bin",
-    process.platform === "win32" ? "colleague-line-transport.exe" : "colleague-line-transport",
+    process.platform === "win32" ? "qujing-transport.exe" : "qujing-transport",
   );
   return existsSync(source)
     ? source
     : join(
         dirname(process.execPath),
-        process.platform === "win32" ? "colleague-line-transport.exe" : "colleague-line-transport",
+        process.platform === "win32" ? "qujing-transport.exe" : "qujing-transport",
       );
 }
 export const requireTransportBinaryEffect = (path = transportBinaryPath()) =>
@@ -145,7 +145,7 @@ const startTransportEffect = (
             Effect.map(Number),
             Effect.catchEager(() => Effect.succeed(-1)),
           );
-          if (process.env.COLLEAGUE_LINE_TRANSPORT_DEBUG === "1")
+          if (process.env.QUJING_TRANSPORT_DEBUG === "1")
             yield* Effect.forkIn(
               Stream.runForEach(handle.stderr, (chunk) =>
                 Effect.sync(() => process.stderr.write(chunk)),

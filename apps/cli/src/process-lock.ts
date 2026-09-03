@@ -9,7 +9,7 @@ import {
 
 export function acquireProcessLockEffect(
   path: string,
-  busyMessage = "Colleague Line Gateway is already running",
+  busyMessage = "Qujing Gateway is already running",
 ): Effect.Effect<Effect.Effect<void, unknown>, unknown> {
   return acquirePrivateLockEffect(path, { wait: false, busyMessage });
 }
@@ -19,7 +19,7 @@ export function acquireGatewayLockEffect(stateRoot: string) {
     const release = yield* acquireProcessLockEffect(join(stateRoot, "gateway.lock"));
     if (!(yield* processLockActiveEffect(join(stateRoot, "maintenance.lock")))) return release;
     yield* release;
-    return yield* Effect.fail(new Error("Colleague Line maintenance is in progress"));
+    return yield* Effect.fail(new Error("Qujing maintenance is in progress"));
   });
 }
 
@@ -27,11 +27,11 @@ export function acquireMaintenanceLockEffect(stateRoot: string) {
   return Effect.gen(function* () {
     const release = yield* acquireProcessLockEffect(
       join(stateRoot, "maintenance.lock"),
-      "Colleague Line maintenance is already running",
+      "Qujing maintenance is already running",
     );
     if (!(yield* processLockActiveEffect(join(stateRoot, "gateway.lock")))) return release;
     yield* release;
-    return yield* Effect.fail(new Error("Colleague Line Gateway is already running"));
+    return yield* Effect.fail(new Error("Qujing Gateway is already running"));
   });
 }
 

@@ -4,7 +4,7 @@ Research snapshot: 2026-08-31.
 
 Question: can mainstream coding agents wait at least 135 seconds for one MCP `tools/call`?
 
-`tools/call` timeout and MCP server startup timeout are different. Colleague Line requires at least 135 seconds for its 120-second `ask` limit, 5-second abort settlement, and transport/scheduler margin.
+`tools/call` timeout and MCP server startup timeout are different. Qujing requires at least 135 seconds for its 120-second `ask` limit, 5-second abort settlement, and transport/scheduler margin.
 
 ## Result
 

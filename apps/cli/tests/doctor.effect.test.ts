@@ -8,7 +8,7 @@ import { runDoctorEffect } from "../src/doctor";
 
 it.effect("runs doctor Effect", () =>
   Effect.gen(function* () {
-    const root = yield* promise(() => mkdtemp(join(tmpdir(), "colleague-line-doctor-effect-")));
+    const root = yield* promise(() => mkdtemp(join(tmpdir(), "qujing-doctor-effect-")));
     const paths = {
       configPath: join(root, "config", "config.json"),
       stateRoot: join(root, "state"),

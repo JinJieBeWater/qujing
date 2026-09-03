@@ -29,7 +29,7 @@ async function start(options: Parameters<typeof startClientServerEffect>[0]) {
 }
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-client-server-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-client-server-"));
   roots.push(root);
   const configPath = join(root, "config", "client.json");
   const stateRoot = join(root, "state");
@@ -76,7 +76,7 @@ test("does not rewrite reload acknowledgement while config is unchanged", async 
 });
 
 test("releases Client resources when root Scope closes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-client-server-scope-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-client-server-scope-"));
   roots.push(root);
   const configPath = join(root, "config", "client.json");
   const stateRoot = join(root, "state");
@@ -112,7 +112,7 @@ test("holds one Client process lock and releases it on close", async () => {
 
 test("rejects unsafe Client state before acquiring process lock", async () => {
   if (process.platform === "win32") return;
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-client-server-unsafe-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-client-server-unsafe-"));
   roots.push(root);
   const configPath = join(root, "config", "client.json");
   const stateRoot = join(root, "state");
@@ -127,7 +127,7 @@ test("rejects unsafe Client state before acquiring process lock", async () => {
 });
 
 test("retires active Line before CLI credential update commits", async () => {
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-client-rotation-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-client-rotation-"));
   roots.push(root);
   const configPath = join(root, "config", "client.json");
   const stateRoot = join(root, "state");

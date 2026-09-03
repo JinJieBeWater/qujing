@@ -13,9 +13,9 @@ import {
 import { McpProtocol, McpServer, Tool, Toolkit } from "effect/unstable/ai";
 import { HttpRouter } from "effect/unstable/http";
 import packageJson from "../package.json";
-import { ColleagueLineError } from "./errors";
+import { QujingError } from "./errors";
 import { LineAskResult, LineWorkspaces, NonEmptyString, type ClientIdentity } from "./schemas";
-import type { ColleagueLineEffectApi } from "./colleague-line";
+import type { QujingEffectApi } from "./qujing";
 
 interface SessionEntry {
   clientId: string;
@@ -62,7 +62,7 @@ export interface McpHttpOptions {
 }
 
 export interface McpGatewayOptions extends Omit<McpHttpOptions, "createServer"> {
-  app: ColleagueLineEffectApi;
+  app: QujingEffectApi;
 }
 
 export interface McpGateway {
@@ -76,7 +76,7 @@ export interface EffectMcpSession {
   close(): Promise<void>;
 }
 
-export class McpToolFailure extends Schema.Error<McpToolFailure>("colleague-line/McpToolFailure")({
+export class McpToolFailure extends Schema.Error<McpToolFailure>("qujing/McpToolFailure")({
   message: Schema.String,
 }) {}
 
@@ -679,7 +679,7 @@ function boundedRequestEffect(
 }
 
 function createGatewayServer(
-  app: ColleagueLineEffectApi,
+  app: QujingEffectApi,
   client: ClientIdentity,
   allowedOrigins: readonly string[],
 ): EffectMcpSession {
@@ -720,13 +720,13 @@ function createGatewayServer(
   const registrations = Layer.effectDiscard(McpServer.registerToolkit(toolkit)).pipe(
     Layer.provide(handlers),
   );
-  return createEffectMcpSession("colleague-line", registrations, allowedOrigins);
+  return createEffectMcpSession("qujing", registrations, allowedOrigins);
 }
 
 function gatewayToolFailure(error: unknown): McpToolFailure {
   return new McpToolFailure({
     message:
-      error instanceof ColleagueLineError
+      error instanceof QujingError
         ? `${error.code}: ${error.message}`
         : error instanceof DOMException && error.name === "AbortError"
           ? "RUNTIME_FAILED: Request cancelled"

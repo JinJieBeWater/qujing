@@ -1,7 +1,7 @@
 import { Duration, Effect, Exit, Fiber, Scope, Semaphore } from "effect";
 import type { WorkspaceConfig } from "../config";
 import { ABORT_SETTLE_TIMEOUT_MS, ASK_TIMEOUT_MS } from "../constants";
-import { ColleagueLineError } from "../errors";
+import { QujingError } from "../errors";
 import { startManagedPiRpcSessionEffect, type PiRpcSessionEffect } from "./pi-rpc";
 import type { RuntimeSession } from "./sessions";
 
@@ -98,7 +98,7 @@ export class PiRuntime {
     return Effect.raceFirst(this.runAnswerEffect(input), abortEffect(signal)).pipe(
       Effect.catch((error) => {
         if (timeoutSignal.aborted && !input.signal.aborted)
-          return Effect.fail(new ColleagueLineError("RUNTIME_TIMEOUT", "Runtime timed out"));
+          return Effect.fail(new QujingError("RUNTIME_TIMEOUT", "Runtime timed out"));
         if (input.signal.aborted) return Effect.fail(input.signal.reason);
         return Effect.fail(error);
       }),
@@ -113,7 +113,7 @@ export class PiRuntime {
           Effect.sync(() => {
             if (this.entries.get(input.session.id) !== entry) return false;
             if (entry.waiting >= (this.options.queueCapacity ?? 20))
-              throw new ColleagueLineError("BUSY", "Runtime Session queue is full");
+              throw new QujingError("BUSY", "Runtime Session queue is full");
             entry.waiting++;
             return true;
           }),
@@ -183,14 +183,14 @@ export class PiRuntime {
         const answer = entry.session.getLastAssistantText();
         return answer
           ? Effect.succeed(answer)
-          : Effect.fail(new ColleagueLineError("RUNTIME_FAILED", "Runtime returned no answer"));
+          : Effect.fail(new QujingError("RUNTIME_FAILED", "Runtime returned no answer"));
       }),
       Effect.catch((error) =>
         Effect.gen(this, function* () {
           if (!entry.session.isAlive()) yield* this.evictEffect(entry);
-          if (error instanceof ColleagueLineError) return yield* Effect.fail(error);
+          if (error instanceof QujingError) return yield* Effect.fail(error);
           return yield* Effect.fail(
-            new ColleagueLineError("RUNTIME_FAILED", "Runtime failed", { cause: error }),
+            new QujingError("RUNTIME_FAILED", "Runtime failed", { cause: error }),
           );
         }),
       ),
@@ -221,7 +221,7 @@ export class PiRuntime {
           Effect.gen(this, function* () {
             if (this.disposed)
               return yield* Effect.fail(
-                new ColleagueLineError("RUNTIME_UNAVAILABLE", "Runtime is stopped"),
+                new QujingError("RUNTIME_UNAVAILABLE", "Runtime is stopped"),
               );
             const existing = this.entries.get(session.id);
             if (existing) return { kind: "entry", entry: existing } satisfies EntryDecision;
@@ -234,9 +234,7 @@ export class PiRuntime {
                 .filter(([, entry]) => !entry.busy && entry.waiting === 0)
                 .sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
               if (!idle)
-                return yield* Effect.fail(
-                  new ColleagueLineError("BUSY", "All Runtime slots are active"),
-                );
+                return yield* Effect.fail(new QujingError("BUSY", "All Runtime slots are active"));
               this.entries.delete(idle[0]);
               evicted = idle[1];
             } else {
@@ -317,7 +315,7 @@ export class PiRuntime {
           }
           if (creation.retired || this.disposed) return yield* Effect.fail(error);
           return yield* Effect.fail(
-            new ColleagueLineError("RUNTIME_UNAVAILABLE", "Could not start Pi Runtime", {
+            new QujingError("RUNTIME_UNAVAILABLE", "Could not start Pi Runtime", {
               cause: error,
             }),
           );

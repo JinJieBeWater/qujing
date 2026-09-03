@@ -11,7 +11,7 @@ import { makePiRuntime } from "./helpers/pi-runtime";
 
 it.live("runs RuntimeCoordinator Effect API", () =>
   Effect.gen(function* () {
-    const root = yield* node(() => mkdtemp(join(tmpdir(), "colleague-line-coordinator-effect-")));
+    const root = yield* node(() => mkdtemp(join(tmpdir(), "qujing-coordinator-effect-")));
     const workspace = join(root, "workspace");
     const config = new ConfigStore({
       configPath: join(root, "config.json"),

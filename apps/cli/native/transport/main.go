@@ -30,7 +30,7 @@ func main() {
 
 func run(args []string) error {
 	if len(args) == 0 {
-		return errors.New("usage: colleague-line-transport serve|key-create|connect")
+		return errors.New("usage: qujing-transport serve|key-create|connect")
 	}
 	switch args[0] {
 	case "serve":
@@ -329,7 +329,7 @@ func bridge(manager *clientManager, local net.Conn, port uint16) {
 }
 
 func transportDebugf(format string, args ...any) {
-	if os.Getenv("COLLEAGUE_LINE_TRANSPORT_DEBUG") == "1" {
+	if os.Getenv("QUJING_TRANSPORT_DEBUG") == "1" {
 		fmt.Fprintf(os.Stderr, "transport: "+format+"\n", args...)
 	}
 }

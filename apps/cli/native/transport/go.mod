@@ -1,4 +1,4 @@
-module colleague-line/transport
+module qujing/transport
 
 go 1.27.0
 

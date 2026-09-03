@@ -8,7 +8,7 @@ import { ClientConfigStore } from "../src/client-config";
 it.live("runs ClientConfigStore Effect API", () =>
   Effect.gen(function* () {
     const root = yield* Effect.tryPromise({
-      try: () => mkdtemp(join(tmpdir(), "colleague-line-client-effect-test-")),
+      try: () => mkdtemp(join(tmpdir(), "qujing-client-effect-test-")),
       catch: (error) => error,
     });
     const key = join(root, "key");

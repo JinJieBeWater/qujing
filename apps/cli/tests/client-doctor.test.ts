@@ -12,7 +12,7 @@ afterEach(async () => {
 });
 
 test("checks private Client state, transport, port, and each Line independently", async () => {
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-client-doctor-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-client-doctor-"));
   roots.push(root);
   const configPath = join(root, "config", "client.json");
   const stateRoot = join(root, "state");
@@ -57,7 +57,7 @@ test("checks private Client state, transport, port, and each Line independently"
 
 test("reports unsafe Client state permissions", async () => {
   if (process.platform === "win32") return;
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-client-doctor-state-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-client-doctor-state-"));
   roots.push(root);
   const configPath = join(root, "config", "client.json");
   const stateRoot = join(root, "state");
@@ -78,7 +78,7 @@ test("reports unsafe Client state permissions", async () => {
 });
 
 test("reports invalid Client config without aborting doctor", async () => {
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-client-doctor-config-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-client-doctor-config-"));
   roots.push(root);
   const configPath = join(root, "config", "client.json");
   const stateRoot = join(root, "state");

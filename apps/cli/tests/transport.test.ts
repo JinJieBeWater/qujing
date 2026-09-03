@@ -16,7 +16,7 @@ afterEach(async () =>
 );
 
 describe("Tailcat transport command boundary", () => {
-  test("serves only one Colleague Line port with an explicit allowlist", () => {
+  test("serves only one Qujing port with an explicit allowlist", () => {
     expect(
       serverArgs({
         keyPath: "/state/server.key",
@@ -62,7 +62,7 @@ describe("Tailcat transport command boundary", () => {
   });
 
   test("clears readiness timeout after a short command exits", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-transport-process-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-transport-process-"));
     roots.push(root);
     const binary = join(root, "fake-transport");
     await writeFile(
@@ -80,7 +80,7 @@ describe("Tailcat transport command boundary", () => {
   });
 
   test("closes a process still waiting for readiness when caller aborts", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-transport-process-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-transport-process-"));
     roots.push(root);
     const binary = join(root, "fake-transport");
     const pid = join(root, "pid");

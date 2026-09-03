@@ -15,12 +15,12 @@ export const errorCodes = [
 
 export type ErrorCode = (typeof errorCodes)[number];
 
-export class ColleagueLineError extends Error {
+export class QujingError extends Error {
   readonly code: ErrorCode;
 
   constructor(code: ErrorCode, message: string, options?: ErrorOptions) {
     super(message, options);
-    this.name = "ColleagueLineError";
+    this.name = "QujingError";
     this.code = code;
   }
 }

@@ -43,11 +43,11 @@ const archives: string[] = [];
 for (const name of selected) {
   if (!(name in targets)) throw new Error(`Unknown release target: ${name}`);
   const target = targets[name as keyof typeof targets];
-  const directory = join(destination, `colleague-line-${packageJson.version}-${name}`);
+  const directory = join(destination, `qujing-${packageJson.version}-${name}`);
   await rm(directory, { recursive: true, force: true });
   await mkdir(directory, { recursive: true });
-  const app = join(directory, `coll${target.extension}`);
-  const transport = join(directory, `colleague-line-transport${target.extension}`);
+  const app = join(directory, `qj${target.extension}`);
+  const transport = join(directory, `qujing-transport${target.extension}`);
   await command([
     "bun",
     "build",
@@ -73,16 +73,14 @@ for (const name of selected) {
     cp(join(root, "README.md"), join(directory, "README.md")),
     cp(join(root, "README.zh-CN.md"), join(directory, "README.zh-CN.md")),
     cp(join(root, "THIRD_PARTY_NOTICES.md"), join(directory, "THIRD_PARTY_NOTICES.md")),
-    cp(
-      join(root, "skills", "colleague-line-setup"),
-      join(directory, "skills", "colleague-line-setup"),
-      { recursive: true },
-    ),
+    cp(join(root, "skills", "qujing-setup"), join(directory, "skills", "qujing-setup"), {
+      recursive: true,
+    }),
     writeFile(
       join(directory, "BUILD.json"),
       `${JSON.stringify(
         {
-          name: "colleague-line",
+          name: "qujing",
           version: packageJson.version,
           target: name,
           preview: target.preview,
@@ -95,7 +93,7 @@ for (const name of selected) {
       )}\n`,
     ),
   ]);
-  const archive = `colleague-line-v${packageJson.version}-${name}${
+  const archive = `qujing-v${packageJson.version}-${name}${
     name === "windows-x64" ? ".zip" : ".tar.gz"
   }`;
   await rm(join(destination, archive), { force: true });

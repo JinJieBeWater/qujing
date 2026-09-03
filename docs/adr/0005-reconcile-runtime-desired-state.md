@@ -8,5 +8,5 @@ Ask 必须先在 lifecycle gate 内重读 effective config、创建 binding 并�
 
 - 配置删除或轮换后不能在 cleanup 之后重新创建旧 binding。
 - Credential rotation 重启内存进程，但保留同一个 Pi session ID。
-- Revoke 和 Workspace remove 删除 Colleague Line binding，不删除 Owner 的全局 Pi session archive。
+- Revoke 和 Workspace remove 删除 Qujing binding，不删除 Owner 的全局 Pi session archive。
 - Startup reconciliation 清理指向已删除 Client 或 Workspace 的 binding metadata。

@@ -14,13 +14,14 @@ jobs:
   release:
     runs-on: ubuntu-latest
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
       - uses: oven-sh/setup-bun@v2
         with:
           bun-version: 1.3.14
       - uses: actions/setup-go@v6
         with:
           go-version-file: apps/cli/native/transport/go.mod
+          cache-dependency-path: apps/cli/native/transport/go.sum
 
       - run: bun install --frozen-lockfile
       - name: Verify tag version
@@ -46,4 +47,4 @@ jobs:
           dist/*.tar.gz dist/*.zip dist/SHA256SUMS
           --verify-tag
           --generate-notes
-          --title "Colleague Line $GITHUB_REF_NAME"
+          --title "Qujing $GITHUB_REF_NAME"

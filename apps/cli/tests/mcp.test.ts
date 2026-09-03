@@ -2,8 +2,8 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
 import { Effect, Fiber } from "effect";
-import { ColleagueLineError } from "../src/errors";
-import type { ColleagueLineEffectApi } from "../src/colleague-line";
+import { QujingError } from "../src/errors";
+import type { QujingEffectApi } from "../src/qujing";
 import { createMcpGateway, type McpGateway, type McpGatewayOptions } from "../src/mcp";
 
 const resources: Array<{
@@ -22,8 +22,8 @@ afterEach(async () => {
   );
 });
 
-async function fixture(app?: ColleagueLineEffectApi, overrides: Partial<McpGatewayOptions> = {}) {
-  const application: ColleagueLineEffectApi = app ?? {
+async function fixture(app?: QujingEffectApi, overrides: Partial<McpGatewayOptions> = {}) {
+  const application: QujingEffectApi = app ?? {
     listWorkspacesEffect: () =>
       Effect.succeed({
         owner: { id: "owner", name: "Owner" },
@@ -153,7 +153,7 @@ describe("MCP gateway", () => {
       askEffect: ({ question }) =>
         Effect.sync(() => {
           received = question;
-          throw new ColleagueLineError("INVALID_QUESTION", "Question must not be empty");
+          throw new QujingError("INVALID_QUESTION", "Question must not be empty");
         }),
     });
     const transport = new StreamableHTTPClientTransport(url, {
@@ -392,7 +392,7 @@ describe("MCP gateway", () => {
     const blocked = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const app: ColleagueLineEffectApi = {
+    const app: QujingEffectApi = {
       listWorkspacesEffect: () =>
         Effect.succeed({ owner: { id: "owner", name: "Owner" }, workspaces: [] }),
       askEffect: ({ workspace }) =>
@@ -478,7 +478,7 @@ describe("MCP gateway", () => {
     const cancellationObserved = new Promise<void>((resolve) => {
       markCancelled = resolve;
     });
-    const app: ColleagueLineEffectApi = {
+    const app: QujingEffectApi = {
       listWorkspacesEffect: () =>
         Effect.succeed({ owner: { id: "owner", name: "Owner" }, workspaces: [] }),
       askEffect: (_request, signal) =>
@@ -528,7 +528,7 @@ describe("MCP gateway", () => {
     const started = new Promise<void>((resolve) => {
       markStarted = resolve;
     });
-    const app: ColleagueLineEffectApi = {
+    const app: QujingEffectApi = {
       listWorkspacesEffect: () =>
         Effect.succeed({ owner: { id: "owner", name: "Owner" }, workspaces: [] }),
       askEffect: () =>

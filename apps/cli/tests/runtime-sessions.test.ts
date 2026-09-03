@@ -12,7 +12,7 @@ afterEach(async () => {
 
 describe("RuntimeSessionStore", () => {
   test("persists one Pi session ID per Client and Workspace", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-sessions-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-sessions-"));
     roots.push(root);
     const firstStore = new RuntimeSessionStore(root);
 
@@ -29,7 +29,7 @@ describe("RuntimeSessionStore", () => {
   });
 
   test("removes only matching session bindings", async () => {
-    const root = await mkdtemp(join(tmpdir(), "colleague-line-sessions-"));
+    const root = await mkdtemp(join(tmpdir(), "qujing-sessions-"));
     roots.push(root);
     const store = new RuntimeSessionStore(root);
     await Effect.runPromise(store.getOrCreateEffect("one", "docs"));

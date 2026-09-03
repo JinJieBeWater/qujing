@@ -1,9 +1,9 @@
 {
-  "name": "@colleague-line/cli",
+  "name": "@qujing/cli",
   "version": "0.1.0",
   "private": true,
   "bin": {
-    "coll": "./src/cli.ts"
+    "qj": "./src/cli.ts"
   },
   "type": "module",
   "scripts": {
@@ -19,8 +19,8 @@
     "zod": "4.1.12"
   },
   "devDependencies": {
-    "@colleague-line/config": "workspace:*",
     "@effect/vitest": "4.0.0-rc.112",
+    "@qujing/config": "workspace:*",
     "vitest": "4.1.11"
   }
 }

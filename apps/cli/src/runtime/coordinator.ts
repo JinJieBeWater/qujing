@@ -1,7 +1,7 @@
 import { randomUUID } from "node:crypto";
 import { Deferred, Effect, Exit, Ref, Semaphore } from "effect";
 import type { Config, ConfigStore } from "../config";
-import { ColleagueLineError } from "../errors";
+import { QujingError } from "../errors";
 import { Question, decode, type ClientIdentity } from "../schemas";
 import { purgeRemovedRuntimeSessionsEffect } from "./cleanup";
 import { PiRuntime } from "./pi-runtime";
@@ -84,14 +84,13 @@ export class RuntimeCoordinator {
         this.options.config.withLockEffect(
           Effect.gen({ self: this }, function* () {
             const state = yield* Ref.get(this.state);
-            if (state.stopped)
-              throw new ColleagueLineError("RUNTIME_UNAVAILABLE", "Runtime is stopped");
+            if (state.stopped) throw new QujingError("RUNTIME_UNAVAILABLE", "Runtime is stopped");
             if (
               state.blockAll ||
               state.blockedClients.has(input.client.id) ||
               state.blockedWorkspaces.has(input.workspaceId)
             ) {
-              throw new ColleagueLineError("BUSY", "Runtime scope is being reconciled");
+              throw new QujingError("BUSY", "Runtime scope is being reconciled");
             }
             input.signal.throwIfAborted();
             const effective = yield* this.options.config.readEffectiveEffect();
@@ -103,12 +102,12 @@ export class RuntimeCoordinator {
                   client.bearerHash === input.client.credentialVersion,
               )
             ) {
-              throw new ColleagueLineError("UNAUTHORIZED", "Client is not authorized");
+              throw new QujingError("UNAUTHORIZED", "Client is not authorized");
             }
             yield* Effect.try({
               try: () => decodeQuestion(input.question),
               catch: () =>
-                new ColleagueLineError(
+                new QujingError(
                   "INVALID_QUESTION",
                   input.question.trim().length === 0
                     ? "Question must not be empty"
@@ -117,12 +116,12 @@ export class RuntimeCoordinator {
             });
             const workspace = effective.workspaces.find((entry) => entry.id === input.workspaceId);
             if (!workspace)
-              throw new ColleagueLineError(
+              throw new QujingError(
                 "WORKSPACE_NOT_FOUND",
                 `Workspace not found: ${input.workspaceId}`,
               );
             if (!(yield* this.options.config.isWorkspaceAvailableEffect(workspace.root))) {
-              throw new ColleagueLineError(
+              throw new QujingError(
                 "WORKSPACE_UNAVAILABLE",
                 `Workspace unavailable: ${input.workspaceId}`,
               );

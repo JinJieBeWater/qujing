@@ -17,7 +17,7 @@ afterEach(async () =>
 );
 
 async function fixture(): Promise<string> {
-  const root = await mkdtemp(join(tmpdir(), "colleague-line-private-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-private-"));
   roots.push(root);
   await chmod(root, 0o700);
   return root;

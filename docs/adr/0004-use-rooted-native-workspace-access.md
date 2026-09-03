@@ -1,7 +1,7 @@
 # 使用 rooted native helper 执行 Workspace 只读访问
 
 Status: Superseded by `0008-run-the-owner-global-pi-over-rpc.md`.
-Colleague Line 不再使用 Bun 的 `realpath` 校验后再按路径读取文件。该模式无法关闭并发 rename 与 symlink swap 的 TOCTOU 窗口。
+Qujing 不再使用 Bun 的 `realpath` 校验后再按路径读取文件。该模式无法关闭并发 rename 与 symlink swap 的 TOCTOU 窗口。
 
 每次 Pi `read`、`grep`、`find` 或 `ls` 调用启动一个独立 Go helper。Helper 从 stdin 接收一个 bounded request，使用 Go `os.Root` 完成 rooted traversal、打开与读取，并返回 bounded result 或固定错误码。Abort 直接终止 helper 进程。
 

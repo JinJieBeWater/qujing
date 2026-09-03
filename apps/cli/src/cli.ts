@@ -54,9 +54,9 @@ export interface CliIo {
 
 class UsageError extends Error {}
 
-const rootHelp = `Colleague Line
+const rootHelp = `Qujing
 
-Usage: coll <command>
+Usage: qj <command>
 
 Options:
   -V, --version
@@ -72,159 +72,159 @@ Commands:
   service <install|remove> <gateway|client>
 
 Examples:
-  coll init gateway --owner-id jason --owner-name Jason
-  coll pair create alice-line --key - --out ./alice-line.pairing.json
-  coll pair accept jason --from ./alice-line.pairing.json
-  coll serve client
+  qj init gateway --owner-id jason --owner-name Jason
+  qj pair create alice-line --key - --out ./alice-line.pairing.json
+  qj pair accept jason --from ./alice-line.pairing.json
+  qj serve client
 `;
 
 const help: Record<string, string> = {
-  init: `Usage: coll init <gateway|client>
+  init: `Usage: qj init <gateway|client>
 
 Examples:
-  coll init client`,
-  workspace: `Usage: coll workspace <add|list|update|remove>
+  qj init client`,
+  workspace: `Usage: qj workspace <add|list|update|remove>
 
 Examples:
-  coll workspace list --json`,
-  pair: `Usage: coll pair <create|accept|list|rotate|revoke>
+  qj workspace list --json`,
+  pair: `Usage: qj pair <create|accept|list|rotate|revoke>
 
 Examples:
-  coll pair list --json`,
-  line: `Usage: coll line <key-create|list|update|remove>
+  qj pair list --json`,
+  line: `Usage: qj line <key-create|list|update|remove>
 
 Examples:
-  coll line list --json`,
-  token: `Usage: coll token rotate
+  qj line list --json`,
+  token: `Usage: qj token rotate
 
 Examples:
-  coll token rotate`,
-  doctor: `Usage: coll doctor <gateway|client>
+  qj token rotate`,
+  doctor: `Usage: qj doctor <gateway|client>
 
 Examples:
-  coll doctor client`,
-  serve: `Usage: coll serve <gateway|client>
+  qj doctor client`,
+  serve: `Usage: qj serve <gateway|client>
 
 Examples:
-  coll serve client`,
-  service: `Usage: coll service <install|remove> <gateway|client>
+  qj serve client`,
+  service: `Usage: qj service <install|remove> <gateway|client>
 
 Examples:
-  coll service install client --yes`,
-  "init gateway": `Usage: coll init gateway --owner-id <id> --owner-name <name> [--owner-summary <summary>]
+  qj service install client --yes`,
+  "init gateway": `Usage: qj init gateway --owner-id <id> --owner-name <name> [--owner-summary <summary>]
 
 Examples:
-  coll init gateway --owner-id jason --owner-name Jason
+  qj init gateway --owner-id jason --owner-name Jason
 `,
-  "init client": `Usage: coll init client [--port <loopback-port>]
+  "init client": `Usage: qj init client [--port <loopback-port>]
 
 Examples:
-  coll init client
-  coll init client --port 43111
+  qj init client
+  qj init client --port 43111
 `,
-  "workspace add": `Usage: coll workspace add <id> --name <name> --root <directory> --summary <summary>
+  "workspace add": `Usage: qj workspace add <id> --name <name> --root <directory> --summary <summary>
 
 Examples:
-  coll workspace add pi-tooling --name "Pi Tooling" --root ~/src/pi --summary "Pi SDK and extensions"
+  qj workspace add pi-tooling --name "Pi Tooling" --root ~/src/pi --summary "Pi SDK and extensions"
 `,
-  "workspace list": `Usage: coll workspace list [--json]
+  "workspace list": `Usage: qj workspace list [--json]
 
 Examples:
-  coll workspace list --json
+  qj workspace list --json
 `,
-  "workspace update": `Usage: coll workspace update <id> [--name <name>] [--summary <summary>]
+  "workspace update": `Usage: qj workspace update <id> [--name <name>] [--summary <summary>]
 
 Examples:
-  coll workspace update pi-tooling --summary "Pi SDK and runtime"
+  qj workspace update pi-tooling --summary "Pi SDK and runtime"
 `,
-  "workspace remove": `Usage: coll workspace remove <id> --yes
+  "workspace remove": `Usage: qj workspace remove <id> --yes
 
 Examples:
-  coll workspace remove old-workspace --yes
+  qj workspace remove old-workspace --yes
 `,
-  "pair create": `Usage: coll pair create <id> --key <public-key|-> [--out <path|->]
+  "pair create": `Usage: qj pair create <id> --key <public-key|-> [--out <path|->]
 
 Examples:
-  printf '%s' 'nodekey:...' | coll pair create alice-line --key - --out ./alice-line.pairing.json
+  printf '%s' 'nodekey:...' | qj pair create alice-line --key - --out ./alice-line.pairing.json
 `,
-  "pair accept": `Usage: coll pair accept <line-id> --from <path|-> [--key <private-key-path>]
+  "pair accept": `Usage: qj pair accept <line-id> --from <path|-> [--key <private-key-path>]
 
 Examples:
-  coll pair accept jason --from ./alice-line.pairing.json
-  cat ./alice-line.pairing.json | coll pair accept jason --from -
+  qj pair accept jason --from ./alice-line.pairing.json
+  cat ./alice-line.pairing.json | qj pair accept jason --from -
 `,
-  "pair list": `Usage: coll pair list [--json]
+  "pair list": `Usage: qj pair list [--json]
 
 Examples:
-  coll pair list --json
+  qj pair list --json
 `,
-  "pair rotate": `Usage: coll pair rotate <id> --key <new-public-key|-> --yes
+  "pair rotate": `Usage: qj pair rotate <id> --key <new-public-key|-> --yes
 
 Examples:
-  printf '%s' 'nodekey:...' | coll pair rotate alice-line --key - --yes
+  printf '%s' 'nodekey:...' | qj pair rotate alice-line --key - --yes
 `,
-  "pair revoke": `Usage: coll pair revoke <id> --yes
+  "pair revoke": `Usage: qj pair revoke <id> --yes
 
 Examples:
-  coll pair revoke alice-line --yes
+  qj pair revoke alice-line --yes
 `,
-  "line key-create": `Usage: coll line key-create <line-id> [--output <private-key-path>]
+  "line key-create": `Usage: qj line key-create <line-id> [--output <private-key-path>]
 
 Examples:
-  coll line key-create jason
+  qj line key-create jason
 `,
-  "line list": `Usage: coll line list [--json]
+  "line list": `Usage: qj line list [--json]
 
 Examples:
-  coll line list --json
+  qj line list --json
 `,
-  "line update": `Usage: coll line update <line-id> --key <private-key-path> --bearer <token|-> --yes
+  "line update": `Usage: qj line update <line-id> --key <private-key-path> --bearer <token|-> --yes
 
 Examples:
-  printf '%s' '<new-remote-bearer>' | coll line update jason --key ~/.local/share/colleague-line/client/keys/jason.json --bearer - --yes
+  printf '%s' '<new-remote-bearer>' | qj line update jason --key ~/.local/share/qujing/client/keys/jason.json --bearer - --yes
 `,
-  "line remove": `Usage: coll line remove <line-id> --yes
+  "line remove": `Usage: qj line remove <line-id> --yes
 
 Examples:
-  coll line remove jason --yes
+  qj line remove jason --yes
 `,
-  "token rotate": `Usage: coll token rotate
+  "token rotate": `Usage: qj token rotate
 
 Examples:
-  coll token rotate
+  qj token rotate
 `,
-  "doctor gateway": `Usage: coll doctor gateway [--json]
+  "doctor gateway": `Usage: qj doctor gateway [--json]
 
 Examples:
-  coll doctor gateway --json`,
-  "doctor client": `Usage: coll doctor client [--json]
+  qj doctor gateway --json`,
+  "doctor client": `Usage: qj doctor client [--json]
 
 Examples:
-  coll doctor client --json`,
-  "serve gateway": `Usage: coll serve gateway
+  qj doctor client --json`,
+  "serve gateway": `Usage: qj serve gateway
 
 Examples:
-  coll serve gateway`,
-  "serve client": `Usage: coll serve client
+  qj serve gateway`,
+  "serve client": `Usage: qj serve client
 
 Examples:
-  coll serve client`,
-  "service install gateway": `Usage: coll service install gateway --yes
+  qj serve client`,
+  "service install gateway": `Usage: qj service install gateway --yes
 
 Examples:
-  coll service install gateway --yes`,
-  "service install client": `Usage: coll service install client --yes
+  qj service install gateway --yes`,
+  "service install client": `Usage: qj service install client --yes
 
 Examples:
-  coll service install client --yes`,
-  "service remove gateway": `Usage: coll service remove gateway --yes
+  qj service install client --yes`,
+  "service remove gateway": `Usage: qj service remove gateway --yes
 
 Examples:
-  coll service remove gateway --yes`,
-  "service remove client": `Usage: coll service remove client --yes
+  qj service remove gateway --yes`,
+  "service remove client": `Usage: qj service remove client --yes
 
 Examples:
-  coll service remove client --yes`,
+  qj service remove client --yes`,
 };
 
 /** Authoritative CLI orchestration. */

@@ -56,7 +56,7 @@ export function startClientServerEffect(options: ClientServerOptions, scope: Sco
     yield* Effect.acquireRelease(
       acquireProcessLockEffect(
         join(options.stateRoot, "client.lock"),
-        "Colleague Line Client is already running",
+        "Qujing Client is already running",
       ),
       (release) => release.pipe(Effect.orDie),
     );
