@@ -3,6 +3,7 @@
 import { readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Deferred, Effect, Exit, Scope } from "effect";
+import packageJson from "../package.json";
 import { ClientConfigStore, type LineConfig, type LineInput } from "./client-config";
 import {
   cancelClientLineRetirementEffect,
@@ -56,6 +57,9 @@ class UsageError extends Error {}
 const rootHelp = `Colleague Line
 
 Usage: coll <command>
+
+Options:
+  -V, --version
 
 Commands:
   init <gateway|client>
@@ -226,6 +230,10 @@ Examples:
 /** Authoritative CLI orchestration. */
 export function runCliEffect(args: string[], io: CliIo = defaultIo()) {
   return Effect.gen(function* () {
+    if (args.length === 1 && (args[0] === "--version" || args[0] === "-V")) {
+      io.writeOut(`${packageJson.version}\n`);
+      return 0;
+    }
     const command = yield* Effect.try({
       try: () => commandKey(args),
       catch: (error) => error,

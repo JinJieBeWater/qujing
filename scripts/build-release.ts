@@ -1,7 +1,9 @@
 #!/usr/bin/env bun
 
+import { createReadStream } from "node:fs";
 import { chmod, cp, mkdir, readFile, rm, writeFile } from "node:fs/promises";
-import { join } from "node:path";
+import { createHash } from "node:crypto";
+import { basename, join } from "node:path";
 import packageJson from "../apps/cli/package.json";
 
 const root = join(import.meta.dir, "..");
@@ -36,6 +38,7 @@ const selected =
   requested.length === 0 || requested.includes("all") ? Object.keys(targets) : requested;
 await mkdir(destination, { recursive: true });
 const tags = (await readFile(join(nativeRoot, "transport", "build-tags.txt"), "utf8")).trim();
+const archives: string[] = [];
 
 for (const name of selected) {
   if (!(name in targets)) throw new Error(`Unknown release target: ${name}`);
@@ -92,8 +95,34 @@ for (const name of selected) {
       )}\n`,
     ),
   ]);
+  const archive = `colleague-line-v${packageJson.version}-${name}${
+    name === "windows-x64" ? ".zip" : ".tar.gz"
+  }`;
+  await rm(join(destination, archive), { force: true });
+  if (name === "windows-x64") {
+    await command(["zip", "-qr", join(destination, archive), basename(directory)], destination);
+  } else {
+    await command([
+      "tar",
+      "-czf",
+      join(destination, archive),
+      "-C",
+      destination,
+      basename(directory),
+    ]);
+  }
+  archives.push(archive);
   console.log(directory);
 }
+
+await writeFile(
+  join(destination, "SHA256SUMS"),
+  `${(
+    await Promise.all(
+      archives.map(async (archive) => `${await sha256(join(destination, archive))}  ${archive}`),
+    )
+  ).join("\n")}\n`,
+);
 
 async function command(
   command: string[],
@@ -107,4 +136,10 @@ async function command(
   });
   const code = await child.exited;
   if (code !== 0) throw new Error(`${command[0]} exited ${code}`);
+}
+
+async function sha256(path: string): Promise<string> {
+  const hash = createHash("sha256");
+  for await (const chunk of createReadStream(path)) hash.update(chunk);
+  return hash.digest("hex");
 }

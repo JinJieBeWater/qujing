@@ -29,9 +29,33 @@ Agent 使用一个本机 bearer 认证。MCP tool-call timeout 至少设为 **13
 
 同一台机器可以同时承担 Owner 和 Client，但两种角色的命令、配置、锁和服务彼此独立。
 
+## 安装
+
+macOS Apple Silicon 或 Linux x64：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/colleague-line/main/install.sh | sh
+coll --version
+```
+
+安装脚本会下载并校验匹配平台的 GitHub Release，然后把两个可执行文件安装到 `~/.local/bin`。可用 `COLL_INSTALL_DIR` 更改目录。固定版本：
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/colleague-line/main/install.sh | COLL_VERSION=v0.1.0 sh
+```
+
+Windows x64 Preview：
+
+```powershell
+irm https://raw.githubusercontent.com/JinJieBeWater/colleague-line/main/install.ps1 | iex
+coll --version
+```
+
+本机安全策略要求审查脚本时，先阅读 [`install.sh`](install.sh) 或 [`install.ps1`](install.ps1) 再执行。手动安装包和 `SHA256SUMS` 仍可从 [GitHub Releases](https://github.com/JinJieBeWater/colleague-line/releases) 下载。
+
 ## 最小安装流程
 
-同一发布版本的 `coll` 与 `colleague-line-transport` 必须放在同一目录。Owner 机器还必须能从 `PATH` 运行日常使用的全局 `pi` CLI。
+安装脚本会把同一发布版本的 `coll` 与 `colleague-line-transport` 放在同一目录。Owner 机器还必须能从 `PATH` 运行日常使用的全局 `pi` CLI。
 
 ### 1. 启动 Owner Gateway
 

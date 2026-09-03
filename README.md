@@ -29,9 +29,33 @@ Agent authenticates with one local bearer. Set MCP tool-call timeout to at least
 
 One machine may run both Owner and Client roles. Their commands, configs, locks, and services remain separate.
 
+## Install
+
+macOS Apple Silicon or Linux x64:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/colleague-line/main/install.sh | sh
+coll --version
+```
+
+The installer downloads and verifies the matching GitHub Release, then installs both executables to `~/.local/bin`. Set `COLL_INSTALL_DIR` to choose another directory. Pin a release with:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/colleague-line/main/install.sh | COLL_VERSION=v0.1.0 sh
+```
+
+Windows x64 Preview:
+
+```powershell
+irm https://raw.githubusercontent.com/JinJieBeWater/colleague-line/main/install.ps1 | iex
+coll --version
+```
+
+Review [`install.sh`](install.sh) or [`install.ps1`](install.ps1) before execution when required by local security policy. Manual archives and `SHA256SUMS` remain available on [GitHub Releases](https://github.com/JinJieBeWater/colleague-line/releases).
+
 ## Minimal setup
 
-Keep `coll` and `colleague-line-transport` from same release in one directory. Owner machine must also have its normal global `pi` CLI available on `PATH`.
+The installer keeps `coll` and `colleague-line-transport` from the same release in one directory. Owner machine must also have its normal global `pi` CLI available on `PATH`.
 
 ### 1. Start Owner Gateway
 

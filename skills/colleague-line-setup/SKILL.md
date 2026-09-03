@@ -35,24 +35,21 @@ Treat local bearer, remote bearer, Tailcat private keys, server address, and Wor
 
 ### 2. Install matched release
 
-Require both Colleague Line binaries from same release and platform:
+On macOS Apple Silicon or Linux x64, install both matched binaries from GitHub Releases:
 
 ```bash
-install -d "$HOME/.local/bin"
-install -m 0755 ./coll ./colleague-line-transport "$HOME/.local/bin/"
-export PATH="$HOME/.local/bin:$PATH"
-coll --help
+curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/colleague-line/main/install.sh | sh
+coll --version
 ```
 
 Windows PowerShell Preview:
 
 ```powershell
-New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null
-Copy-Item .\coll.exe, .\colleague-line-transport.exe "$HOME\.local\bin\"
-& "$HOME\.local\bin\coll.exe" --help
+irm https://raw.githubusercontent.com/JinJieBeWater/colleague-line/main/install.ps1 | iex
+coll --version
 ```
 
-Stop on platform mismatch, missing transport binary, or unavailable Owner `pi` CLI. Do not invent download URLs or build from source unless requested. Windows Preview supports foreground `gateway serve` and `client serve` only; user-service install/remove is unsupported.
+Set `COLL_VERSION=v<version>` when a pinned release is required. Set `COLL_INSTALL_DIR` when `~/.local/bin` is unsuitable. Review the installer first when local security policy forbids piped scripts. Stop on checksum failure, platform mismatch, missing transport binary, or unavailable Owner `pi` CLI. Windows Preview supports foreground `coll serve gateway` and `coll serve client` only; user-service install/remove is unsupported.
 
 ### 3. Configure Owner Gateway
 
