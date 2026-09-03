@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { chmod, mkdtemp, rm, symlink, utimes, writeFile } from "node:fs/promises";
+import { chmod, mkdir, mkdtemp, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Effect } from "effect";
@@ -7,6 +7,7 @@ import {
   assertPrivatePathEffect,
   assertPrivateTreeEffect,
   withPrivateLock,
+  writeNewPrivateJsonEffect,
   writePrivateJsonEffect,
 } from "../src/private-files";
 
@@ -46,6 +47,23 @@ describe("private state", () => {
     await expect(Effect.runPromise(assertPrivatePathEffect(link, false))).rejects.toThrow(
       "symlink",
     );
+  });
+
+  test("creates private output exclusively without changing an existing parent", async () => {
+    const root = await fixture();
+    const output = join(root, "transfer");
+    await mkdir(output, { mode: 0o755 });
+    await chmod(output, 0o755);
+    const path = join(output, "pairing.json");
+    await Effect.runPromise(writeNewPrivateJsonEffect(path, { value: "first" }));
+    if (process.platform !== "win32") {
+      expect((await stat(output)).mode & 0o777).toBe(0o755);
+      expect((await stat(path)).mode & 0o777).toBe(0o600);
+    }
+    await expect(
+      Effect.runPromise(writeNewPrivateJsonEffect(path, { value: "second" })),
+    ).rejects.toBeDefined();
+    expect(JSON.parse(await Bun.file(path).text())).toEqual({ value: "first" });
   });
 
   test("never steals an old lock from a live process", async () => {

@@ -31,34 +31,34 @@ One machine may run both Owner and Client roles. Their commands, configs, locks,
 
 ## Minimal setup
 
-Keep `colleague-line` and `colleague-line-transport` from same release in one directory. Owner machine must also have its normal global `pi` CLI available on `PATH`.
+Keep `coll` and `colleague-line-transport` from same release in one directory. Owner machine must also have its normal global `pi` CLI available on `PATH`.
 
 ### 1. Start Owner Gateway
 
 ```bash
-colleague-line gateway init --owner-id jason --owner-name Jason
-colleague-line gateway workspace add pi-tooling --name "Pi Tooling" --root ~/src/pi --summary "Pi SDK and extensions"
+coll init gateway --owner-id jason --owner-name Jason
+coll workspace add pi-tooling --name "Pi Tooling" --root ~/src/pi --summary "Pi SDK and extensions"
 ```
 
 In separate Owner terminal, run and leave Gateway active:
 
 ```bash
-colleague-line gateway serve
+coll serve gateway
 ```
 
 ### 2. Initialize Agent Client once
 
 ```bash
-colleague-line client init
+coll init client
 ```
 
 In separate Client terminal, run and leave Client active:
 
 ```bash
-colleague-line client serve
+coll serve client
 ```
 
-`colleague-line client init` prints local bearer once. Configure Agent once:
+`coll init client` prints local bearer once. Configure Agent once:
 
 - URL: `http://127.0.0.1:43111/mcp`
 - Header: `Authorization: Bearer <local-bearer>`
@@ -69,26 +69,25 @@ colleague-line client serve
 On Client machine, create Line key:
 
 ```bash
-colleague-line client line key-create jason
+coll line key-create jason
 ```
 
-Send printed public key to Owner. Owner registers one remote Gateway Client identity:
+Send printed public key to Owner. With Gateway still running, Owner registers one remote Gateway Client identity:
 
 ```bash
-colleague-line gateway client add alice-jason --tailcat-key 'nodekey:...'
+coll pair create alice-jason \
+  --key 'nodekey:...' \
+  --out ./alice-jason.pairing.json
 ```
 
-Owner command prints remote bearer once plus Tailcat address and port. Transfer those values through trusted channel. Then Client verifies Owner and saves Line:
+Transfer the private pairing bundle to Client through a trusted channel. Client imports it, uses the key created for `jason` by default, verifies Owner, and saves Line:
 
 ```bash
-printf '%s' '<remote-bearer>' | colleague-line client line add jason \
-  --owner-id jason \
-  --remote-client-id alice-jason \
-  --server '<tailcat-address>' \
-  --port 43110 \
-  --key ~/.local/share/colleague-line/client/keys/jason.json \
-  --bearer -
+coll pair accept jason --from ./alice-jason.pairing.json
+rm ./alice-jason.pairing.json
 ```
+
+The bundle contains the one-time remote bearer and Tailcat coordinates. Keep it private and remove every transferred copy after import. Omit `--out` to emit JSON on stdout; use `--from -` to import from stdin.
 
 Repeat only step 3 for more Owners. Agent endpoint and local bearer stay unchanged.
 
@@ -108,14 +107,14 @@ Full install, pairing, rotation, revocation, service, and recovery workflow: [`s
 ## Operations
 
 ```bash
-colleague-line gateway doctor
-colleague-line client doctor
+coll doctor gateway
+coll doctor client
 
-colleague-line gateway service install --yes
-colleague-line client service install --yes
+coll service install gateway --yes
+coll service install client --yes
 ```
 
-Role services use separate launchd/systemd units on macOS/Linux; Windows Preview is foreground-only. Run `colleague-line gateway serve` or `colleague-line client serve` in foreground while diagnosing.
+Role services use separate launchd/systemd units on macOS/Linux; Windows Preview is foreground-only. Run `coll serve gateway` or `coll serve client` in foreground while diagnosing.
 
 ## Source checkout
 

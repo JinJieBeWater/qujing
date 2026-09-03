@@ -225,11 +225,12 @@ export class ConfigStore {
     });
   }
 
-  addClientEffect(input: ClientInput) {
+  addClientEffect(input: ClientInput, bearer = createBearer()) {
     return Effect.gen({ self: this }, function* () {
       const parsed = yield* Effect.sync(() => ({
         id: parseIdentifier(input.id),
         tailcatKey: parseNonEmptyString(input.tailcatKey),
+        bearer: parseNonEmptyString(bearer),
       }));
       return yield* this.withLockEffect(
         Effect.gen({ self: this }, function* () {
@@ -241,11 +242,11 @@ export class ConfigStore {
             throw new Error("Client ID was revoked and cannot be reused");
           if (config.clients.some(({ id }) => id === parsed.id))
             throw new Error(`Client already exists: ${parsed.id}`);
-          const bearer = createBearer();
           const now = new Date().toISOString();
           const client = parseGatewayClient({
-            ...parsed,
-            bearerHash: hashBearer(bearer),
+            id: parsed.id,
+            tailcatKey: parsed.tailcatKey,
+            bearerHash: hashBearer(parsed.bearer),
             createdAt: now,
             updatedAt: now,
           });
@@ -253,7 +254,7 @@ export class ConfigStore {
             this.configPath,
             parseConfig({ ...config, clients: [...config.clients, client] }),
           );
-          return { bearer };
+          return { bearer: parsed.bearer };
         }),
       );
     });

@@ -19,25 +19,15 @@ async function ensurePrivateDirectoryNode(path: string): Promise<void> {
 export const writePrivateJsonEffect = (path: string, value: unknown) =>
   fromPromise(() => writePrivateJsonNode(path, value));
 
+export const writeNewPrivateJsonEffect = (path: string, value: unknown) =>
+  fromPromise(() => writeNewPrivateJsonNode(path, value));
+
 async function writePrivateJsonNode(path: string, value: unknown): Promise<void> {
   const parent = dirname(path);
   await ensurePrivateDirectoryNode(parent);
   const temporary = join(parent, `.${randomUUID()}.tmp`);
   try {
-    let handle = await open(temporary, "wx", 0o600);
-    if (process.platform === "win32") {
-      await handle.close();
-      await securePrivatePathNode(temporary, false);
-      handle = await open(temporary, "r+");
-    }
-    try {
-      await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
-      await handle.sync();
-    } finally {
-      await handle.close();
-    }
-    await chmod(temporary, 0o600);
-    await securePrivatePathNode(temporary, false);
+    await writeNewJsonFileNode(temporary, value);
     await rename(temporary, path);
     await chmod(path, 0o600);
     await securePrivatePathNode(path, false);
@@ -46,6 +36,54 @@ async function writePrivateJsonNode(path: string, value: unknown): Promise<void>
     await rm(temporary, { force: true }).catch(() => {});
     throw error;
   }
+}
+
+async function writeNewPrivateJsonNode(path: string, value: unknown): Promise<void> {
+  const parent = dirname(path);
+  await ensureOutputDirectoryNode(parent);
+  const staged = join(parent, `.${randomUUID()}.new`);
+  let linked = false;
+  try {
+    await writeNewJsonFileNode(staged, value);
+    await link(staged, path);
+    linked = true;
+    await chmod(path, 0o600);
+    await securePrivatePathNode(path, false);
+    await syncDirectory(parent);
+  } catch (error) {
+    if (linked) await rm(path, { force: true }).catch(() => {});
+    throw error;
+  } finally {
+    await rm(staged, { force: true }).catch(() => {});
+  }
+}
+
+async function ensureOutputDirectoryNode(path: string): Promise<void> {
+  try {
+    const info = await lstat(path);
+    if (info.isSymbolicLink() || !info.isDirectory())
+      throw new Error(`Pairing output parent must be a directory: ${path}`);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+    await ensurePrivateDirectoryNode(path);
+  }
+}
+
+async function writeNewJsonFileNode(path: string, value: unknown): Promise<void> {
+  let handle = await open(path, "wx", 0o600);
+  if (process.platform === "win32") {
+    await handle.close();
+    await securePrivatePathNode(path, false);
+    handle = await open(path, "r+");
+  }
+  try {
+    await handle.writeFile(`${JSON.stringify(value, null, 2)}\n`, "utf8");
+    await handle.sync();
+  } finally {
+    await handle.close();
+  }
+  await chmod(path, 0o600);
+  await securePrivatePathNode(path, false);
 }
 
 export const securePrivatePathEffect = (path: string, directory: boolean) =>

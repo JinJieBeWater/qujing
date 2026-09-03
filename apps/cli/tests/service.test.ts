@@ -6,17 +6,17 @@ describe("role user service definitions", () => {
   test("creates separate restartable macOS LaunchAgents", () => {
     const gateway = serviceDefinition(
       "darwin",
-      ["/Applications/Colleague Line/colleague-line", "gateway", "serve"],
+      ["/Applications/Colleague Line/coll", "serve", "gateway"],
       "gateway",
     );
     const client = serviceDefinition(
       "darwin",
-      ["/Applications/Colleague Line/colleague-line", "client", "serve"],
+      ["/Applications/Colleague Line/coll", "serve", "client"],
       "client",
     );
     expect(gateway.path).toContain("com.colleague-line.gateway.plist");
     expect(client.path).toContain("com.colleague-line.client.plist");
-    expect(gateway.content).toContain("<string>gateway</string><string>serve</string>");
+    expect(gateway.content).toContain("<string>serve</string><string>gateway</string>");
     expect(gateway.content).toContain("<key>KeepAlive</key>");
     expect(gateway.content).toContain("<key>StandardOutPath</key><string>/dev/null</string>");
     expect(gateway.content).not.toContain("sh -c");
@@ -25,12 +25,12 @@ describe("role user service definitions", () => {
   test("creates separate restartable Linux services", () => {
     const definition = serviceDefinition(
       "linux",
-      ["/home/alice/Colleague Line/colleague-line", "client", "serve"],
+      ["/home/alice/Colleague Line/coll", "serve", "client"],
       "client",
     );
     expect(definition.path).toContain("systemd/user/colleague-line-client.service");
     expect(definition.content).toContain(
-      'ExecStart="/home/alice/Colleague Line/colleague-line" "client" "serve"',
+      'ExecStart="/home/alice/Colleague Line/coll" "serve" "client"',
     );
     expect(definition.content).toContain("Restart=on-failure");
     expect(definition.content).toContain("StandardOutput=null");

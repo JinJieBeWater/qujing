@@ -201,7 +201,7 @@ test("retires active Line before CLI credential update commits", async () => {
   await active;
 
   const result = Effect.runPromise(
-    runCliEffect(["client", "line", "update", "owner", "--key", newKey, "--bearer", "-", "--yes"], {
+    runCliEffect(["line", "update", "owner", "--key", newKey, "--bearer", "-", "--yes"], {
       configPath: join(root, "unused-gateway.json"),
       stateRoot: join(root, "unused-gateway-state"),
       clientConfigPath: configPath,

@@ -89,6 +89,15 @@ export const LineCredentials = Schema.Struct({
   remoteBearer: BoundedString,
 });
 
+export const LinePairing = Schema.Struct({
+  version: Schema.Literal(1),
+  ownerId: Identifier,
+  remoteClientId: Identifier,
+  serverAddress: BoundedString,
+  remotePort: Port,
+  remoteBearer: BoundedString,
+});
+
 export const ClientConfig = Schema.Struct({
   version: Schema.Literal(1),
   server: Server,
@@ -202,6 +211,7 @@ export type ClientConfig = typeof ClientConfig.Type;
 export type Line = typeof Line.Type;
 export type LineInput = typeof LineInput.Type;
 export type LineCredentials = typeof LineCredentials.Type;
+export type LinePairing = typeof LinePairing.Type;
 export type RuntimeSession = typeof RuntimeSession.Type;
 export type ReloadState = typeof ReloadState.Type;
 export type ClientLineRetirement = typeof ClientLineRetirement.Type;

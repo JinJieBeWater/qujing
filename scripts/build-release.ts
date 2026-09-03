@@ -43,7 +43,7 @@ for (const name of selected) {
   const directory = join(destination, `colleague-line-${packageJson.version}-${name}`);
   await rm(directory, { recursive: true, force: true });
   await mkdir(directory, { recursive: true });
-  const app = join(directory, `colleague-line${target.extension}`);
+  const app = join(directory, `coll${target.extension}`);
   const transport = join(directory, `colleague-line-transport${target.extension}`);
   await command([
     "bun",

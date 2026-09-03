@@ -39,17 +39,17 @@ Require both Colleague Line binaries from same release and platform:
 
 ```bash
 install -d "$HOME/.local/bin"
-install -m 0755 ./colleague-line ./colleague-line-transport "$HOME/.local/bin/"
+install -m 0755 ./coll ./colleague-line-transport "$HOME/.local/bin/"
 export PATH="$HOME/.local/bin:$PATH"
-colleague-line --help
+coll --help
 ```
 
 Windows PowerShell Preview:
 
 ```powershell
 New-Item -ItemType Directory -Force "$HOME\.local\bin" | Out-Null
-Copy-Item .\colleague-line.exe, .\colleague-line-transport.exe "$HOME\.local\bin\"
-& "$HOME\.local\bin\colleague-line.exe" --help
+Copy-Item .\coll.exe, .\colleague-line-transport.exe "$HOME\.local\bin\"
+& "$HOME\.local\bin\coll.exe" --help
 ```
 
 Stop on platform mismatch, missing transport binary, or unavailable Owner `pi` CLI. Do not invent download URLs or build from source unless requested. Windows Preview supports foreground `gateway serve` and `client serve` only; user-service install/remove is unsupported.
@@ -61,26 +61,26 @@ Owner needs a working global Pi. Client machine does not. Run normal interactive
 Initialize Owner once and register each Workspace manually:
 
 ```bash
-colleague-line gateway init \
+coll init gateway \
   --owner-id <owner-id> \
   --owner-name <owner-name>
 
-colleague-line gateway workspace add <workspace-id> \
+coll workspace add <workspace-id> \
   --name <display-name> \
   --root <workspace-directory> \
   --summary <responsibility-summary>
 
-colleague-line gateway workspace list --json
-colleague-line gateway doctor
+coll workspace list --json
+coll doctor gateway
 ```
 
 Use summaries that let Agent choose Workspace without exposing roots. Choose one startup mode:
 
-- Foreground: hand off `colleague-line gateway serve` in a separate terminal; wait for `gateway: ready` and keep it running.
+- Foreground: hand off `coll serve gateway` in a separate terminal; wait for `gateway: ready` and keep it running.
 - Service (macOS/Linux only):
 
 ```bash
-colleague-line gateway service install --yes
+coll service install gateway --yes
 ```
 
 Do not start both modes.
@@ -92,19 +92,19 @@ Completion: Gateway doctor succeeds and Gateway is running.
 Run on Agent machine:
 
 ```bash
-colleague-line client init
-colleague-line client doctor
+coll init client
+coll doctor client
 ```
 
 Capture `local-bearer` once into Agent’s private MCP configuration. Configure exactly one endpoint using [`references/mcp-clients.md`](references/mcp-clients.md).
 
 Choose one Client startup mode:
 
-- Foreground: hand off `colleague-line client serve` in a separate terminal; wait for `client: ready` and keep it running.
+- Foreground: hand off `coll serve client` in a separate terminal; wait for `client: ready` and keep it running.
 - Service (macOS/Linux only):
 
 ```bash
-colleague-line client service install --yes
+coll service install client --yes
 ```
 
 Do not start both modes.
@@ -116,45 +116,46 @@ Completion: Client is running and Agent sees exactly `list_lines` and `ask`. Emp
 On Client machine, generate distinct key:
 
 ```bash
-colleague-line client line key-create <line-id>
+coll line key-create <line-id>
 ```
 
 Send only printed `public-key` to Owner. Keep key path on Client.
 
-On Owner machine, create remote Gateway Client identity for exactly this Line:
+With Gateway still running on Owner machine, create remote Gateway Client identity for exactly this Line:
 
 ```bash
-colleague-line gateway client add <remote-client-id> --tailcat-key '<public-key>'
+coll pair create <remote-client-id> \
+  --key '<public-key>' \
+  --out ./<remote-client-id>.pairing.json
 ```
 
-Capture once:
+The private pairing bundle contains:
 
+- expected Owner ID
+- remote Gateway Client ID
 - remote bearer
 - Tailcat server address
 - remote port
 
-Send them to Client through trusted channel. On Client machine:
+Send the bundle to Client through trusted channel while preserving current-user-only permissions. On Client machine:
 
 ```bash
-printf '%s' '<remote-bearer>' | colleague-line client line add <line-id> \
-  --owner-id <expected-owner-id> \
-  --remote-client-id <remote-client-id> \
-  --server '<tailcat-server-address>' \
-  --port <remote-port> \
-  --key <private-key-path> \
-  --bearer -
+coll pair accept <line-id> \
+  --from ./<remote-client-id>.pairing.json
 
-colleague-line client line list --json
-colleague-line client doctor
+rm ./<remote-client-id>.pairing.json
+
+coll line list --json
+coll doctor client
 ```
 
-`line add` connects and verifies exact Owner ID before persistence. Owner mismatch must leave no Line. Repeat this step for additional Owners; keep same Client endpoint and local bearer.
+`pair create` publishes the bundle only after live reload applies the new credentials. `pair accept` derives the standard key path from Line ID. Pass `--key <private-key-path>` only when `key-create --output` used a custom path. It connects and verifies exact Owner ID before persistence; Owner mismatch must leave no Line. Omit `--out` to emit JSON on stdout and use `--from -` to import from stdin. Remove every transferred bundle copy after import. Repeat this step for additional Owners; keep same Client endpoint and local bearer.
 
 ### 6. Verify end to end
 
 Require all:
 
-1. `colleague-line gateway doctor` succeeds on each Owner; `colleague-line client doctor` succeeds on Agent machine.
+1. `coll doctor gateway` succeeds on each Owner; `coll doctor client` succeeds on Agent machine.
 2. Agent discovers exactly `list_lines` and `ask`.
 3. `list_lines` includes every configured Line in local order. One unavailable Line does not hide healthy Lines.
 4. Each available Line returns expected Owner and public Workspace metadata, without roots, credentials, Runtime, model, session, or Tailcat details.
@@ -170,12 +171,12 @@ TCP connectivity alone is insufficient.
 
 ```bash
 # Owner
-colleague-line gateway workspace list --json
-colleague-line gateway doctor
+coll workspace list --json
+coll doctor gateway
 
 # Agent machine
-colleague-line client line list --json
-colleague-line client doctor
+coll line list --json
+coll doctor client
 ```
 
 Agent calls `list_lines`, chooses exact Line and Workspace IDs, then calls `ask`. Client starts Connectors lazily; no per-Line foreground process or MCP config exists.
@@ -187,21 +188,21 @@ Remote credential rotation preserves Owner Runtime history:
 1. Client creates new key at new path:
 
 ```bash
-colleague-line client line key-create <line-id> --output <new-private-key-path>
+coll line key-create <line-id> --output <new-private-key-path>
 ```
 
 2. Send new public key to Owner.
 3. Owner rotates remote credentials:
 
 ```bash
-colleague-line gateway client rotate <remote-client-id> --tailcat-key '<new-public-key>' --yes
+coll pair rotate <remote-client-id> --key '<new-public-key>' --yes
 ```
 
 4. Transfer new remote bearer to Client.
 5. Client verifies and atomically replaces Line key/bearer:
 
 ```bash
-printf '%s' '<new-remote-bearer>' | colleague-line client line update <line-id> \
+printf '%s' '<new-remote-bearer>' | coll line update <line-id> \
   --key <new-private-key-path> \
   --bearer - \
   --yes
@@ -211,16 +212,16 @@ Revoke Owner access first, then remove local Line:
 
 ```bash
 # Owner
-colleague-line gateway client revoke <remote-client-id> --yes
+coll pair revoke <remote-client-id> --yes
 
 # Client
-colleague-line client line remove <line-id> --yes
+coll line remove <line-id> --yes
 ```
 
 Rotate Agent-local bearer independently:
 
 ```bash
-colleague-line client token rotate
+coll token rotate
 ```
 
 Update Agent MCP secret immediately. Old local bearer and existing MCP sessions become invalid.
@@ -230,15 +231,15 @@ Update Agent MCP secret immediately. Old local bearer and existing MCP sessions 
 On macOS/Linux, stop/remove only installed role services on machine being upgraded:
 
 ```bash
-colleague-line gateway service remove --yes
-colleague-line client service remove --yes
+coll service remove gateway --yes
+coll service remove client --yes
 ```
 
 Replace both Colleague Line binaries from same release, then reinstall required role services:
 
 ```bash
-colleague-line gateway service install --yes
-colleague-line client service install --yes
+coll service install gateway --yes
+coll service install client --yes
 ```
 
 On Windows Preview, stop foreground role processes, replace both `.exe` files, then restart required `serve` commands; do not call `service install/remove`.
@@ -248,14 +249,14 @@ Run both doctors and repeat end-to-end verification. A machine running one role 
 ## Recovery
 
 - `UNAUTHORIZED`: distinguish Agent local bearer from Line remote bearer. Rotate correct layer; never redisplay stored secrets.
-- `LINE_NOT_FOUND`: Client checks `colleague-line client line list --json`.
+- `LINE_NOT_FOUND`: Client checks `coll line list --json`.
 - `LINE_UNAVAILABLE`: Client checks Line key privacy, Tailcat path, Owner Gateway, remote bearer, and expected Owner ID.
 - `OWNER_ID_MISMATCH`: verify handoff reached intended Owner; do not bypass check.
-- `WORKSPACE_NOT_FOUND` / `WORKSPACE_UNAVAILABLE`: Owner checks `colleague-line gateway workspace list --json` and root.
+- `WORKSPACE_NOT_FOUND` / `WORKSPACE_UNAVAILABLE`: Owner checks `coll workspace list --json` and root.
 - `RUNTIME_UNAVAILABLE`: Owner runs normal global `pi`, fixes its default model/auth/extensions, then restarts Gateway.
 - `RUNTIME_TIMEOUT`: keep Agent timeout at least 135 seconds; inspect Owner model/network before manual retry.
 - `BUSY`: wait for selected request/capacity to settle. Do not add automatic ask retry.
-- Client startup failure: check `colleague-line client doctor`, private `0600/0700` state, local port, and matched transport binary.
+- Client startup failure: check `coll doctor client`, private `0600/0700` state, local port, and matched transport binary.
 - Tailcat failure: check public-key allowlist, distinct per-Line private key, Gateway availability, and outbound network. Do not alter personal Tailscale routes or DNS.
 
 ## Report

@@ -139,8 +139,8 @@ export const removeUserServiceEffect = (
 export function currentServeCommand(role: ServiceRole): string[] {
   const script = process.argv[1];
   return script?.endsWith(".ts")
-    ? [process.execPath, script, role, "serve"]
-    : [process.execPath, role, "serve"];
+    ? [process.execPath, script, "serve", role]
+    : [process.execPath, "serve", role];
 }
 const runEffect = (command: string[], allowFailure = false) =>
   Effect.scoped(

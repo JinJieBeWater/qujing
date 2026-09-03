@@ -31,34 +31,34 @@ Agent 使用一个本机 bearer 认证。MCP tool-call timeout 至少设为 **13
 
 ## 最小安装流程
 
-同一发布版本的 `colleague-line` 与 `colleague-line-transport` 必须放在同一目录。Owner 机器还必须能从 `PATH` 运行日常使用的全局 `pi` CLI。
+同一发布版本的 `coll` 与 `colleague-line-transport` 必须放在同一目录。Owner 机器还必须能从 `PATH` 运行日常使用的全局 `pi` CLI。
 
 ### 1. 启动 Owner Gateway
 
 ```bash
-colleague-line gateway init --owner-id jason --owner-name Jason
-colleague-line gateway workspace add pi-tooling --name "Pi Tooling" --root ~/src/pi --summary "Pi SDK and extensions"
+coll init gateway --owner-id jason --owner-name Jason
+coll workspace add pi-tooling --name "Pi Tooling" --root ~/src/pi --summary "Pi SDK and extensions"
 ```
 
 在独立 Owner 终端启动并保持 Gateway：
 
 ```bash
-colleague-line gateway serve
+coll serve gateway
 ```
 
 ### 2. 只初始化一次 Agent Client
 
 ```bash
-colleague-line client init
+coll init client
 ```
 
 在独立 Client 终端启动并保持 Client：
 
 ```bash
-colleague-line client serve
+coll serve client
 ```
 
-`colleague-line client init` 只显示一次本机 bearer。Agent 只需配置一次：
+`coll init client` 只显示一次本机 bearer。Agent 只需配置一次：
 
 - URL：`http://127.0.0.1:43111/mcp`
 - Header：`Authorization: Bearer <local-bearer>`
@@ -69,26 +69,25 @@ colleague-line client serve
 在 Client 机器生成 Line key：
 
 ```bash
-colleague-line client line key-create jason
+coll line key-create jason
 ```
 
-只把输出的 public key 发给 Owner。Owner 注册一个 remote Gateway Client identity：
+只把输出的 public key 发给 Owner。保持 Gateway 运行，由 Owner 注册一个 remote Gateway Client identity：
 
 ```bash
-colleague-line gateway client add alice-jason --tailcat-key 'nodekey:...'
+coll pair create alice-jason \
+  --key 'nodekey:...' \
+  --out ./alice-jason.pairing.json
 ```
 
-Owner 命令只显示一次 remote bearer，同时输出 Tailcat address 和 port。通过可信渠道传给 Client，然后验证 Owner 并保存 Line：
+通过可信渠道把私密 pairing bundle 传给 Client。Client 默认使用为 `jason` 创建的 key，验证 Owner 后保存 Line：
 
 ```bash
-printf '%s' '<remote-bearer>' | colleague-line client line add jason \
-  --owner-id jason \
-  --remote-client-id alice-jason \
-  --server '<tailcat-address>' \
-  --port 43110 \
-  --key ~/.local/share/colleague-line/client/keys/jason.json \
-  --bearer -
+coll pair accept jason --from ./alice-jason.pairing.json
+rm ./alice-jason.pairing.json
 ```
+
+bundle 包含一次显示的 remote bearer 和 Tailcat 坐标；必须私密传输，导入后删除所有传输副本。省略 `--out` 会向 stdout 输出 JSON；`--from -` 可从 stdin 导入。
 
 增加更多 Owner 时只重复第 3 步。Agent endpoint 和本机 bearer 不变。
 
@@ -108,14 +107,14 @@ printf '%s' '<remote-bearer>' | colleague-line client line add jason \
 ## 运维
 
 ```bash
-colleague-line gateway doctor
-colleague-line client doctor
+coll doctor gateway
+coll doctor client
 
-colleague-line gateway service install --yes
-colleague-line client service install --yes
+coll service install gateway --yes
+coll service install client --yes
 ```
 
-macOS/Linux 上两种角色使用独立 launchd/systemd 服务；Windows Preview 仅支持前台运行。排障时可运行 `colleague-line gateway serve` 或 `colleague-line client serve`。
+macOS/Linux 上两种角色使用独立 launchd/systemd 服务；Windows Preview 仅支持前台运行。排障时可运行 `coll serve gateway` 或 `coll serve client`。
 
 ## 源码仓库
 

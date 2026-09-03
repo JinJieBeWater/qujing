@@ -1,7 +1,8 @@
 #!/usr/bin/env bun
 
-import { resolve, join } from "node:path";
-import { Deferred, Effect, Scope } from "effect";
+import { readFile, rm } from "node:fs/promises";
+import { join, resolve } from "node:path";
+import { Deferred, Effect, Exit, Scope } from "effect";
 import { ClientConfigStore, type LineConfig, type LineInput } from "./client-config";
 import {
   cancelClientLineRetirementEffect,
@@ -11,16 +12,19 @@ import {
 import { runClientDoctorEffect } from "./client-doctor";
 import { startClientServerEffect } from "./client-server";
 import { ConfigStore, type Config } from "./config";
+import { createBearer } from "./credentials";
 import { runDoctorEffect, type DoctorReport } from "./doctor";
 import { waitForClientReloadEffect, waitForGatewayReloadEffect } from "./gateway-reload";
 import { LineRuntime } from "./line-runtime";
 import { defaultClientPaths, defaultPaths } from "./paths";
+import { assertPrivatePathEffect, writeNewPrivateJsonEffect } from "./private-files";
 import { acquireProcessLockEffect, processLockActiveEffect } from "./process-lock";
 import {
   purgeClientRuntimeSessionsEffect,
   purgeWorkspaceRuntimeSessionsEffect,
 } from "./runtime/cleanup";
 import { RuntimeSessionStore } from "./runtime/sessions";
+import { decode, LinePairing as LinePairingSchema, type LinePairing } from "./schemas";
 import { currentServeCommand, installUserServiceEffect, removeUserServiceEffect } from "./service";
 import { startServerEffect } from "./server";
 import {
@@ -29,6 +33,8 @@ import {
   validateTransportKeyEffect,
 } from "./transport/process";
 import { readTailcatStateEffect } from "./transport/supervisor";
+
+const parseLinePairing = decode(LinePairingSchema);
 
 export interface CliIo {
   configPath: string;
@@ -47,187 +53,174 @@ export interface CliIo {
 
 class UsageError extends Error {}
 
-const rootHelp = `Usage: colleague-line <gateway|client> <command>
+const rootHelp = `Colleague Line
 
-Owner Gateway:
-  gateway init|workspace|client|doctor|serve|service
+Usage: coll <command>
 
-Agent Client:
-  client init|line|token|doctor|serve|service
+Commands:
+  init <gateway|client>
+  workspace <add|list|update|remove>
+  pair <create|accept|list|rotate|revoke>
+  line <key-create|list|update|remove>
+  token rotate
+  doctor <gateway|client>
+  serve <gateway|client>
+  service <install|remove> <gateway|client>
 
 Examples:
-  colleague-line gateway init --owner-id jason --owner-name Jason
-  colleague-line gateway serve
-  colleague-line client init
-  colleague-line client line list --json
-  colleague-line client serve
+  coll init gateway --owner-id jason --owner-name Jason
+  coll pair create alice-line --key - --out ./alice-line.pairing.json
+  coll pair accept jason --from ./alice-line.pairing.json
+  coll serve client
 `;
 
 const help: Record<string, string> = {
-  gateway: `Usage: colleague-line gateway <command>
+  init: `Usage: coll init <gateway|client>
 
 Examples:
-  colleague-line gateway init --owner-id jason --owner-name Jason
-  colleague-line gateway serve
-`,
-  "gateway workspace": `Usage: colleague-line gateway workspace <add|list|update|remove>
+  coll init client`,
+  workspace: `Usage: coll workspace <add|list|update|remove>
 
 Examples:
-  colleague-line gateway workspace list --json
-`,
-  "gateway client": `Usage: colleague-line gateway client <add|list|rotate|revoke>
+  coll workspace list --json`,
+  pair: `Usage: coll pair <create|accept|list|rotate|revoke>
 
 Examples:
-  colleague-line gateway client list --json
-`,
-  "gateway service": `Usage: colleague-line gateway service <install|remove> --yes
+  coll pair list --json`,
+  line: `Usage: coll line <key-create|list|update|remove>
 
 Examples:
-  colleague-line gateway service install --yes
-`,
-  "gateway init": `Usage: colleague-line gateway init --owner-id <id> --owner-name <name> [--owner-summary <summary>]
+  coll line list --json`,
+  token: `Usage: coll token rotate
 
 Examples:
-  colleague-line gateway init --owner-id jason --owner-name Jason
-`,
-  "gateway workspace add": `Usage: colleague-line gateway workspace add <id> --name <name> --root <directory> --summary <summary>
+  coll token rotate`,
+  doctor: `Usage: coll doctor <gateway|client>
 
 Examples:
-  colleague-line gateway workspace add pi-tooling --name "Pi Tooling" --root ~/src/pi --summary "Pi SDK and extensions"
-`,
-  "gateway workspace list": `Usage: colleague-line gateway workspace list [--json]
+  coll doctor client`,
+  serve: `Usage: coll serve <gateway|client>
 
 Examples:
-  colleague-line gateway workspace list --json
-`,
-  "gateway workspace update": `Usage: colleague-line gateway workspace update <id> [--name <name>] [--summary <summary>]
+  coll serve client`,
+  service: `Usage: coll service <install|remove> <gateway|client>
 
 Examples:
-  colleague-line gateway workspace update pi-tooling --summary "Pi SDK and runtime"
-`,
-  "gateway workspace remove": `Usage: colleague-line gateway workspace remove <id> --yes
+  coll service install client --yes`,
+  "init gateway": `Usage: coll init gateway --owner-id <id> --owner-name <name> [--owner-summary <summary>]
 
 Examples:
-  colleague-line gateway workspace remove old-workspace --yes
+  coll init gateway --owner-id jason --owner-name Jason
 `,
-  "gateway client add": `Usage: colleague-line gateway client add <id> --tailcat-key <public-key>
+  "init client": `Usage: coll init client [--port <loopback-port>]
 
 Examples:
-  printf '%s' 'nodekey:...' | colleague-line gateway client add alice-line --tailcat-key -
+  coll init client
+  coll init client --port 43111
 `,
-  "gateway client list": `Usage: colleague-line gateway client list [--json]
+  "workspace add": `Usage: coll workspace add <id> --name <name> --root <directory> --summary <summary>
 
 Examples:
-  colleague-line gateway client list --json
+  coll workspace add pi-tooling --name "Pi Tooling" --root ~/src/pi --summary "Pi SDK and extensions"
 `,
-  "gateway client rotate": `Usage: colleague-line gateway client rotate <id> --tailcat-key <new-public-key> --yes
+  "workspace list": `Usage: coll workspace list [--json]
 
 Examples:
-  printf '%s' 'nodekey:...' | colleague-line gateway client rotate alice-line --tailcat-key - --yes
+  coll workspace list --json
 `,
-  "gateway client revoke": `Usage: colleague-line gateway client revoke <id> --yes
+  "workspace update": `Usage: coll workspace update <id> [--name <name>] [--summary <summary>]
 
 Examples:
-  colleague-line gateway client revoke alice-line --yes
+  coll workspace update pi-tooling --summary "Pi SDK and runtime"
 `,
-  "gateway doctor": `Usage: colleague-line gateway doctor [--json]
+  "workspace remove": `Usage: coll workspace remove <id> --yes
 
 Examples:
-  colleague-line gateway doctor --json
+  coll workspace remove old-workspace --yes
 `,
-  "gateway serve": `Usage: colleague-line gateway serve
+  "pair create": `Usage: coll pair create <id> --key <public-key|-> [--out <path|->]
 
 Examples:
-  colleague-line gateway serve
+  printf '%s' 'nodekey:...' | coll pair create alice-line --key - --out ./alice-line.pairing.json
 `,
-  "gateway service install": `Usage: colleague-line gateway service install --yes
+  "pair accept": `Usage: coll pair accept <line-id> --from <path|-> [--key <private-key-path>]
 
 Examples:
-  colleague-line gateway service install --yes
+  coll pair accept jason --from ./alice-line.pairing.json
+  cat ./alice-line.pairing.json | coll pair accept jason --from -
 `,
-  "gateway service remove": `Usage: colleague-line gateway service remove --yes
+  "pair list": `Usage: coll pair list [--json]
 
 Examples:
-  colleague-line gateway service remove --yes
+  coll pair list --json
 `,
-  client: `Usage: colleague-line client <command>
+  "pair rotate": `Usage: coll pair rotate <id> --key <new-public-key|-> --yes
 
 Examples:
-  colleague-line client init
-  colleague-line client line list --json
-  colleague-line client serve
+  printf '%s' 'nodekey:...' | coll pair rotate alice-line --key - --yes
 `,
-  "client line": `Usage: colleague-line client line <key-create|add|list|update|remove>
+  "pair revoke": `Usage: coll pair revoke <id> --yes
 
 Examples:
-  colleague-line client line list --json
+  coll pair revoke alice-line --yes
 `,
-  "client token": `Usage: colleague-line client token rotate
+  "line key-create": `Usage: coll line key-create <line-id> [--output <private-key-path>]
 
 Examples:
-  colleague-line client token rotate
+  coll line key-create jason
 `,
-  "client service": `Usage: colleague-line client service <install|remove> --yes
+  "line list": `Usage: coll line list [--json]
 
 Examples:
-  colleague-line client service install --yes
+  coll line list --json
 `,
-  "client init": `Usage: colleague-line client init [--port <loopback-port>]
+  "line update": `Usage: coll line update <line-id> --key <private-key-path> --bearer <token|-> --yes
 
 Examples:
-  colleague-line client init
-  colleague-line client init --port 43111
+  printf '%s' '<new-remote-bearer>' | coll line update jason --key ~/.local/share/colleague-line/client/keys/jason.json --bearer - --yes
 `,
-  "client line key-create": `Usage: colleague-line client line key-create <line-id> [--output <private-key-path>]
+  "line remove": `Usage: coll line remove <line-id> --yes
 
 Examples:
-  colleague-line client line key-create jason
+  coll line remove jason --yes
 `,
-  "client line add": `Usage: colleague-line client line add <line-id> --owner-id <id> --remote-client-id <id> --server <tailcat-address> --port <remote-port> --key <private-key-path> --bearer <token|->
+  "token rotate": `Usage: coll token rotate
 
 Examples:
-  printf '%s' '<remote-bearer>' | colleague-line client line add jason --owner-id jason --remote-client-id alice-line --server <tailcat-address> --port 43110 --key ~/.local/share/colleague-line/client/keys/jason.json --bearer -
+  coll token rotate
 `,
-  "client line list": `Usage: colleague-line client line list [--json]
+  "doctor gateway": `Usage: coll doctor gateway [--json]
 
 Examples:
-  colleague-line client line list --json
-`,
-  "client line update": `Usage: colleague-line client line update <line-id> --key <private-key-path> --bearer <token|-> --yes
+  coll doctor gateway --json`,
+  "doctor client": `Usage: coll doctor client [--json]
 
 Examples:
-  printf '%s' '<new-remote-bearer>' | colleague-line client line update jason --key ~/.local/share/colleague-line/client/keys/jason.json --bearer - --yes
-`,
-  "client line remove": `Usage: colleague-line client line remove <line-id> --yes
+  coll doctor client --json`,
+  "serve gateway": `Usage: coll serve gateway
 
 Examples:
-  colleague-line client line remove jason --yes
-`,
-  "client token rotate": `Usage: colleague-line client token rotate
+  coll serve gateway`,
+  "serve client": `Usage: coll serve client
 
 Examples:
-  colleague-line client token rotate
-`,
-  "client doctor": `Usage: colleague-line client doctor [--json]
+  coll serve client`,
+  "service install gateway": `Usage: coll service install gateway --yes
 
 Examples:
-  colleague-line client doctor --json
-`,
-  "client serve": `Usage: colleague-line client serve
+  coll service install gateway --yes`,
+  "service install client": `Usage: coll service install client --yes
 
 Examples:
-  colleague-line client serve
-`,
-  "client service install": `Usage: colleague-line client service install --yes
+  coll service install client --yes`,
+  "service remove gateway": `Usage: coll service remove gateway --yes
 
 Examples:
-  colleague-line client service install --yes
-`,
-  "client service remove": `Usage: colleague-line client service remove --yes
+  coll service remove gateway --yes`,
+  "service remove client": `Usage: coll service remove client --yes
 
 Examples:
-  colleague-line client service remove --yes
-`,
+  coll service remove client --yes`,
 };
 
 /** Authoritative CLI orchestration. */
@@ -249,8 +242,8 @@ export function runCliEffect(args: string[], io: CliIo = defaultIo()) {
       },
       catch: (error) => error,
     });
-    if (command.startsWith("gateway ")) return yield* runGatewayEffect(command, parsed, io);
-    if (command.startsWith("client ")) return yield* runClientEffect(command, parsed, io);
+    if (gatewayCommands.has(command)) return yield* runGatewayEffect(command, parsed, io);
+    if (clientCommands.has(command)) return yield* runClientEffect(command, parsed, io);
     return yield* Effect.fail(new UsageError(rootHelp));
   }).pipe(
     Effect.scoped,
@@ -271,11 +264,11 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
   const store = new ConfigStore(io);
   return Effect.gen(function* () {
     switch (command) {
-      case "gateway init":
+      case "init gateway":
         yield* store.initEffect({ owner: ownerInput(parsed, help[command]!) });
         out(io, `initialized Gateway: ${io.configPath}`);
         return 0;
-      case "gateway workspace add": {
+      case "workspace add": {
         const id = positional(parsed, 0, help[command]!);
         yield* store.addWorkspaceEffect({
           id,
@@ -286,7 +279,7 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         out(io, `workspace: ${id}`);
         return 0;
       }
-      case "gateway workspace list": {
+      case "workspace list": {
         const [config, workspaces] = yield* Effect.all(
           [store.readEffectiveEffect(), store.listPublicWorkspacesEffect()],
           { concurrency: "unbounded" },
@@ -304,7 +297,7 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         );
         return 0;
       }
-      case "gateway workspace update": {
+      case "workspace update": {
         const id = positional(parsed, 0, help[command]!);
         const name = parsed.values.get("name");
         const summary = parsed.values.get("summary");
@@ -316,7 +309,7 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         out(io, `workspace: ${id}`);
         return 0;
       }
-      case "gateway workspace remove": {
+      case "workspace remove": {
         confirm(parsed, help[command]!);
         const id = positional(parsed, 0, help[command]!);
         if (!(yield* store.removeWorkspaceEffect(id)))
@@ -331,24 +324,71 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         out(io, `removed workspace: ${id}`);
         return 0;
       }
-      case "gateway client add": {
+      case "pair create": {
         const id = positional(parsed, 0, help[command]!);
-        const tailcatKey = yield* inputValueEffect(
-          required(parsed, "tailcat-key", help[command]!),
-          io,
-        );
+        const tailcatKey = yield* inputValueEffect(required(parsed, "key", help[command]!), io);
         yield* io.validateTailcatKeyEffect(tailcatKey);
-        const result = yield* store.addClientEffect({ id, tailcatKey });
-        out(io, `remote-client: ${id}\nbearer: ${result.bearer}`);
-        yield* waitIfGatewayRunningEffect(store, io, (config) =>
-          config.clients.some((client) => client.id === id && client.tailcatKey === tailcatKey),
+        if (!(yield* processLockActiveEffect(join(io.stateRoot, "gateway.lock"))))
+          return yield* Effect.fail(new Error("Gateway must be running before pairing a Client"));
+        const [config, tailcat] = yield* Effect.all([
+          store.readEffectiveEffect(),
+          readTailcatStateEffect(io.stateRoot),
+        ]);
+        if (!tailcat)
+          return yield* Effect.fail(
+            new Error("Gateway transport is not ready; start Gateway before pairing a Client"),
+          );
+        const bearer = createBearer();
+        const pairing = parseLinePairing({
+          version: 1,
+          ownerId: config.owner.id,
+          remoteClientId: id,
+          serverAddress: tailcat.serverAddress,
+          remotePort: tailcat.remotePort,
+          remoteBearer: bearer,
+        });
+        const destination = parsed.values.get("out") ?? "-";
+        const pairingPath = destination === "-" ? undefined : resolve(destination);
+        yield* Effect.uninterruptible(
+          Effect.gen(function* () {
+            if (pairingPath) yield* writeNewPrivateJsonEffect(pairingPath, pairing);
+            const announce = announcePairingEffect(destination, pairing, io);
+            const added = yield* Effect.exit(store.addClientEffect({ id, tailcatKey }, bearer));
+            if (Exit.isFailure(added)) {
+              const committed = yield* store.authenticateEffect(bearer).pipe(
+                Effect.map((client) => client?.id === id),
+                Effect.catch(() => Effect.succeed(undefined)),
+              );
+              if (committed === false && pairingPath)
+                yield* Effect.tryPromise({
+                  try: () => rm(pairingPath, { force: true }),
+                  catch: (error) => error,
+                }).pipe(Effect.ignore);
+              if (committed !== false) yield* announce;
+              return yield* added;
+            }
+            yield* waitForGatewayReloadEffect(
+              store,
+              io.stateRoot,
+              (config) =>
+                config.clients.some(
+                  (client) => client.id === id && client.tailcatKey === tailcatKey,
+                ),
+              io.gatewayReloadTimeoutMs ?? 45_000,
+            ).pipe(
+              Effect.flatMap((reloaded) =>
+                reloaded
+                  ? Effect.void
+                  : Effect.fail(new Error("Gateway stopped before Client pairing became active")),
+              ),
+              Effect.onError(() => announce),
+            );
+            yield* announce;
+          }),
         );
-        const tailcat = yield* readTailcatStateEffect(io.stateRoot);
-        if (tailcat)
-          out(io, `tailcat: ${tailcat.serverAddress}\nremote-port: ${tailcat.remotePort}`);
         return 0;
       }
-      case "gateway client list": {
+      case "pair list": {
         const config = yield* store.readEffectiveEffect();
         printRows(
           io,
@@ -361,13 +401,10 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         );
         return 0;
       }
-      case "gateway client rotate": {
+      case "pair rotate": {
         confirm(parsed, help[command]!);
         const id = positional(parsed, 0, help[command]!);
-        const tailcatKey = yield* inputValueEffect(
-          required(parsed, "tailcat-key", help[command]!),
-          io,
-        );
+        const tailcatKey = yield* inputValueEffect(required(parsed, "key", help[command]!), io);
         yield* io.validateTailcatKeyEffect(tailcatKey);
         const result = yield* store.rotateClientEffect(id, tailcatKey);
         out(io, `remote-client: ${id}\nbearer: ${result.bearer}`);
@@ -376,7 +413,7 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         );
         return 0;
       }
-      case "gateway client revoke": {
+      case "pair revoke": {
         confirm(parsed, help[command]!);
         const id = positional(parsed, 0, help[command]!);
         if (!(yield* store.revokeClientEffect(id)))
@@ -391,22 +428,22 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         out(io, `revoked remote-client: ${id}`);
         return 0;
       }
-      case "gateway doctor":
+      case "doctor gateway":
         return printDoctor(io, yield* runDoctorEffect(io), parsed.flags.has("json"));
-      case "gateway serve": {
+      case "serve gateway": {
         yield* startServerEffect(io, yield* Scope.Scope);
         out(io, "gateway: ready");
         yield* waitForShutdownEffect();
         return 0;
       }
-      case "gateway service install":
+      case "service install gateway":
         confirm(parsed, help[command]!);
         out(
           io,
           `service: ${yield* installUserServiceEffect(currentServeCommand("gateway"), "gateway")}`,
         );
         return 0;
-      case "gateway service remove":
+      case "service remove gateway":
         confirm(parsed, help[command]!);
         out(io, `removed service: ${yield* removeUserServiceEffect("gateway")}`);
         return 0;
@@ -420,7 +457,7 @@ function runClientEffect(command: string, parsed: ParsedArgs, io: CliIo) {
   const store = new ClientConfigStore({ configPath: io.clientConfigPath });
   return Effect.gen(function* () {
     switch (command) {
-      case "client init": {
+      case "init client": {
         const port = portValue(parsed.values.get("port") ?? "43111", "port");
         const result = yield* store.initEffect({ port });
         if (!result.initialized) {
@@ -433,7 +470,7 @@ function runClientEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         );
         return 0;
       }
-      case "client line key-create": {
+      case "line key-create": {
         const id = positional(parsed, 0, help[command]!);
         const output = resolve(
           parsed.values.get("output") ?? join(io.clientStateRoot, "keys", `${id}.json`),
@@ -442,15 +479,19 @@ function runClientEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         out(io, `key: ${key.keyPath}\npublic-key: ${key.publicKey}`);
         return 0;
       }
-      case "client line add": {
+      case "pair accept": {
+        const id = positional(parsed, 0, help[command]!);
+        const pairing = yield* readPairingEffect(required(parsed, "from", help[command]!), io);
         const input: LineInput = {
-          id: positional(parsed, 0, help[command]!),
-          expectedOwnerId: required(parsed, "owner-id", help[command]!),
-          remoteClientId: required(parsed, "remote-client-id", help[command]!),
-          serverAddress: yield* inputValueEffect(required(parsed, "server", help[command]!), io),
-          remotePort: portValue(required(parsed, "port", help[command]!), "port"),
-          keyPath: resolve(required(parsed, "key", help[command]!)),
-          remoteBearer: yield* inputValueEffect(required(parsed, "bearer", help[command]!), io),
+          id,
+          expectedOwnerId: pairing.ownerId,
+          remoteClientId: pairing.remoteClientId,
+          serverAddress: pairing.serverAddress,
+          remotePort: pairing.remotePort,
+          keyPath: resolve(
+            parsed.values.get("key") ?? join(io.clientStateRoot, "keys", `${id}.json`),
+          ),
+          remoteBearer: pairing.remoteBearer,
         };
         const validated = yield* store.validateEffect(input);
         yield* withClientMutationEffect(
@@ -470,10 +511,10 @@ function runClientEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         out(io, `line: ${validated.id}`);
         return 0;
       }
-      case "client line list":
+      case "line list":
         printRows(io, yield* store.listEffect(), parsed.flags.has("json"));
         return 0;
-      case "client line update": {
+      case "line update": {
         confirm(parsed, help[command]!);
         const id = positional(parsed, 0, help[command]!);
         const credentials = yield* store.validateCredentialsEffect({
@@ -506,7 +547,7 @@ function runClientEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         out(io, `line: ${id}`);
         return 0;
       }
-      case "client line remove": {
+      case "line remove": {
         confirm(parsed, help[command]!);
         const id = positional(parsed, 0, help[command]!);
         yield* withClientMutationEffect(
@@ -531,7 +572,7 @@ function runClientEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         out(io, `removed line: ${id}`);
         return 0;
       }
-      case "client token rotate": {
+      case "token rotate": {
         const result = yield* withClientMutationEffect(
           io,
           store
@@ -541,11 +582,11 @@ function runClientEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         out(io, `local-bearer: ${result.bearer}`);
         return 0;
       }
-      case "client doctor": {
+      case "doctor client": {
         const report = yield* io.clientDoctorEffect();
         return printDoctor(io, report, parsed.flags.has("json"));
       }
-      case "client serve": {
+      case "serve client": {
         yield* startClientServerEffect(
           {
             configPath: io.clientConfigPath,
@@ -558,14 +599,14 @@ function runClientEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         yield* waitForShutdownEffect();
         return 0;
       }
-      case "client service install":
+      case "service install client":
         confirm(parsed, help[command]!);
         out(
           io,
           `service: ${yield* installUserServiceEffect(currentServeCommand("client"), "client")}`,
         );
         return 0;
-      case "client service remove":
+      case "service remove client":
         confirm(parsed, help[command]!);
         out(io, `removed service: ${yield* removeUserServiceEffect("client")}`);
         return 0;
@@ -587,59 +628,88 @@ interface CommandSpec {
 }
 
 const commandSpecs: Record<string, CommandSpec> = {
-  "gateway init": {
+  "init gateway": {
     positionals: 0,
     values: ["owner-id", "owner-name", "owner-summary"],
   },
-  "gateway workspace add": {
+  "init client": { positionals: 0, values: ["port"] },
+  "workspace add": {
     positionals: 1,
     values: ["name", "root", "summary"],
   },
-  "gateway workspace list": { positionals: 0, flags: ["json"] },
-  "gateway workspace update": { positionals: 1, values: ["name", "summary"] },
-  "gateway workspace remove": { positionals: 1, flags: ["yes"] },
-  "gateway client add": { positionals: 1, values: ["tailcat-key"] },
-  "gateway client list": { positionals: 0, flags: ["json"] },
-  "gateway client rotate": {
+  "workspace list": { positionals: 0, flags: ["json"] },
+  "workspace update": { positionals: 1, values: ["name", "summary"] },
+  "workspace remove": { positionals: 1, flags: ["yes"] },
+  "pair create": {
     positionals: 1,
-    values: ["tailcat-key"],
+    values: ["key", "out"],
+  },
+  "pair accept": {
+    positionals: 1,
+    values: ["from", "key"],
+  },
+  "pair list": { positionals: 0, flags: ["json"] },
+  "pair rotate": {
+    positionals: 1,
+    values: ["key"],
     flags: ["yes"],
   },
-  "gateway client revoke": { positionals: 1, flags: ["yes"] },
-  "gateway doctor": { positionals: 0, flags: ["json"] },
-  "gateway serve": { positionals: 0 },
-  "gateway service install": { positionals: 0, flags: ["yes"] },
-  "gateway service remove": { positionals: 0, flags: ["yes"] },
-  "client init": { positionals: 0, values: ["port"] },
-  "client line key-create": { positionals: 1, values: ["output"] },
-  "client line add": {
-    positionals: 1,
-    values: ["owner-id", "remote-client-id", "server", "port", "key", "bearer"],
-  },
-  "client line list": { positionals: 0, flags: ["json"] },
-  "client line update": {
+  "pair revoke": { positionals: 1, flags: ["yes"] },
+  "line key-create": { positionals: 1, values: ["output"] },
+  "line list": { positionals: 0, flags: ["json"] },
+  "line update": {
     positionals: 1,
     values: ["key", "bearer"],
     flags: ["yes"],
   },
-  "client line remove": { positionals: 1, flags: ["yes"] },
-  "client token rotate": { positionals: 0 },
-  "client doctor": { positionals: 0, flags: ["json"] },
-  "client serve": { positionals: 0 },
-  "client service install": { positionals: 0, flags: ["yes"] },
-  "client service remove": { positionals: 0, flags: ["yes"] },
+  "line remove": { positionals: 1, flags: ["yes"] },
+  "token rotate": { positionals: 0 },
+  "doctor gateway": { positionals: 0, flags: ["json"] },
+  "doctor client": { positionals: 0, flags: ["json"] },
+  "serve gateway": { positionals: 0 },
+  "serve client": { positionals: 0 },
+  "service install gateway": { positionals: 0, flags: ["yes"] },
+  "service install client": { positionals: 0, flags: ["yes"] },
+  "service remove gateway": { positionals: 0, flags: ["yes"] },
+  "service remove client": { positionals: 0, flags: ["yes"] },
 };
 
+const gatewayCommands = new Set([
+  "init gateway",
+  "workspace add",
+  "workspace list",
+  "workspace update",
+  "workspace remove",
+  "pair create",
+  "pair list",
+  "pair rotate",
+  "pair revoke",
+  "doctor gateway",
+  "serve gateway",
+  "service install gateway",
+  "service remove gateway",
+]);
+
+const clientCommands = new Set([
+  "init client",
+  "pair accept",
+  "line key-create",
+  "line list",
+  "line update",
+  "line remove",
+  "token rotate",
+  "doctor client",
+  "serve client",
+  "service install client",
+  "service remove client",
+]);
+
 function commandKey(args: string[]): string {
-  const role = args[0];
-  if (role !== "gateway" && role !== "client") return role ?? "";
-  const second = args[1];
-  if (!second || second.startsWith("-")) return role;
-  const grouped =
-    role === "gateway" ? ["workspace", "client", "service"] : ["line", "token", "service"];
-  if (!grouped.includes(second)) return `${role} ${second}`;
-  const third = args[2];
-  return !third || third.startsWith("-") ? `${role} ${second}` : `${role} ${second} ${third}`;
+  for (let length = Math.min(3, args.length); length > 0; length--) {
+    const candidate = args.slice(0, length).join(" ");
+    if (candidate in help || candidate in commandSpecs) return candidate;
+  }
+  return args[0] ?? "";
 }
 
 function parseArgs(args: string[]): ParsedArgs {
@@ -708,6 +778,33 @@ function inputValueEffect(value: string, io: CliIo) {
       input ? Effect.succeed(input) : Effect.fail(new UsageError("stdin value is empty")),
     ),
   );
+}
+
+function readPairingEffect(source: string, io: CliIo) {
+  const text =
+    source === "-"
+      ? io.readStdinEffect()
+      : assertPrivatePathEffect(resolve(source), false).pipe(
+          Effect.andThen(
+            Effect.tryPromise({
+              try: () => readFile(resolve(source), "utf8"),
+              catch: (error) => error,
+            }),
+          ),
+        );
+  return text.pipe(
+    Effect.flatMap((value) =>
+      Effect.try({
+        try: () => parseLinePairing(JSON.parse(value)),
+        catch: () => new UsageError("Invalid pairing bundle"),
+      }),
+    ),
+  );
+}
+
+function announcePairingEffect(destination: string, pairing: LinePairing, io: CliIo) {
+  if (destination === "-") return Effect.sync(() => out(io, JSON.stringify(pairing)));
+  return Effect.sync(() => out(io, `pairing: ${resolve(destination)}`));
 }
 
 function portValue(value: string, name: string): number {

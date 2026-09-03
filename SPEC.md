@@ -133,32 +133,29 @@ Agent-facing Client errors identify safe layer and Line without leaking secrets:
 
 ## 7. CLI and services
 
-Commands are role-prefixed. No `profile`, `connect`, or unprefixed role command remains.
+The product remains Colleague Line; its only user-facing executable is `coll`. Commands are task-first, with role arguments only where an operation exists for both roles. No legacy role-prefixed command remains.
 
 ```text
-colleague-line gateway init --owner-id ... --owner-name ...
-colleague-line gateway workspace add|list|update|remove ...
-colleague-line gateway client add|list|rotate|revoke ...
-colleague-line gateway doctor [--json]
-colleague-line gateway serve
-
-colleague-line client init
-colleague-line client line key-create <line-id>
-colleague-line client line add <line-id> --owner-id ... --remote-client-id ... --server ... --port ... --key ... --bearer -
-colleague-line client line list [--json]
-colleague-line client line update <line-id> --key ... --bearer - --yes
-colleague-line client line remove <line-id> --yes
-colleague-line client token rotate
-colleague-line client doctor [--json]
-colleague-line client serve
+coll init gateway --owner-id ... --owner-name ...
+coll init client
+coll workspace add|list|update|remove ...
+coll pair create <id> --key ... [--out <path|->]
+coll pair accept <line-id> --from <path|-> [--key <private-key-path>]
+coll pair list|rotate|revoke ...
+coll line key-create|list|update|remove ...
+coll token rotate
+coll doctor gateway|client [--json]
+coll serve gateway|client
+coll service install|remove gateway|client --yes
 ```
 
-Gateway Client add creates one remote Gateway Client identity and bearer for exactly one Line and configures its distinct Tailcat key in the allowlist. Client Line add consumes Owner-issued values through a secure channel; required flags allow noninteractive use and stdin carries secrets. `line update` replaces key path and bearer atomically after Gateway rotation. Removing a Line deletes only local routing and credentials; its local ID may be reused later because remote identity and history stay Owner-controlled. `gateway serve` is Owner service. `client serve` is Agent-local MCP service. `doctor` checks own role configuration, global Pi executable, and transport readiness without starting a model turn or reading Workspace content. Pi model, provider, authentication, settings, tools, skills, and extensions are managed through Owner's normal global Pi; Colleague Line adds only its fixed Runtime prompt.
+`pair create` requires a live Gateway, creates one remote Gateway Client identity and bearer for exactly one Line, and waits until Gateway applies its distinct Tailcat key before publishing one private pairing bundle. The bundle carries Owner ID, remote Gateway Client ID, Tailcat coordinates, and remote bearer as one exact handoff. `pair accept` reads that bundle from a private file or stdin, derives the standard key path from Line ID unless overridden, verifies the Owner, then persists the Line. `line update` replaces key path and bearer atomically after Gateway rotation. Removing a Line deletes only local routing and credentials; its local ID may be reused later because remote identity and history stay Owner-controlled. `serve gateway` is Owner service. `serve client` is Agent-local MCP service. `doctor` checks selected role configuration, global Pi executable, and transport readiness without starting a model turn or reading Workspace content. Pi model, provider, authentication, settings, tools, skills, and extensions are managed through Owner's normal global Pi; Colleague Line adds only its fixed Runtime prompt.
 
 ## 8. Security
 
 - Gateway and Connector bind loopback only; no `0.0.0.0`, Tailcat `all`, exit node, no-auth SSH, file service, host forwarding, personal Tailscale sharing, Funnel, subnet routing, or DNS exposure.
 - Gateway validates Host and Origin; non-browser MCP may omit Origin, supplied Origin must be allowed.
+- Pairing bundles contain a remote bearer and private network coordinates. File output is current-user-only; transfer it through a trusted channel and remove it after successful Line import.
 - Server-generated identifiers; no paths, model, keys, tokens, usernames, Runtime IDs, session files, interface addresses, node metadata, questions, answers, or file contents in default logs.
 - Gateway Workspace registration is manual. Root immutable; duplicate canonical roots rejected; nested roots allowed; deletion tombstones ID.
 - Every remote Gateway Client is trusted with Owner-level Pi capability. Bearer or Tailcat-key compromise can expose or modify anything reachable by Owner's Pi.

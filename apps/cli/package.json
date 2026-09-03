@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "bin": {
-    "colleague-line": "./src/cli.ts"
+    "coll": "./src/cli.ts"
   },
   "type": "module",
   "scripts": {
