@@ -34,6 +34,15 @@ Agent 使用一个本机 bearer 认证。MCP tool-call timeout 至少设为 **13
 macOS Apple Silicon 或 Linux x64：
 
 ```bash
+brew tap jinjiebewater/tap
+brew trust --formula jinjiebewater/tap/qujing
+brew install qujing
+qj --version
+```
+
+Homebrew 6 对第三方 Tap 要求显式信任具体 Formula。也可以改用独立安装脚本：
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.sh | sh
 qj --version
 ```
@@ -55,7 +64,7 @@ qj --version
 
 ## 最小安装流程
 
-安装脚本会把同一发布版本的 `qj` 与 `qujing-transport` 放在同一目录。Owner 机器还必须能从 `PATH` 运行日常使用的全局 `pi` CLI。
+两种安装方式都会配套安装同一发布版本的 `qj` 与 `qujing-transport`。Owner 机器还必须能从 `PATH` 运行日常使用的全局 `pi` CLI。
 
 ### 1. 启动 Owner Gateway
 

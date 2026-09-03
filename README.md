@@ -34,6 +34,15 @@ One machine may run both Owner and Client roles. Their commands, configs, locks,
 macOS Apple Silicon or Linux x64:
 
 ```bash
+brew tap jinjiebewater/tap
+brew trust --formula jinjiebewater/tap/qujing
+brew install qujing
+qj --version
+```
+
+Homebrew 6 requires the formula-specific trust step for third-party taps. To use the standalone installer instead:
+
+```bash
 curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.sh | sh
 qj --version
 ```
@@ -55,7 +64,7 @@ Review [`install.sh`](install.sh) or [`install.ps1`](install.ps1) before executi
 
 ## Minimal setup
 
-The installer keeps `qj` and `qujing-transport` from the same release in one directory. Owner machine must also have its normal global `pi` CLI available on `PATH`.
+Both installation methods keep `qj` and `qujing-transport` from the same release together. Owner machine must also have its normal global `pi` CLI available on `PATH`.
 
 ### 1. Start Owner Gateway
 
