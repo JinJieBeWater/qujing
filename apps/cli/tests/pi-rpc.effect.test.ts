@@ -92,7 +92,10 @@ const sessionId = process.argv[process.argv.indexOf("--session-id") + 1];
 let input = "";
 process.stdin.on("data", (chunk) => {
   input += new TextDecoder().decode(chunk);
-  for (const line of input.split("\\n")) {
+  let newline;
+  while ((newline = input.indexOf("\\n")) !== -1) {
+    const line = input.slice(0, newline);
+    input = input.slice(newline + 1);
     if (!line) continue;
     const message = JSON.parse(line);
     if (message.type === "get_state") console.log(JSON.stringify({ type: "response", id: message.id, success: true, data: { sessionId } }));
@@ -112,7 +115,6 @@ process.stdin.on("data", (chunk) => {
       }, 0);
     }
   }
-  input = input.slice(input.lastIndexOf("\\n") + 1);
 });
 `,
         ),
