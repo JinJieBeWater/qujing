@@ -32,6 +32,7 @@ interface DoctorPaths {
 
 interface DoctorDependencies {
   checkPi?: (binary: string) => Effect.Effect<boolean, unknown>;
+  checkExecutable?: (binary: string) => Effect.Effect<boolean, unknown>;
   checkPort?: (host: string, port: number) => Effect.Effect<boolean, unknown>;
 }
 
@@ -41,12 +42,11 @@ type ConfigResult = { config?: Config; check: Check };
 export function runDoctorEffect(paths: DoctorPaths, dependencies: DoctorDependencies = {}) {
   const store = new ConfigStore(paths);
   return Effect.gen(function* () {
-    const [configResult, permissions, transport, pi, tailcat] = yield* Effect.all(
+    const [configResult, permissions, transport, tailcat] = yield* Effect.all(
       [
         configCheckEffect(store),
         permissionsCheckEffect(paths, store),
         transportCheckEffect(paths.transportBinary),
-        piCheckEffect("pi", dependencies.checkPi),
         tailcatCheckEffect(paths.stateRoot),
       ],
       { concurrency: "unbounded" },
@@ -54,6 +54,7 @@ export function runDoctorEffect(paths: DoctorPaths, dependencies: DoctorDependen
     const configChecks = configResult.config
       ? yield* Effect.all(
           [
+            runtimeCheckEffect(configResult.config, dependencies),
             workspaceChecksEffect(store, configResult.config),
             portCheckEffect(paths.stateRoot, configResult.config, dependencies.checkPort),
           ],
@@ -63,9 +64,9 @@ export function runDoctorEffect(paths: DoctorPaths, dependencies: DoctorDependen
     const checks = [
       configResult.check,
       permissions,
-      ...(configChecks ? [...configChecks[0], configChecks[1]] : []),
+      ...(configChecks ? [...configChecks[1], configChecks[2]] : []),
       transport,
-      pi,
+      ...(configChecks ? [configChecks[0]] : []),
       tailcat,
     ];
     return {
@@ -198,6 +199,91 @@ function piCheckEffect(binary: string, checkPiOverride?: DoctorDependencies["che
     ),
     Effect.catchEager(() => Effect.succeed(check("pi", "error", "Global Pi CLI is unavailable"))),
   );
+}
+
+function runtimeCheckEffect(config: Config, dependencies: DoctorDependencies) {
+  const runtime = config.runtime;
+  if (runtime?.kind === "tanstack-acp") {
+    const executable = firstExecutableToken(runtime.command);
+    return (
+      executable
+        ? executableCheckEffect(executable, dependencies.checkExecutable)
+        : Effect.succeed(false)
+    ).pipe(
+      Effect.map((available) =>
+        check(
+          "runtime",
+          available ? "ok" : "error",
+          available
+            ? `TanStack ACP Runtime command is executable: ${runtime.name}`
+            : `TanStack ACP Runtime command is unavailable: ${runtime.name}`,
+        ),
+      ),
+      Effect.catchEager(() =>
+        Effect.succeed(
+          check("runtime", "error", `TanStack ACP Runtime command is unavailable: ${runtime.name}`),
+        ),
+      ),
+    );
+  }
+  return piCheckEffect("pi", dependencies.checkPi);
+}
+
+function executableCheckEffect(
+  binary: string,
+  checkExecutableOverride?: DoctorDependencies["checkExecutable"],
+) {
+  if (checkExecutableOverride) return checkExecutableOverride(binary);
+  return promise(async () => {
+    const resolved = Bun.which(binary);
+    if (!resolved) return false;
+    await access(resolved, constants.X_OK);
+    return true;
+  });
+}
+
+function firstExecutableToken(command: string): string | undefined {
+  let index = 0;
+  let afterEnv = false;
+  for (;;) {
+    const token = readShellToken(command, index);
+    if (!token) return undefined;
+    index = token.next;
+    if (token.value === "env" && !afterEnv) {
+      afterEnv = true;
+      continue;
+    }
+    if (/^[A-Za-z_][A-Za-z0-9_]*=/.test(token.value)) continue;
+    if (afterEnv && token.value.startsWith("-")) continue;
+    return token.value;
+  }
+}
+
+function readShellToken(
+  command: string,
+  offset: number,
+): { value: string; next: number } | undefined {
+  let index = offset;
+  while (index < command.length && /\s/.test(command[index]!)) index++;
+  if (index >= command.length) return undefined;
+  let value = "";
+  let quote: "'" | '"' | undefined;
+  while (index < command.length) {
+    const char = command[index++]!;
+    if (!quote && /\s/.test(char)) break;
+    if (char === "\\") {
+      if (index < command.length) value += command[index++]!;
+      continue;
+    }
+    if (char === "'" || char === '"') {
+      if (quote === char) quote = undefined;
+      else if (!quote) quote = char;
+      else value += char;
+      continue;
+    }
+    value += char;
+  }
+  return { value, next: index };
 }
 
 function tailcatCheckEffect(stateRoot: string) {

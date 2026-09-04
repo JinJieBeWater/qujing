@@ -74,6 +74,57 @@ describe("doctor", () => {
     ).toEqual(expect.arrayContaining(["permissions", "workspace:docs"]));
   });
 
+  test("checks TanStack ACP runtime without requiring global Pi", async () => {
+    const { paths } = await fixture();
+    let checkedExecutable: string | undefined;
+    await Effect.runPromise(
+      new ConfigStore(paths).setRuntimeEffect({
+        kind: "tanstack-acp",
+        name: "codex",
+        model: "gpt-5-codex",
+        command: "codex --acp --model {model} --cwd {cwd}",
+      }),
+    );
+
+    const report = await Effect.runPromise(
+      runDoctorEffect(paths, {
+        checkPi: () => Effect.succeed(false),
+        checkExecutable: (binary) =>
+          Effect.sync(() => {
+            checkedExecutable = binary;
+            return true;
+          }),
+        checkPort: () => Effect.succeed(true),
+      }),
+    );
+
+    expect(report.checks.find((check) => check.name === "pi")).toBeUndefined();
+    expect(checkedExecutable).toBe("codex");
+    expect(report.checks.find((check) => check.name === "runtime")?.status).toBe("ok");
+  });
+
+  test("reports unavailable TanStack ACP runtime command", async () => {
+    const { paths } = await fixture();
+    await Effect.runPromise(
+      new ConfigStore(paths).setRuntimeEffect({
+        kind: "tanstack-acp",
+        name: "codex",
+        model: "gpt-5-codex",
+        command: "MISSING=value missing-acp --model {model}",
+      }),
+    );
+
+    const report = await Effect.runPromise(
+      runDoctorEffect(paths, {
+        checkExecutable: () => Effect.succeed(false),
+        checkPort: () => Effect.succeed(true),
+      }),
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.find((check) => check.name === "runtime")?.status).toBe("error");
+  });
+
   test("reports corrupt Tailcat state without aborting doctor", async () => {
     const { paths } = await fixture();
     await mkdir(join(paths.stateRoot, "transport"), { recursive: true });

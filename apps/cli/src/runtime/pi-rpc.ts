@@ -1,6 +1,8 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { Context, Deferred, Duration, Effect, Exit, Queue, Scope } from "effect";
+import { QUJING_PROMPT } from "./prompt";
+import type { RuntimeAgentSession } from "./session";
 
 interface RpcResponse {
   type: "response";
@@ -13,28 +15,9 @@ type PendingRequest = Deferred.Deferred<RpcResponse, Error>;
 
 const MAX_RPC_LINE_BYTES = 16 * 1024 * 1024;
 const MAX_RPC_STDOUT_BYTES = 32 * 1024 * 1024;
+const MAX_UI_RESPONSE_BYTES = 4 * 1024;
 
-const QUJING_PROMPT = `你正在通过取经（Qujing）回答另一位同事的问题。
-
-取经（Qujing）是同事之间的私密咨询通道。你可以查阅 Owner 的工作上下文，帮助对方理解项目、补充背景、找回决策和解决问题。
-
-回答前先按需取证：判断当前问题缺少什么证据，再选择最相关的来源。证据可能来自当前代码、项目文档、Git、可用 Skills，或与当前项目明确相关的 Agent 历史。
-
-当前行为由代码、测试和配置核定。Skills 承载 Owner 积累的工作方法和特殊经验。Agent 历史用于找回过去的讨论、决策和排查结果，但需要结合当前资料确认是否仍然有效。
-
-获取足够证据后直接回答。区分已确认事实、历史背景和你的判断；依据不足时明确说明。
-
-全程只读：只查看、搜索、分析和回答。需要变更时提供建议，但不执行更改。`;
-
-export interface PiRpcSessionEffect {
-  getLastAssistantText(): string | undefined;
-  isAlive(): boolean;
-  promptEffect(question: string): Effect.Effect<void, Error>;
-  clearQueueEffect(): Effect.Effect<void, Error>;
-  abortEffect(): Effect.Effect<void, Error>;
-  waitForIdleEffect(): Effect.Effect<void, Error>;
-  disposeEffect(): Effect.Effect<void>;
-}
+export type PiRpcSessionEffect = RuntimeAgentSession;
 
 export interface PiRpcOptions {
   cwd: string;
@@ -390,30 +373,25 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
         type: "extension_ui_response",
         id: request.id,
         value:
-          request.method === "editor" && typeof request.prefill === "string" ? request.prefill : "",
+          request.method === "editor" && typeof request.prefill === "string"
+            ? request.prefill.slice(0, MAX_UI_RESPONSE_BYTES)
+            : "",
       });
     return Effect.void;
   }
 
   private writeEffect(message: Record<string, unknown>): Effect.Effect<void, Error> {
     if (this.stopped || !this.child.stdin.writable)
-      return Effect.fail(new Error("Global Pi is stopped"));
+      return Effect.fail(this.stdoutFailure ?? new Error("Global Pi is stopped"));
     return Effect.callback<void, Error>((resume) => {
       this.child.stdin.write(`${JSON.stringify(message)}\n`, (error) =>
-        resume(error ? Effect.fail(error) : Effect.void),
+        resume(error ? Effect.fail(this.stdoutFailure ?? error) : Effect.void),
       );
     });
   }
 
   private failEffect(error: Error): Effect.Effect<void> {
-    return Effect.gen({ self: this }, function* () {
-      this.failed = true;
-      for (const pending of this.pending.values()) yield* Deferred.fail(pending, error);
-      this.pending.clear();
-      if (this.currentTurn) yield* Deferred.fail(this.currentTurn, error);
-      this.currentTurn = undefined;
-      yield* Deferred.fail(this.failure, error);
-    });
+    return Effect.sync(() => this.failUnsafe(error));
   }
 
   private failAndStopEffect(error: Error): Effect.Effect<void> {
@@ -431,8 +409,18 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
     this.stdoutFailure = error;
     this.stopped = true;
     this.child.stdout.pause();
+    this.failUnsafe(error);
     this.child.kill("SIGTERM");
     Queue.offerUnsafe(this.stdoutQueue, Effect.fail(error));
+  }
+
+  private failUnsafe(error: Error): void {
+    this.failed = true;
+    for (const pending of this.pending.values()) Deferred.doneUnsafe(pending, Effect.fail(error));
+    this.pending.clear();
+    if (this.currentTurn) Deferred.doneUnsafe(this.currentTurn, Effect.fail(error));
+    this.currentTurn = undefined;
+    Deferred.doneUnsafe(this.failure, Effect.fail(error));
   }
 }
 

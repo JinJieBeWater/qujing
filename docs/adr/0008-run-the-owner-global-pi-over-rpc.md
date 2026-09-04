@@ -1,5 +1,7 @@
 # 直接通过 RPC 运行 Owner 的全局 Pi
 
+Status: Default Runtime. Amended by `0009-add-tanstack-acp-runtime.md`.
+
 Qujing Gateway 为每个活跃 `remote Gateway Client + Workspace` 启动一个真实 `pi --mode rpc --approve --session-id <id>` 子进程。进程 cwd 是 Workspace，其他 Pi 配置保持默认：Owner 的模型、认证、settings、skills、extensions、builtin tools 和 `~/.pi/agent/sessions/`。
 
 ## 考虑过的方案

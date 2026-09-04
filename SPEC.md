@@ -1,6 +1,6 @@
 # Qujing specification
 
-Status: Client multiplexing and the full global Pi Runtime are verified on macOS Apple Silicon and Linux x64. The consultation prompt is unit-verified and awaits cross-device acceptance. Windows x64 remains Preview.
+Status: Client multiplexing and the default full global Pi Runtime are verified on macOS Apple Silicon and Linux x64. Optional TanStack ACP Runtime is implemented for ACP-compatible agent CLIs and awaits cross-device acceptance. Windows x64 remains Preview.
 
 ## 1. Topology
 
@@ -105,7 +105,7 @@ Cancellation travels two hops: Agent cancellation reaches Client stateful MCP tr
 
 Gateway uses stateful Streamable HTTP only for protocol cancellation. Every Gateway request revalidates remote bearer; MCP session is neither product identity nor history. Fixed Gateway limits: 32 MCP sessions globally, 4 per remote Gateway Client, 64 active HTTP requests globally, 16 per remote Gateway Client, 64 KiB uncompressed request body, 10-minute idle session expiry.
 
-Gateway Runtime Session is keyed by authenticated remote Gateway Client plus Workspace. Different Gateway Clients and Workspaces use distinct Pi session IDs. Client never stores, merges, or replays history across Lines. Same key serializes asks; different keys may run concurrently. Each active binding owns one `pi --mode rpc --approve --session-id <id>` process with cwd set to selected Workspace. Idle processes stop after 10 minutes and restart lazily with same Pi session ID.
+Gateway Runtime Session is keyed by authenticated remote Gateway Client plus Workspace. Different Gateway Clients and Workspaces use distinct Runtime session IDs. Client never stores, merges, or replays history across Lines. Same key serializes asks; different keys may run concurrently. Each active binding owns one Runtime backend process or harness run with cwd set to selected Workspace. Idle Runtime entries stop after 10 minutes and restart lazily with same Runtime session ID.
 
 Gateway persists JSON config, Runtime binding metadata, tombstones, Tailcat server key, and transport state under:
 
@@ -115,19 +115,22 @@ macOS/Linux state: ~/.local/share/qujing/
 Windows config: %APPDATA%\Qujing\config.json
 Windows state: %LOCALAPPDATA%\Qujing\
 Pi global state and sessions: ~/.pi/agent/
+TanStack Runtime state: ~/.local/share/qujing/tanstack/
 ```
 
-Config includes Owner, loopback server, Workspaces, and remote Gateway Clients with bearer hashes and Tailcat public keys. State binds `remote Gateway Client + Workspace` to one Pi session ID. Pi owns session files in its default global session store. Revoking a Gateway Client or removing a Workspace retires active processes and removes Qujing bindings but does not delete Owner's global Pi archive. Atomic JSON writes and idempotent desired-state reconciliation apply. No database, automatic history deletion, public reset, knowledge index, or session adapter exists.
+Config includes Owner, loopback server, Workspaces, and remote Gateway Clients with bearer hashes and Tailcat public keys. State binds `remote Gateway Client + Workspace` to one Runtime Session ID. Revoking a Gateway Client or removing a Workspace retires active processes and removes Qujing bindings but does not delete backend-owned transcript state. Default Pi Runtime keeps Pi session files in Owner's global Pi archive; TanStack ACP Runtime keeps transcript/run state under Gateway state. Atomic JSON writes and idempotent desired-state reconciliation apply. No database, automatic history deletion, public reset, knowledge index, or session adapter exists.
 
-Gateway launches Owner's installed global Pi CLI directly with a fixed appended system prompt. It passes no model, provider, settings, resource, tool, extension, skill, or session-directory override. `--approve` loads trusted Workspace resources in non-interactive RPC mode. Pi therefore uses Owner's default model and authentication, global settings, skills, extensions, full builtin tools, and `~/.pi/agent/sessions/`.
+Default Gateway Runtime launches Owner's installed global Pi CLI directly with a fixed appended system prompt. It passes no model, provider, settings, resource, tool, extension, skill, or session-directory override. `--approve` loads trusted Workspace resources in non-interactive RPC mode. Pi therefore uses Owner's default model and authentication, global settings, skills, extensions, full builtin tools, and `~/.pi/agent/sessions/`.
 
-The appended prompt defines Qujing as private colleague consultation, asks Pi to remain read-only, and tells Pi to choose evidence according to the question from relevant code, project documents, Git, Skills, and Agent histories. It does not impose a fixed lookup order. Qujing does not parse, index, merge, or replay other agents' histories; Owner's Pi may inspect relevant records itself using its configured capabilities.
+Optional TanStack ACP Runtime launches the configured ACP-compatible CLI through `@tanstack/ai`, `@tanstack/ai-acp`, `@tanstack/ai-sandbox` local process provider, `@tanstack/ai-persistence`, and `@tanstack/ai/locks`. It uses Qujing Runtime Session ID as TanStack `threadId`, a fresh `runId` per ask, file-backed TanStack messages/runs stores under Gateway state, and a file-backed sandbox instance store. It captures the ACP session ID emitted by the harness and passes it as `modelOptions.sessionId` on later asks. `authMode` defaults to `host`; `permissionMode` defaults to `bypassPermissions`; permissions run headless.
 
-The prompt does not confine filesystem access, filter tools, disable extensions, or mediate Pi actions. This remains a trusted remote-control capability, not a read-only security boundary.
+The appended prompt defines Qujing as private colleague consultation, asks Runtime to remain read-only, and tells Runtime to choose evidence according to the question from relevant code, project documents, Git, Skills, and Agent histories. It does not impose a fixed lookup order. Qujing does not parse, index, merge, or replay other agents' histories; Owner's Runtime may inspect relevant records itself using its configured capabilities.
+
+The prompt does not confine filesystem access, filter tools, disable extensions, or mediate Runtime actions. This remains a trusted remote-control capability, not a read-only security boundary.
 
 ## 6. Gateway lifecycle and errors
 
-Gateway ask timeout is 120 seconds. Pi RPC uses strict LF-delimited JSONL with command IDs. `message_end` is authoritative answer content and `agent_settled` marks completion. Cancellation sends `clear_queue`, then `abort`, waits for `agent_settled`, preserves history, and never retries an accepted prompt. Failure to settle within five seconds causes one fatal Gateway shutdown; within ten-second shutdown window it closes Tailcat, HTTP, MCP, Runtime, and process lock before nonzero exit. User service restarts it.
+Gateway ask timeout is 120 seconds. Default Pi RPC uses strict LF-delimited JSONL with command IDs. `message_end` is authoritative answer content and `agent_settled` marks completion. Pi cancellation sends `clear_queue`, then `abort`, waits for `agent_settled`, preserves history, and never retries an accepted prompt. TanStack ACP cancellation aborts the TanStack chat `AbortController`, which cancels the ACP session and spawned harness process through the local process sandbox. Failure to settle within five seconds causes one fatal Gateway shutdown; within ten-second shutdown window it closes Tailcat, HTTP, MCP, Runtime, and process lock before nonzero exit. User service restarts it.
 
 Agent-facing Client errors identify safe layer and Line without leaking secrets: `UNAUTHORIZED`, `LINE_NOT_FOUND`, `LINE_UNAVAILABLE`, `OWNER_ID_MISMATCH`, `WORKSPACE_NOT_FOUND`, `WORKSPACE_UNAVAILABLE`, `INVALID_QUESTION`, `RUNTIME_UNAVAILABLE`, `RUNTIME_TIMEOUT`, `RUNTIME_FAILED`, `BUSY`, `CANCELLED`. Gateway internal errors retain prior safe MCP codes except Line-local codes. `/healthz` stays bearer-free, minimal, and Gateway-local; it does not probe Pi, Workspaces, Tailcat, or Lines.
 
@@ -142,6 +145,8 @@ qj workspace add|list|update|remove ...
 qj pair create <id> --key ... [--out <path|->]
 qj pair accept <line-id> --from <path|-> [--key <private-key-path>]
 qj pair list|rotate|revoke ...
+qj runtime set-acp <name> --model ... --command ... [--auth <host|api-key>] [--auth-method-id ...] [--permission <default|acceptEdits|bypassPermissions>]
+qj runtime use-pi
 qj line key-create|list|update|remove ...
 qj token rotate
 qj doctor gateway|client [--json]
@@ -149,7 +154,7 @@ qj serve gateway|client
 qj service install|remove gateway|client --yes
 ```
 
-`pair create` requires a live Gateway, creates one remote Gateway Client identity and bearer for exactly one Line, and waits until Gateway applies its distinct Tailcat key before publishing one private pairing bundle. The bundle carries Owner ID, remote Gateway Client ID, Tailcat coordinates, and remote bearer as one exact handoff. `pair accept` reads that bundle from a private file or stdin, derives the standard key path from Line ID unless overridden, verifies the Owner, then persists the Line. `line update` replaces key path and bearer atomically after Gateway rotation. Removing a Line deletes only local routing and credentials; its local ID may be reused later because remote identity and history stay Owner-controlled. `serve gateway` is Owner service. `serve client` is Agent-local MCP service. `doctor` checks selected role configuration, global Pi executable, and transport readiness without starting a model turn or reading Workspace content. Pi model, provider, authentication, settings, tools, skills, and extensions are managed through Owner's normal global Pi; Qujing adds only its fixed Runtime prompt.
+`pair create` requires a live Gateway, creates one remote Gateway Client identity and bearer for exactly one Line, and waits until Gateway applies its distinct Tailcat key before publishing one private pairing bundle. The bundle carries Owner ID, remote Gateway Client ID, Tailcat coordinates, and remote bearer as one exact handoff. `pair accept` reads that bundle from a private file or stdin, derives the standard key path from Line ID unless overridden, verifies the Owner, then persists the Line. `line update` replaces key path and bearer atomically after Gateway rotation. Removing a Line deletes only local routing and credentials; its local ID may be reused later because remote identity and history stay Owner-controlled. `runtime set-acp` switches Gateway to a configured TanStack ACP Runtime and retires active Runtime entries without deleting bindings. `runtime use-pi` removes that override and returns to default global Pi Runtime. `serve gateway` is Owner service. `serve client` is Agent-local MCP service. `doctor` checks selected role configuration, default global Pi executable or configured Runtime, and transport readiness without starting a model turn or reading Workspace content. Pi model, provider, authentication, settings, tools, skills, and extensions are managed through Owner's normal global Pi when default Runtime is used; ACP model and command are managed through Qujing runtime config when TanStack Runtime is used. Qujing always adds only its fixed Runtime prompt.
 
 ## 8. Security
 
@@ -163,7 +168,7 @@ qj service install|remove gateway|client --yes
 
 ## 9. Platform and delivery
 
-Stack remains TypeScript, Bun, Effect 4 RC, `@effect/platform-bun`, Effect Schema, Effect's native MCP server, MCP SDK 1.29.x for the upstream MCP client, global Pi RPC subprocesses, JSON files, Tailcat pinned commit `4d50a34f315d593d03c31f12a20ba8d163cbf321`, and one small Go transport binary. Zod has no source imports; its package remains only because the upstream MCP SDK declares it as a required peer. Bun contract tests and Vitest + `@effect/vitest` cover their respective runtime boundaries. No database, ORM, queue, web UI, vector store, transport plugin interface, or plugin framework.
+Stack remains TypeScript, Bun, Effect 4 RC, `@effect/platform-bun`, Effect Schema, Effect's native MCP server, MCP SDK 1.29.x for the upstream MCP client, global Pi RPC subprocesses, TanStack AI ACP harness packages, JSON files, Tailcat pinned commit `4d50a34f315d593d03c31f12a20ba8d163cbf321`, and one small Go transport binary. Zod has no source imports; its package remains only because the upstream MCP SDK declares it as a required peer. Bun contract tests and Vitest + `@effect/vitest` cover their respective runtime boundaries. No database, ORM, queue, web UI, vector store, transport plugin interface, or plugin framework.
 
 macOS Apple Silicon and Linux x64 are target platforms. Windows x64 cross-build remains **Preview**, pending native ACL, reparse/junction, path case/drive/UNC, Bun, Pi, MCP, Tailcat, Gateway, and Client smoke acceptance. Intel Mac and Linux arm64 unsupported.
 
@@ -180,8 +185,9 @@ New acceptance proves:
 - Agent cannot call `list_workspaces()` or directly configure per-Owner Gateway MCP;
 - Line credentials, transport failure, cancellation, and Runtime history remain isolated;
 - selected ask traverses Agent → Client → Line → Gateway → Runtime and cancellation returns over both hops;
-- Gateway retains internal `list_workspaces()` and `ask({ workspace, question })`, full global Pi Runtime, per-binding Pi session IDs, and restart recovery;
-- Runtime loads the Qujing consultation prompt without replacing Owner tools, extensions, skills, model, authentication, settings, or session store;
+- Gateway retains internal `list_workspaces()` and `ask({ workspace, question })`, default full global Pi Runtime, per-binding Runtime Session IDs, and restart recovery;
+- default Pi Runtime loads the Qujing consultation prompt without replacing Owner tools, extensions, skills, model, authentication, settings, or session store;
+- optional TanStack ACP Runtime loads the same prompt through the configured ACP harness, keeps TanStack transcript/run state under Gateway state, and resumes the captured ACP session ID when available;
 - Gateway and Client services restart and recover new connections; no accepted ask is retried;
 - Windows artifacts and release notes remain Preview.
 

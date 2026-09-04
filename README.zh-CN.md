@@ -5,7 +5,7 @@
 取经让一个 MCP Agent 通过一个本机入口询问多位真实同事。每位同事运行一个 Owner Gateway，并手动注册自己的 Workspaces。询问方的 Client 为每位 Owner 私密保存一条 **Line**；只有 Agent 明确提供 Line 和 Workspace ID 时才路由请求。
 
 ```text
-Agent → 本机 Client MCP → 指定 Line/Tailcat → Owner Gateway → Pi → Workspace
+Agent → 本机 Client MCP → 指定 Line/Tailcat → Owner Gateway → Runtime → Workspace
 ```
 
 没有自动路由、共享知识索引、公开 Gateway，也不要求 Agent 为每位 Owner 分别配置 MCP Server。
@@ -23,7 +23,7 @@ Agent 使用一个本机 bearer 认证。MCP tool-call timeout 至少设为 **13
 
 ## 角色
 
-- **Owner（部署方）**运行 Gateway、Pi Runtime 和 Workspaces。
+- **Owner（部署方）**运行 Gateway、Runtime 和 Workspaces。
 - **Client（接入方）**运行一个本机 MCP 服务，并私密管理通往多位 Owner 的 Lines。
 - **Agent（调用方）**默认只连接 `http://127.0.0.1:43111/mcp`。
 
@@ -77,7 +77,7 @@ bunx --bun skills add "JinJieBeWater/qujing@v$(qj --version)" --skill qujing-set
 
 ## 最小安装流程
 
-两种安装方式都会配套安装同一发布版本的 `qj` 与 `qujing-transport`。Owner 机器还必须能从 `PATH` 运行日常使用的全局 `pi` CLI。
+两种安装方式都会配套安装同一发布版本的 `qj` 与 `qujing-transport`。默认 Runtime 还要求 Owner 机器能从 `PATH` 运行日常使用的全局 `pi` CLI。也可以用 `qj runtime set-acp` 改为 TanStack AI ACP harness。
 
 ### 1. 启动 Owner Gateway
 
@@ -85,6 +85,17 @@ bunx --bun skills add "JinJieBeWater/qujing@v$(qj --version)" --skill qujing-set
 qj init gateway --owner-id jinjiebewater --owner-name JinJieBeWater
 qj workspace add pi-tooling --name "Pi Tooling" --root ~/src/pi --summary "Pi SDK and extensions"
 ```
+
+可选：用 ACP-compatible TanStack AI harness 替换默认 Pi Runtime：
+
+```bash
+qj runtime set-acp codex \
+  --model gpt-5-codex \
+  --command 'codex --acp --model {model} --cwd {cwd}' \
+  --auth host
+```
+
+用 `qj runtime use-pi` 切回默认全局 Pi Runtime。
 
 在独立 Owner 终端启动并保持 Gateway：
 
@@ -145,10 +156,11 @@ Client 确认导入后，Owner 也要删除源文件 `alice-jinjiebewater.pairin
 - Gateway、Client 和临时 Connectors 只绑定 loopback；Tailcat 只转发 Gateway port。
 - Agent 本机 bearer 与每条 Line 的 Tailcat key、remote bearer 均独立。
 - Client 每次重建 upstream MCP session 都验证 expected Owner ID。
-- Gateway 直接运行 Owner 的完整全局 `pi --mode rpc --approve`，使用默认模型、认证、settings、skills、extensions、builtin tools 和 `~/.pi/agent/sessions/`。
-- 取经只附加固定咨询提示词，引导 Pi 按问题获取相关上下文并保持只读行为；它不替换或过滤 Owner 的 Pi 配置。提示词是行为指导，不是安全边界。
-- 每个已配对 remote Gateway Client 因此获得 Owner-level Pi 能力，包括 shell、文件修改，以及 Pi 选择访问时的 Workspace 外内容。
-- Runtime Session ID 仍按 remote Gateway Client 与 Workspace 隔离。撤销只删除绑定，不删除 Owner 的全局 Pi archive。
+- 默认 Gateway Runtime 直接运行 Owner 的完整全局 `pi --mode rpc --approve`，使用默认模型、认证、settings、skills、extensions、builtin tools 和 `~/.pi/agent/sessions/`。
+- 可选 TanStack ACP Runtime 通过 `@tanstack/ai`、`@tanstack/ai-acp`、local process sandbox、TanStack persistence 和 TanStack locks 运行配置的 ACP-compatible CLI。
+- 取经只附加固定咨询提示词，引导 Runtime 按问题获取相关上下文并保持只读行为；它不替换或过滤 Runtime 配置。提示词是行为指导，不是安全边界。
+- 每个已配对 remote Gateway Client 因此获得 Owner-level Runtime 能力，包括 shell、文件修改，以及 Runtime 选择访问时的 Workspace 外内容。
+- Runtime Session ID 仍按 remote Gateway Client 与 Workspace 隔离。撤销只删除绑定，不删除 Owner 的全局 Pi archive 或 TanStack transcript state。
 - 取经默认日志不记录凭据、地址、roots、问题、回答或文件内容。
 
 ## 运维

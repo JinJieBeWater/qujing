@@ -37,7 +37,9 @@ Gateway 与 Client server 各持有一个根 `Scope`。关闭根 Scope 会停止
 | `config.ts`、`client-config.ts`、`runtime/sessions.ts` | Schema 解码、私密文件读写、锁内更新与 binding 持久化                     |
 | `private-files.ts`                                     | 私密目录、原子写入和 scoped 跨进程锁的直接 Effect 接口                   |
 | `runtime/pi-rpc.ts`                                    | scoped Pi 子进程、JSONL 命令、turn settlement、取消和释放                |
-| `runtime/pi-runtime.ts`                                | 每 binding 串行、容量 reservation、进程复用、retirement 和 idle eviction |
+| `runtime/tanstack-acp.ts`                              | TanStack AI ACP harness、local process sandbox、prompt 和取消            |
+| `runtime/tanstack-persistence.ts`                      | TanStack messages/runs 和 sandbox instance 的 file-backed stores         |
+| `runtime/runtime-pool.ts`                              | 每 binding 串行、容量 reservation、后端复用、retirement 和 idle eviction |
 | `runtime/coordinator.ts`                               | ask admission、lease、配置 reconciliation 和 binding 清理                |
 | `line-runtime.ts`                                      | Connector 与 upstream MCP 的 lazy verified session 和有序关闭            |
 | `client-application.ts`                                | 多 Line reconciliation、隔离、lease 和路由                               |
@@ -49,23 +51,24 @@ Gateway 与 Client server 各持有一个根 `Scope`。关闭根 Scope 会停止
 - Agent-facing MCP 只公开 `list_lines()` 与 `ask({ line, workspace, question })`。
 - Gateway MCP 只公开 `list_workspaces()` 与 `ask({ workspace, question })`。
 - 同一 `remote Gateway Client + Workspace` 串行；不同 binding 可并发。
-- Gateway 运行 Owner 的全局 Pi，不覆盖模型、认证、settings、tools、extensions、skills 或 session store。
+- Gateway 默认运行 Owner 的全局 Pi，不覆盖模型、认证、settings、tools、extensions、skills 或 session store；可选 TanStack ACP Runtime 运行配置的 ACP-compatible CLI。
 - Pi RPC 使用严格 LF JSONL、command ID、`message_end` 和 `agent_settled`。
 - 已接受 turn 的取消顺序为 `clear_queue -> abort -> agent_settled`；五秒未 settle 触发 fatal shutdown。
 - 已被 Pi 或远端 Gateway 接受的 `ask` 不重试。
-- credential rotation 保留 Pi session ID；Client revoke 和 Workspace remove 只删 binding，不删 Pi archive。
+- credential rotation 保留 Runtime Session ID；Client revoke 和 Workspace remove 只删 binding，不删默认 Pi archive 或 TanStack state。
 - Line 的身份验证、失败、取消和 Runtime 历史彼此隔离。
 - 公开错误码、MCP metadata、CLI 和 release 产物保持兼容。
 
 ## 资源所有权
 
-| 资源                              | 所有者                  | 释放                                   |
-| --------------------------------- | ----------------------- | -------------------------------------- |
-| 全局 Pi 子进程                    | Runtime Session Scope   | `SIGTERM`，一秒后 `SIGKILL`            |
-| Pi turn                           | 单次 ask Fiber          | interruption 时执行完整取消序列        |
-| Connector 与 upstream MCP         | Line session Scope      | 先关闭 MCP，再关闭 Client 与 Connector |
-| Runtime/Line worker               | Gateway/Client 根 Scope | interrupt、等待 settlement、关闭资源   |
-| reload、MCP、server、process lock | 应用根 Scope            | 按协议顺序关闭                         |
+| 资源                              | 所有者                  | 释放                                     |
+| --------------------------------- | ----------------------- | ---------------------------------------- |
+| 全局 Pi 子进程                    | Runtime Session Scope   | `SIGTERM`，一秒后 `SIGKILL`              |
+| TanStack ACP harness process      | TanStack local sandbox  | `AbortController` / sandbox process kill |
+| Pi turn                           | 单次 ask Fiber          | interruption 时执行完整取消序列          |
+| Connector 与 upstream MCP         | Line session Scope      | 先关闭 MCP，再关闭 Client 与 Connector   |
+| Runtime/Line worker               | Gateway/Client 根 Scope | interrupt、等待 settlement、关闭资源     |
+| reload、MCP、server、process lock | 应用根 Scope            | 按协议顺序关闭                           |
 
 清理必须有界。协议有顺序要求时使用顺序 finalizer；无依赖资源才并行释放。Effect interruption 在公开 Promise 边界映射回原 `AbortSignal.reason`，不泄漏 `FiberFailure`。
 

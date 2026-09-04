@@ -14,11 +14,13 @@ import {
   GatewayConfig as GatewayConfigSchema,
   Identifier,
   NonEmptyString,
+  RuntimeConfig as RuntimeConfigSchema,
   Tombstones as TombstonesSchema,
   Workspace as WorkspaceSchema,
   type ClientIdentity,
   type GatewayConfig,
   type Owner,
+  type RuntimeConfig,
   type Workspace,
 } from "./schemas";
 
@@ -26,6 +28,7 @@ const parseConfig = decode(GatewayConfigSchema);
 const parseWorkspace = decode(WorkspaceSchema);
 const parseGatewayClient = decode(GatewayClientSchema);
 const parseTombstones = decode(TombstonesSchema);
+const parseRuntimeConfig = decode(RuntimeConfigSchema);
 const parseIdentifier = decode(Identifier);
 const parseNonEmptyString = decode(NonEmptyString);
 
@@ -53,6 +56,8 @@ export interface ClientInput {
   id: string;
   tailcatKey: string;
 }
+
+export type RuntimeInput = RuntimeConfig;
 
 const DEFAULT_PORT = 43_110;
 
@@ -321,6 +326,28 @@ export class ConfigStore {
         }),
       );
     });
+  }
+
+  setRuntimeEffect(input: RuntimeInput) {
+    return Effect.gen({ self: this }, function* () {
+      const runtime = yield* Effect.sync(() => parseRuntimeConfig(input));
+      yield* this.withLockEffect(
+        Effect.gen({ self: this }, function* () {
+          const config = yield* this.readEffect();
+          yield* this.writeJsonEffect(this.configPath, parseConfig({ ...config, runtime }));
+        }),
+      );
+    });
+  }
+
+  usePiRuntimeEffect() {
+    return this.withLockEffect(
+      Effect.gen({ self: this }, function* () {
+        const config = yield* this.readEffect();
+        const { runtime: _runtime, ...next } = config;
+        yield* this.writeJsonEffect(this.configPath, parseConfig(next));
+      }),
+    );
   }
 
   authenticateEffect(bearer: string) {

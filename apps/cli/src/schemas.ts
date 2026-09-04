@@ -49,10 +49,30 @@ export const GatewayClient = Schema.Struct({
   updatedAt: Timestamp,
 });
 
+export const TANSTACK_ACP_AUTH_MODES = ["host", "api-key"] as const;
+export const TANSTACK_ACP_PERMISSION_MODES = [
+  "default",
+  "acceptEdits",
+  "bypassPermissions",
+] as const;
+
+export const TanStackAcpRuntime = Schema.Struct({
+  kind: Schema.Literal("tanstack-acp"),
+  name: Identifier,
+  model: NonEmptyString,
+  command: NonEmptyString,
+  authMode: Schema.optionalKey(Schema.Literals(TANSTACK_ACP_AUTH_MODES)),
+  authMethodId: Schema.optionalKey(NonEmptyString),
+  permissionMode: Schema.optionalKey(Schema.Literals(TANSTACK_ACP_PERMISSION_MODES)),
+});
+
+export const RuntimeConfig = TanStackAcpRuntime;
+
 export const GatewayConfig = Schema.Struct({
   version: Schema.Literal(1),
   owner: Owner,
   server: Server,
+  runtime: Schema.optionalKey(RuntimeConfig),
   workspaces: Schema.Array(Workspace),
   clients: Schema.Array(GatewayClient),
 });
@@ -205,6 +225,8 @@ export const Question = Schema.String.check(
 );
 
 export type GatewayConfig = typeof GatewayConfig.Type;
+export type RuntimeConfig = typeof RuntimeConfig.Type;
+export type TanStackAcpRuntime = typeof TanStackAcpRuntime.Type;
 export type Workspace = typeof Workspace.Type;
 export type Tombstones = typeof Tombstones.Type;
 export type ClientConfig = typeof ClientConfig.Type;

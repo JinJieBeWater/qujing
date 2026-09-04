@@ -8,8 +8,11 @@ import { createMcpGateway } from "./mcp";
 import { assertPrivatePathEffect, assertPrivateTreeEffect } from "./private-files";
 import { acquireGatewayLockEffect } from "./process-lock";
 import { RuntimeCoordinator } from "./runtime/coordinator";
-import { PiRuntime } from "./runtime/pi-runtime";
+import { RuntimePool } from "./runtime/runtime-pool";
+import { startManagedPiRpcSessionEffect } from "./runtime/pi-rpc";
 import { RuntimeSessionStore } from "./runtime/sessions";
+import type { RuntimeAgentSession } from "./runtime/session";
+import { createTanStackAcpSessionFactory } from "./runtime/tanstack-acp";
 import { TailcatSupervisor } from "./transport/supervisor";
 
 interface ServerOptions {
@@ -46,7 +49,18 @@ export function startServerEffect(paths: ServerOptions, scope: Scope.Scope) {
       paths.fatal ?? (() => process.exit(1)),
       paths.fatalShutdownTimeoutMs,
     );
-    const runtime = yield* PiRuntime.createEffect({ fatal });
+    const tanStackSession = createTanStackAcpSessionFactory({ stateRoot: paths.stateRoot });
+    const runtime = yield* RuntimePool.createEffect({
+      fatal,
+      createSessionEffect: (workspace, session) =>
+        Ref.get(current).pipe(
+          Effect.flatMap((effective): Effect.Effect<RuntimeAgentSession, unknown> => {
+            if (effective.runtime?.kind === "tanstack-acp")
+              return tanStackSession(workspace, session, effective.runtime);
+            return startManagedPiRpcSessionEffect({ cwd: workspace.root, sessionId: session.id });
+          }),
+        ),
+    });
     const resources = yield* Effect.acquireRelease(
       RuntimeCoordinator.createEffect({
         config,
