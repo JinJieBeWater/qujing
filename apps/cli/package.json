@@ -15,6 +15,11 @@
   "dependencies": {
     "@effect/platform-bun": "4.0.0-rc.112",
     "@modelcontextprotocol/sdk": "1.29.0",
+    "@tanstack/ai": "0.53.0",
+    "@tanstack/ai-acp": "0.3.9",
+    "@tanstack/ai-persistence": "0.5.6",
+    "@tanstack/ai-sandbox": "0.5.6",
+    "@tanstack/ai-sandbox-local-process": "0.2.5",
     "effect": "4.0.0-rc.112",
     "zod": "4.1.12"
   },

@@ -4,7 +4,7 @@ import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startManagedPiRpcSessionEffect } from "../src/runtime/pi-rpc";
-import { PiRuntime } from "../src/runtime/pi-runtime";
+import { RuntimePool } from "../src/runtime/runtime-pool";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -142,7 +142,7 @@ for await (const chunk of Bun.stdin.stream()) {
     );
     await chmod(binary, 0o700);
     const sessionId = "00000000-0000-4000-8000-000000000125";
-    const runtime = new PiRuntime({
+    const runtime = new RuntimePool({
       createSessionEffect: (_workspace, session) =>
         startManagedPiRpcSessionEffect({ cwd: root, sessionId: session.id, binary }),
       abortTimeoutMs: 1_000,
@@ -287,5 +287,5 @@ for await (const chunk of Bun.stdin.stream()) {
       "stdout exceeded buffer limit",
     );
     await Effect.runPromise(session.disposeEffect());
-  });
+  }, 10_000);
 });

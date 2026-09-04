@@ -25,7 +25,13 @@ import {
   purgeWorkspaceRuntimeSessionsEffect,
 } from "./runtime/cleanup";
 import { RuntimeSessionStore } from "./runtime/sessions";
-import { decode, LinePairing as LinePairingSchema, type LinePairing } from "./schemas";
+import {
+  decode,
+  LinePairing as LinePairingSchema,
+  TANSTACK_ACP_AUTH_MODES,
+  TANSTACK_ACP_PERMISSION_MODES,
+  type LinePairing,
+} from "./schemas";
 import { currentServeCommand, installUserServiceEffect, removeUserServiceEffect } from "./service";
 import { startServerEffect } from "./server";
 import {
@@ -65,6 +71,7 @@ Commands:
   init <gateway|client>
   workspace <add|list|update|remove>
   pair <create|accept|list|rotate|revoke>
+  runtime <set-acp|use-pi>
   line <key-create|list|update|remove>
   token rotate
   doctor <gateway|client>
@@ -91,6 +98,11 @@ Examples:
 
 Examples:
   qj pair list --json`,
+  runtime: `Usage: qj runtime <set-acp|use-pi>
+
+Examples:
+  qj runtime set-acp codex --model gpt-5-codex --command 'codex --acp --model {model} --cwd {cwd}' --auth host
+  qj runtime use-pi`,
   line: `Usage: qj line <key-create|list|update|remove>
 
 Examples:
@@ -167,6 +179,16 @@ Examples:
 
 Examples:
   qj pair revoke alice-line --yes
+`,
+  "runtime set-acp": `Usage: qj runtime set-acp <name> --model <model> --command <command> [--auth <host|api-key>] [--auth-method-id <id>] [--permission <default|acceptEdits|bypassPermissions>]
+
+Examples:
+  qj runtime set-acp codex --model gpt-5-codex --command 'codex --acp --model {model} --cwd {cwd}' --auth host
+`,
+  "runtime use-pi": `Usage: qj runtime use-pi
+
+Examples:
+  qj runtime use-pi
 `,
   "line key-create": `Usage: qj line key-create <line-id> [--output <private-key-path>]
 
@@ -436,6 +458,42 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         out(io, `revoked remote-client: ${id}`);
         return 0;
       }
+      case "runtime set-acp": {
+        const name = positional(parsed, 0, help[command]!);
+        const authMode = optionalLiteral(
+          parsed.values.get("auth"),
+          TANSTACK_ACP_AUTH_MODES,
+          help[command]!,
+        );
+        const permissionMode = optionalLiteral(
+          parsed.values.get("permission"),
+          TANSTACK_ACP_PERMISSION_MODES,
+          help[command]!,
+        );
+        yield* store.setRuntimeEffect({
+          kind: "tanstack-acp",
+          name,
+          model: required(parsed, "model", help[command]!),
+          command: required(parsed, "command", help[command]!),
+          ...(authMode === undefined ? {} : { authMode }),
+          ...(parsed.values.get("auth-method-id") === undefined
+            ? {}
+            : { authMethodId: parsed.values.get("auth-method-id")! }),
+          ...(permissionMode === undefined ? {} : { permissionMode }),
+        });
+        out(io, `runtime: tanstack-acp\nagent: ${name}`);
+        yield* waitIfGatewayRunningEffect(
+          store,
+          io,
+          (config) => config.runtime?.kind === "tanstack-acp" && config.runtime.name === name,
+        );
+        return 0;
+      }
+      case "runtime use-pi":
+        yield* store.usePiRuntimeEffect();
+        out(io, "runtime: pi");
+        yield* waitIfGatewayRunningEffect(store, io, (config) => config.runtime === undefined);
+        return 0;
       case "doctor gateway":
         return printDoctor(io, yield* runDoctorEffect(io), parsed.flags.has("json"));
       case "serve gateway": {
@@ -663,6 +721,11 @@ const commandSpecs: Record<string, CommandSpec> = {
     flags: ["yes"],
   },
   "pair revoke": { positionals: 1, flags: ["yes"] },
+  "runtime set-acp": {
+    positionals: 1,
+    values: ["model", "command", "auth", "auth-method-id", "permission"],
+  },
+  "runtime use-pi": { positionals: 0 },
   "line key-create": { positionals: 1, values: ["output"] },
   "line list": { positionals: 0, flags: ["json"] },
   "line update": {
@@ -692,6 +755,8 @@ const gatewayCommands = new Set([
   "pair list",
   "pair rotate",
   "pair revoke",
+  "runtime set-acp",
+  "runtime use-pi",
   "doctor gateway",
   "serve gateway",
   "service install gateway",
@@ -761,6 +826,16 @@ function required(parsed: ParsedArgs, name: string, usage: string): string {
   const value = parsed.values.get(name);
   if (value === undefined) throw new UsageError(`Missing required --${name}\n\n${usage}`);
   return value;
+}
+
+function optionalLiteral<T extends string>(
+  value: string | undefined,
+  allowed: readonly T[],
+  usage: string,
+): T | undefined {
+  if (value === undefined) return undefined;
+  if ((allowed as readonly string[]).includes(value)) return value as T;
+  throw new UsageError(usage);
 }
 
 function positional(parsed: ParsedArgs, index: number, usage: string): string {

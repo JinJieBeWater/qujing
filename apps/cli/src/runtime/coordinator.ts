@@ -4,7 +4,7 @@ import type { Config, ConfigStore } from "../config";
 import { QujingError } from "../errors";
 import { Question, decode, type ClientIdentity } from "../schemas";
 import { purgeRemovedRuntimeSessionsEffect } from "./cleanup";
-import { PiRuntime } from "./pi-runtime";
+import { RuntimePool } from "./runtime-pool";
 import { RuntimeSessionStore } from "./sessions";
 
 const decodeQuestion = decode(Question);
@@ -29,7 +29,7 @@ interface CoordinatorState {
 export interface RuntimeCoordinatorOptions {
   config: ConfigStore;
   sessions: RuntimeSessionStore;
-  runtime: PiRuntime;
+  runtime: RuntimePool;
   desired: Config;
 }
 
@@ -196,14 +196,23 @@ export class RuntimeCoordinator {
   private reconcileNowEffect(next: Config) {
     return Effect.gen({ self: this }, function* () {
       const desired = (yield* Ref.get(this.state)).desired;
-      const affectedClients = new Set([
+      const runtimeChanged = runtimeConfigChanged(desired, next);
+      const removedOrChangedClients = [
         ...removedIds(desired.clients, next.clients),
         ...changedClientIds(desired, next),
-      ]);
-      const affectedWorkspaces = new Set([
+      ];
+      const removedOrChangedWorkspaces = [
         ...removedIds(desired.workspaces, next.workspaces),
         ...changedWorkspaceIds(desired, next),
-      ]);
+      ];
+      const affectedClients = new Set(
+        runtimeChanged ? desired.clients.map((client) => client.id) : removedOrChangedClients,
+      );
+      const affectedWorkspaces = new Set(
+        runtimeChanged
+          ? desired.workspaces.map((workspace) => workspace.id)
+          : removedOrChangedWorkspaces,
+      );
       const leases = yield* this.withGateEffect(
         Ref.modify(this.state, (state) => {
           const active = [...state.leases.values()].filter(
@@ -242,7 +251,7 @@ export class RuntimeCoordinator {
         {
           clientIds: next.clients.map(({ id }) => id),
           workspaceIds: next.workspaces
-            .filter(({ id }) => !affectedWorkspaces.has(id))
+            .filter(({ id }) => !removedOrChangedWorkspaces.includes(id))
             .map(({ id }) => id),
         },
         this.options.sessions,
@@ -307,4 +316,8 @@ function changedWorkspaceIds(previous: Config, next: Config): string[] {
       (workspace) => current.has(workspace.id) && current.get(workspace.id) !== workspace.root,
     )
     .map((workspace) => workspace.id);
+}
+
+function runtimeConfigChanged(previous: Config, next: Config): boolean {
+  return JSON.stringify(previous.runtime ?? null) !== JSON.stringify(next.runtime ?? null);
 }

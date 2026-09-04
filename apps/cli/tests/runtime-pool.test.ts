@@ -1,7 +1,7 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
-import type { PiRpcSessionEffect } from "../src/runtime/pi-rpc";
-import { makePiRuntime } from "./helpers/pi-runtime";
+import type { RuntimeAgentSession } from "../src/runtime/session";
+import { makeRuntimePool } from "./helpers/runtime-pool";
 
 const workspace = { id: "docs", name: "Docs", summary: "Docs", root: "/tmp/docs" };
 const runtimeSession = {
@@ -18,12 +18,12 @@ function input(question: string, signal = new AbortController().signal) {
   return { workspace, session: runtimeSession, question, signal };
 }
 
-describe("PiRuntime", () => {
+describe("RuntimePool", () => {
   test("serializes turns in one runtime session", async () => {
     let active = 0;
     let maximum = 0;
     let answer = "";
-    const session: PiRpcSessionEffect = {
+    const session: RuntimeAgentSession = {
       promptEffect: (question) =>
         Effect.promise(async () => {
           active++;
@@ -39,7 +39,7 @@ describe("PiRuntime", () => {
       waitForIdleEffect: () => Effect.void,
       disposeEffect: () => Effect.void,
     };
-    const runtime = makePiRuntime({ createSessionEffect: () => Effect.succeed(session) });
+    const runtime = makeRuntimePool({ createSessionEffect: () => Effect.succeed(session) });
 
     const results = await Promise.all([
       Effect.runPromise(runtime.answerEffect(input("one"))),
@@ -74,7 +74,7 @@ describe("PiRuntime", () => {
         abortCount++;
         rejectPrompt?.(new DOMException("Aborted", "AbortError"));
       });
-    const runtime = makePiRuntime({ createSessionEffect: () => Effect.succeed(session) });
+    const runtime = makeRuntimePool({ createSessionEffect: () => Effect.succeed(session) });
     const pending = Effect.runPromise(runtime.answerEffect(input("hello", controller.signal)));
     await sleep(1);
 
@@ -101,7 +101,7 @@ describe("PiRuntime", () => {
       Effect.promise(async () => {
         resolvePrompt?.();
       });
-    const runtime = makePiRuntime({ createSessionEffect: () => Effect.succeed(session) });
+    const runtime = makeRuntimePool({ createSessionEffect: () => Effect.succeed(session) });
     const pending = Effect.runPromise(runtime.answerEffect(input("hello", controller.signal)));
     await sleep(1);
 
@@ -116,7 +116,7 @@ describe("PiRuntime", () => {
     const session = fakeSession();
     session.promptEffect = () => Effect.never;
     session.waitForIdleEffect = () => Effect.never;
-    const runtime = makePiRuntime({
+    const runtime = makeRuntimePool({
       createSessionEffect: () => Effect.succeed(session),
       abortTimeoutMs: 10,
       fatal: (error) => {
@@ -138,7 +138,7 @@ describe("PiRuntime", () => {
     const session = fakeSession();
     session.promptEffect = () => Effect.never;
     session.clearQueueEffect = () => Effect.never;
-    const runtime = makePiRuntime({
+    const runtime = makeRuntimePool({
       createSessionEffect: () => Effect.succeed(session),
       abortTimeoutMs: 10,
       fatal: (error) => {
@@ -157,7 +157,7 @@ describe("PiRuntime", () => {
 
   test("releases a Runtime slot after creation fails", async () => {
     let attempts = 0;
-    const runtime = makePiRuntime({
+    const runtime = makeRuntimePool({
       maxRuntimes: 1,
       createSessionEffect: () =>
         Effect.tryPromise({
@@ -202,7 +202,7 @@ describe("PiRuntime", () => {
         catch: (error) => error as Error,
       });
     dead.isAlive = () => alive;
-    const runtime = makePiRuntime({
+    const runtime = makeRuntimePool({
       maxRuntimes: 1,
       createSessionEffect: () =>
         Effect.promise(async () => {
@@ -244,7 +244,7 @@ describe("PiRuntime", () => {
       });
     session.getLastAssistantText = () => answer;
     const timeoutControllers: AbortController[] = [];
-    const runtime = makePiRuntime({
+    const runtime = makeRuntimePool({
       createSessionEffect: () => Effect.succeed(session),
       createTimeoutSignal: () => {
         const controller = new AbortController();
@@ -279,7 +279,7 @@ describe("PiRuntime", () => {
         firstStarted();
         await firstGate;
       });
-    const runtime = makePiRuntime({
+    const runtime = makeRuntimePool({
       createSessionEffect: () => Effect.succeed(session),
       queueCapacity: 1,
     });
@@ -305,7 +305,7 @@ describe("PiRuntime", () => {
       Effect.promise(async () => {
         disposals++;
       });
-    const runtime = makePiRuntime({
+    const runtime = makeRuntimePool({
       createSessionEffect: () => Effect.succeed(session),
       idleTimeoutMs: 10,
       now: () => now,
@@ -331,7 +331,7 @@ describe("PiRuntime", () => {
       Effect.promise(async () => {
         disposals++;
       });
-    const runtime = makePiRuntime({ createSessionEffect: () => Effect.succeed(session) });
+    const runtime = makeRuntimePool({ createSessionEffect: () => Effect.succeed(session) });
     await Effect.runPromise(runtime.answerEffect(input("hello")));
 
     await Effect.runPromise(runtime.disposeClientEffect("client"));
@@ -349,7 +349,7 @@ describe("PiRuntime", () => {
     const barrier = new Promise<void>((resolve) => {
       release = resolve;
     });
-    const runtime = makePiRuntime({
+    const runtime = makeRuntimePool({
       createSessionEffect: () =>
         Effect.promise(async () => {
           started++;
@@ -395,7 +395,7 @@ describe("PiRuntime", () => {
         disposalStarted();
         await disposalGate;
       });
-    const runtime = makePiRuntime({
+    const runtime = makeRuntimePool({
       maxRuntimes: 1,
       createSessionEffect: () =>
         Effect.promise(async () => {
@@ -445,7 +445,7 @@ describe("PiRuntime", () => {
   test("fails shutdown within a bound when session creation never settles", async () => {
     const controller = new AbortController();
     let fatal: Error | undefined;
-    const runtime = makePiRuntime({
+    const runtime = makeRuntimePool({
       createSessionEffect: () => Effect.never,
       creationRetireTimeoutMs: 10,
       fatal: (error) => {
@@ -464,7 +464,7 @@ describe("PiRuntime", () => {
   });
 });
 
-function fakeSession(): PiRpcSessionEffect {
+function fakeSession(): RuntimeAgentSession {
   return {
     promptEffect: () => Effect.void,
     isAlive: () => true,

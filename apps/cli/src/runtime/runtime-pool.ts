@@ -2,10 +2,10 @@ import { Duration, Effect, Exit, Fiber, Scope, Semaphore } from "effect";
 import type { WorkspaceConfig } from "../config";
 import { ABORT_SETTLE_TIMEOUT_MS, ASK_TIMEOUT_MS } from "../constants";
 import { QujingError } from "../errors";
-import { startManagedPiRpcSessionEffect, type PiRpcSessionEffect } from "./pi-rpc";
 import type { RuntimeSession } from "./sessions";
+import type { RuntimeAgentSession } from "./session";
 
-export interface PiRuntimeAnswerInput {
+export interface RuntimePoolAnswerInput {
   workspace: WorkspaceConfig;
   session: RuntimeSession;
   question: string;
@@ -13,7 +13,7 @@ export interface PiRuntimeAnswerInput {
 }
 
 interface RuntimeEntry {
-  session: PiRpcSessionEffect;
+  session: RuntimeAgentSession;
   clientId: string;
   workspaceId: string;
   turnGate: Semaphore.Semaphore;
@@ -29,11 +29,11 @@ interface RuntimeCreation {
   fiber: Fiber.Fiber<RuntimeEntry, unknown>;
 }
 
-export interface PiRuntimeOptions {
+export interface RuntimePoolOptions {
   createSessionEffect(
     workspace: WorkspaceConfig,
     session: RuntimeSession,
-  ): Effect.Effect<PiRpcSessionEffect, unknown>;
+  ): Effect.Effect<RuntimeAgentSession, unknown>;
   maxRuntimes?: number;
   queueCapacity?: number;
   idleTimeoutMs?: number;
@@ -54,7 +54,7 @@ type TurnDecision =
   | { readonly kind: "retry" }
   | { readonly kind: "dead" };
 
-export class PiRuntime {
+export class RuntimePool {
   readonly self = this;
   private readonly entries = new Map<string, RuntimeEntry>();
   private readonly creations = new Map<string, RuntimeCreation>();
@@ -65,32 +65,18 @@ export class PiRuntime {
   private occupied = 0;
   private disposed = false;
 
-  constructor(private readonly options: PiRuntimeOptions) {
+  constructor(private readonly options: RuntimePoolOptions) {
     process.umask(0o077);
     this.sweepFiber = Effect.runSync(
       Effect.forkIn(this.sweepLoopEffect(), this.scope, { startImmediately: true }),
     );
   }
 
-  static createEffect(
-    options: {
-      fatal?: (error: Error) => void;
-    } = {},
-  ) {
-    return Effect.sync(
-      () =>
-        new PiRuntime({
-          ...(options.fatal === undefined ? {} : { fatal: options.fatal }),
-          createSessionEffect: (workspace, session) =>
-            startManagedPiRpcSessionEffect({
-              cwd: workspace.root,
-              sessionId: session.id,
-            }),
-        }),
-    );
+  static createEffect(options: RuntimePoolOptions) {
+    return Effect.sync(() => new RuntimePool(options));
   }
 
-  answerEffect(input: PiRuntimeAnswerInput): Effect.Effect<{ answer: string }, unknown> {
+  answerEffect(input: RuntimePoolAnswerInput): Effect.Effect<{ answer: string }, unknown> {
     const timeoutSignal = (this.options.createTimeoutSignal ?? AbortSignal.timeout)(
       this.options.askTimeoutMs ?? ASK_TIMEOUT_MS,
     );
@@ -105,7 +91,9 @@ export class PiRuntime {
     );
   }
 
-  private runAnswerEffect(input: PiRuntimeAnswerInput): Effect.Effect<{ answer: string }, unknown> {
+  private runAnswerEffect(
+    input: RuntimePoolAnswerInput,
+  ): Effect.Effect<{ answer: string }, unknown> {
     return Effect.gen(this, function* () {
       while (true) {
         const entry = yield* this.getEntryEffect(input.workspace, input.session);
@@ -197,16 +185,16 @@ export class PiRuntime {
     );
   }
 
-  private abortSessionEffect(session: PiRpcSessionEffect): Effect.Effect<void, unknown> {
+  private abortSessionEffect(session: RuntimeAgentSession): Effect.Effect<void, unknown> {
     return this.clearQueueSessionEffect(session).pipe(
-      Effect.andThen(this.abortPiSessionEffect(session)),
+      Effect.andThen(this.abortRuntimeSessionEffect(session)),
       Effect.andThen(this.waitForIdleSessionEffect(session)),
       Effect.catch((cause) =>
-        this.fatalFailureEffect(new Error("Pi Runtime abort failed", { cause })),
+        this.fatalFailureEffect(new Error("Runtime abort failed", { cause })),
       ),
       Effect.timeoutOrElse({
         duration: Duration.millis(this.options.abortTimeoutMs ?? ABORT_SETTLE_TIMEOUT_MS),
-        orElse: () => this.fatalFailureEffect(new Error("Pi Runtime did not settle after abort")),
+        orElse: () => this.fatalFailureEffect(new Error("Runtime did not settle after abort")),
       }),
     );
   }
@@ -270,7 +258,7 @@ export class PiRuntime {
     creation: RuntimeCreation,
     evicted?: RuntimeEntry,
   ): Effect.Effect<RuntimeEntry, unknown> {
-    let managed: PiRpcSessionEffect | undefined;
+    let managed: RuntimeAgentSession | undefined;
     let committed = false;
     return Effect.gen(this, function* () {
       if (evicted) yield* this.disposeSessionEffect(evicted.session);
@@ -315,7 +303,7 @@ export class PiRuntime {
           }
           if (creation.retired || this.disposed) return yield* Effect.fail(error);
           return yield* Effect.fail(
-            new QujingError("RUNTIME_UNAVAILABLE", "Could not start Pi Runtime", {
+            new QujingError("RUNTIME_UNAVAILABLE", "Could not start Runtime", {
               cause: error,
             }),
           );
@@ -458,7 +446,7 @@ export class PiRuntime {
         duration: Duration.millis(this.options.creationRetireTimeoutMs ?? ABORT_SETTLE_TIMEOUT_MS),
         orElse: () =>
           this.fatalFailureEffect(
-            new Error("Pi Runtime Session creation did not settle during retirement"),
+            new Error("Runtime Session creation did not settle during retirement"),
           ),
       }),
     );
@@ -517,23 +505,23 @@ export class PiRuntime {
     });
   }
 
-  private promptSessionEffect(session: PiRpcSessionEffect, question: string) {
+  private promptSessionEffect(session: RuntimeAgentSession, question: string) {
     return session.promptEffect(question);
   }
 
-  private clearQueueSessionEffect(session: PiRpcSessionEffect) {
+  private clearQueueSessionEffect(session: RuntimeAgentSession) {
     return session.clearQueueEffect();
   }
 
-  private abortPiSessionEffect(session: PiRpcSessionEffect) {
+  private abortRuntimeSessionEffect(session: RuntimeAgentSession) {
     return session.abortEffect();
   }
 
-  private waitForIdleSessionEffect(session: PiRpcSessionEffect) {
+  private waitForIdleSessionEffect(session: RuntimeAgentSession) {
     return session.waitForIdleEffect();
   }
 
-  private disposeSessionEffect(session: PiRpcSessionEffect) {
+  private disposeSessionEffect(session: RuntimeAgentSession) {
     return session.disposeEffect();
   }
 

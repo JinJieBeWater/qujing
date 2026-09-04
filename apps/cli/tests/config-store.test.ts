@@ -94,6 +94,28 @@ describe("ConfigStore", () => {
     });
   });
 
+  test("sets and removes optional TanStack ACP runtime", async () => {
+    const { store } = await fixture();
+
+    await Effect.runPromise(
+      store.setRuntimeEffect({
+        kind: "tanstack-acp",
+        name: "codex",
+        model: "gpt-5-codex",
+        command: "codex --acp --model {model} --cwd {cwd}",
+        authMode: "host",
+        permissionMode: "bypassPermissions",
+      }),
+    );
+
+    expect((await Effect.runPromise(store.readEffect())).runtime).toMatchObject({
+      kind: "tanstack-acp",
+      name: "codex",
+    });
+    await Effect.runPromise(store.usePiRuntimeEffect());
+    expect((await Effect.runPromise(store.readEffect())).runtime).toBeUndefined();
+  });
+
   test("rotates credentials and permanently tombstones revoked client IDs", async () => {
     const { store } = await fixture();
     const original = await Effect.runPromise(

@@ -6,9 +6,9 @@ import { join } from "node:path";
 import { ConfigStore, type WorkspaceConfig } from "../src/config";
 import { QujingError } from "../src/errors";
 import { RuntimeCoordinator } from "../src/runtime/coordinator";
-import type { PiRpcSessionEffect } from "../src/runtime/pi-rpc";
+import type { RuntimeAgentSession } from "../src/runtime/session";
 import { RuntimeSessionStore, type RuntimeSession } from "../src/runtime/sessions";
-import { makePiRuntime } from "./helpers/pi-runtime";
+import { makeRuntimePool } from "./helpers/runtime-pool";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -19,7 +19,7 @@ async function fixture(
   createSessionEffect: (
     workspace: WorkspaceConfig,
     session: RuntimeSession,
-  ) => Effect.Effect<PiRpcSessionEffect, unknown> = () => Effect.succeed(fakeSession()),
+  ) => Effect.Effect<RuntimeAgentSession, unknown> = () => Effect.succeed(fakeSession()),
 ) {
   const root = await mkdtemp(join(tmpdir(), "qujing-coordinator-"));
   roots.push(root);
@@ -47,7 +47,7 @@ async function fixture(
   );
   const client = (await Effect.runPromise(config.authenticateEffect(added.bearer)))!;
   const sessions = new RuntimeSessionStore(stateRoot);
-  const runtime = makePiRuntime({
+  const runtime = makeRuntimePool({
     createSessionEffect: (workspace, session) => createSessionEffect(workspace, session),
   });
   const desired = await Effect.runPromise(config.readEffectiveEffect());
@@ -389,7 +389,7 @@ describe("RuntimeCoordinator", () => {
     await Effect.runPromise(initial.sessions.getOrCreateEffect("revoked", "docs"));
     await Effect.runPromise(initial.sessions.getOrCreateEffect("client", "removed"));
     await Effect.runPromise(initial.coordinator.closeEffect());
-    const runtime = makePiRuntime({ createSessionEffect: () => Effect.succeed(fakeSession()) });
+    const runtime = makeRuntimePool({ createSessionEffect: () => Effect.succeed(fakeSession()) });
 
     const coordinator = await Effect.runPromise(
       RuntimeCoordinator.createEffect({
@@ -405,9 +405,40 @@ describe("RuntimeCoordinator", () => {
     ]);
     await Effect.runPromise(coordinator.closeEffect());
   });
+
+  test("runtime backend change retires active sessions without deleting bindings", async () => {
+    let disposals = 0;
+    const session = fakeSession();
+    session.disposeEffect = () =>
+      Effect.sync(() => {
+        disposals++;
+      });
+    const { coordinator, config, sessions, client } = await fixture(() => Effect.succeed(session));
+    const signal = new AbortController().signal;
+
+    await Effect.runPromise(
+      coordinator.answerEffect({ client, workspaceId: "docs", question: "one", signal }),
+    );
+    const binding = (await Effect.runPromise(sessions.listEffect()))[0]!;
+    await Effect.runPromise(
+      config.setRuntimeEffect({
+        kind: "tanstack-acp",
+        name: "codex",
+        model: "gpt-5-codex",
+        command: "codex --acp --model {model} --cwd {cwd}",
+      }),
+    );
+    await Effect.runPromise(
+      coordinator.reconcileEffect(await Effect.runPromise(config.readEffectiveEffect())),
+    );
+
+    expect(disposals).toBe(1);
+    expect((await Effect.runPromise(sessions.listEffect()))[0]?.id).toBe(binding.id);
+    await Effect.runPromise(coordinator.closeEffect());
+  });
 });
 
-function fakeSession(): PiRpcSessionEffect {
+function fakeSession(): RuntimeAgentSession {
   return {
     promptEffect: () => Effect.void,
     isAlive: () => true,

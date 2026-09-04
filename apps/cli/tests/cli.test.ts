@@ -161,6 +161,43 @@ describe("task-first CLI", () => {
     expect(JSON.parse(output().stdout).remoteBearer).toBeString();
   });
 
+  test("configures Gateway Runtime backend", async () => {
+    const { io, output, clear } = await fixture();
+    expect(await initGateway(io)).toBe(0);
+
+    clear();
+    expect(
+      await Effect.runPromise(
+        runCliEffect(
+          [
+            "runtime",
+            "set-acp",
+            "codex",
+            "--model",
+            "gpt-5-codex",
+            "--command",
+            "codex --acp --model {model} --cwd {cwd}",
+            "--auth",
+            "host",
+            "--permission",
+            "bypassPermissions",
+          ],
+          io,
+        ),
+      ),
+    ).toBe(0);
+    expect(output().stdout).toContain("runtime: tanstack-acp");
+    expect((await Effect.runPromise(new ConfigStore(io).readEffect())).runtime).toMatchObject({
+      kind: "tanstack-acp",
+      name: "codex",
+    });
+
+    clear();
+    expect(await Effect.runPromise(runCliEffect(["runtime", "use-pi"], io))).toBe(0);
+    expect(output().stdout).toContain("runtime: pi");
+    expect((await Effect.runPromise(new ConfigStore(io).readEffect())).runtime).toBeUndefined();
+  });
+
   test("initializes one Client and manages redacted Lines", async () => {
     const { io, output, clear } = await fixture();
     expect(await Effect.runPromise(runCliEffect(["init", "client", "--port", "43222"], io))).toBe(

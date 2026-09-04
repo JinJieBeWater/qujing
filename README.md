@@ -5,7 +5,7 @@
 Qujing lets one MCP Agent ask multiple real colleagues through one local endpoint. Each colleague runs an Owner Gateway over manually registered Workspaces. Agent-side Client keeps one private **Line** per Owner and routes only when Agent supplies exact Line and Workspace IDs.
 
 ```text
-Agent → local Client MCP → selected Line/Tailcat → Owner Gateway → Pi → Workspace
+Agent → local Client MCP → selected Line/Tailcat → Owner Gateway → Runtime → Workspace
 ```
 
 No automatic routing, shared knowledge index, public Gateway, or per-Owner Agent MCP configuration.
@@ -23,7 +23,7 @@ Agent authenticates with one local bearer. Set MCP tool-call timeout to at least
 
 ## Roles
 
-- **Owner** runs Gateway, Pi Runtime, and Workspaces.
+- **Owner** runs Gateway, Runtime, and Workspaces.
 - **Client** runs one local MCP service and private Lines to any number of Owners.
 - **Agent** connects only to Client at `http://127.0.0.1:43111/mcp` by default.
 
@@ -77,7 +77,7 @@ For a version-pinned or offline release bundle, run `bunx --bun skills add ./ski
 
 ## Minimal setup
 
-Both installation methods keep `qj` and `qujing-transport` from the same release together. Owner machine must also have its normal global `pi` CLI available on `PATH`.
+Both installation methods keep `qj` and `qujing-transport` from the same release together. By default, Owner machine must also have its normal global `pi` CLI available on `PATH`. Gateway can instead run a TanStack AI ACP harness configured with `qj runtime set-acp`.
 
 ### 1. Start Owner Gateway
 
@@ -85,6 +85,17 @@ Both installation methods keep `qj` and `qujing-transport` from the same release
 qj init gateway --owner-id jinjiebewater --owner-name JinJieBeWater
 qj workspace add pi-tooling --name "Pi Tooling" --root ~/src/pi --summary "Pi SDK and extensions"
 ```
+
+Optional: replace default Pi Runtime with any ACP-compatible TanStack AI harness:
+
+```bash
+qj runtime set-acp codex \
+  --model gpt-5-codex \
+  --command 'codex --acp --model {model} --cwd {cwd}' \
+  --auth host
+```
+
+Use `qj runtime use-pi` to return to default global Pi Runtime.
 
 In separate Owner terminal, run and leave Gateway active:
 
@@ -145,10 +156,11 @@ For agent-run installation, pairing, verification, credential rotation, upgrades
 - Gateway, Client, and ephemeral Connectors bind loopback only; Tailcat forwards only Gateway port.
 - Agent local bearer and every Line’s Tailcat key/remote bearer are distinct.
 - Client verifies expected Owner ID on every rebuilt upstream MCP session.
-- Gateway runs Owner’s full global `pi --mode rpc --approve`: default model, authentication, settings, skills, extensions, builtin tools, and `~/.pi/agent/sessions/`.
-- Qujing appends a fixed consultation prompt that asks Pi to gather relevant context and behave read-only. It does not replace or filter Owner's Pi configuration; the prompt is behavior guidance, not a security boundary.
-- Every paired remote Gateway Client is therefore trusted with Owner-level Pi capability, including shell execution, file changes, and access outside selected Workspace when Pi chooses it.
-- Runtime Session IDs remain distinct by remote Gateway Client and Workspace. Revocation removes binding but does not delete Owner’s global Pi archive.
+- Default Gateway Runtime runs Owner’s full global `pi --mode rpc --approve`: default model, authentication, settings, skills, extensions, builtin tools, and `~/.pi/agent/sessions/`.
+- Optional TanStack ACP Runtime runs configured ACP-compatible CLI through `@tanstack/ai`, `@tanstack/ai-acp`, local process sandbox, TanStack persistence, and TanStack locks.
+- Qujing appends a fixed consultation prompt that asks Runtime to gather relevant context and behave read-only. It does not replace or filter Runtime configuration; the prompt is behavior guidance, not a security boundary.
+- Every paired remote Gateway Client is therefore trusted with Owner-level Runtime capability, including shell execution, file changes, and access outside selected Workspace when Runtime chooses it.
+- Runtime Session IDs remain distinct by remote Gateway Client and Workspace. Revocation removes binding but does not delete Owner’s global Pi archive or TanStack transcript state unless removed separately.
 - Default Qujing logs exclude credentials, addresses, roots, questions, answers, and file contents.
 
 ## Operations

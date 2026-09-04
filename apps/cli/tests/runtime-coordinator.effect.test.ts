@@ -4,10 +4,10 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigStore } from "../src/config";
-import type { PiRpcSessionEffect } from "../src/runtime/pi-rpc";
+import type { RuntimeAgentSession } from "../src/runtime/session";
 import { RuntimeCoordinator } from "../src/runtime/coordinator";
 import { RuntimeSessionStore } from "../src/runtime/sessions";
-import { makePiRuntime } from "./helpers/pi-runtime";
+import { makeRuntimePool } from "./helpers/runtime-pool";
 
 it.live("runs RuntimeCoordinator Effect API", () =>
   Effect.gen(function* () {
@@ -18,7 +18,7 @@ it.live("runs RuntimeCoordinator Effect API", () =>
       stateRoot: join(root, "state"),
     });
     const sessions = new RuntimeSessionStore(join(root, "state"));
-    const runtime = makePiRuntime({ createSessionEffect: () => Effect.succeed(fakeSession()) });
+    const runtime = makeRuntimePool({ createSessionEffect: () => Effect.succeed(fakeSession()) });
     yield* Effect.ensuring(
       Effect.gen(function* () {
         yield* node(() => mkdir(workspace));
@@ -56,10 +56,10 @@ it.live("runs RuntimeCoordinator Effect API", () =>
   }),
 );
 
-it.live("disposes PiRuntime when coordinator acquisition fails", () =>
+it.live("disposes RuntimePool when coordinator acquisition fails", () =>
   Effect.gen(function* () {
     let disposed = false;
-    const runtime = makePiRuntime({ createSessionEffect: () => Effect.succeed(fakeSession()) });
+    const runtime = makeRuntimePool({ createSessionEffect: () => Effect.succeed(fakeSession()) });
     const dispose = runtime.disposeEffect.bind(runtime);
     runtime.disposeEffect = () =>
       dispose().pipe(
@@ -95,7 +95,7 @@ function node<A>(try_: () => Promise<A>) {
   return Effect.tryPromise({ try: try_, catch: (error) => error });
 }
 
-function fakeSession(): PiRpcSessionEffect {
+function fakeSession(): RuntimeAgentSession {
   return {
     promptEffect: () => Effect.void,
     isAlive: () => true,
