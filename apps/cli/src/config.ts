@@ -10,29 +10,29 @@ import {
 } from "./private-files";
 import {
   decode,
-  GatewayClient as GatewayClientSchema,
-  GatewayConfig as GatewayConfigSchema,
+  PeerCredential as PeerCredentialSchema,
+  HostConfig as HostConfigSchema,
   Identifier,
   NonEmptyString,
   RuntimeConfig as RuntimeConfigSchema,
   Tombstones as TombstonesSchema,
   Workspace as WorkspaceSchema,
-  type ClientIdentity,
-  type GatewayConfig,
-  type Owner,
+  type PeerCredentialIdentity,
+  type HostConfig,
+  type Node,
   type RuntimeConfig,
   type Workspace,
 } from "./schemas";
 
-const parseConfig = decode(GatewayConfigSchema);
+const parseConfig = decode(HostConfigSchema);
 const parseWorkspace = decode(WorkspaceSchema);
-const parseGatewayClient = decode(GatewayClientSchema);
+const parsePeerCredential = decode(PeerCredentialSchema);
 const parseTombstones = decode(TombstonesSchema);
 const parseRuntimeConfig = decode(RuntimeConfigSchema);
 const parseIdentifier = decode(Identifier);
 const parseNonEmptyString = decode(NonEmptyString);
 
-export type Config = GatewayConfig;
+export type Config = HostConfig;
 export type WorkspaceConfig = Workspace;
 
 export interface ConfigStorePaths {
@@ -41,7 +41,7 @@ export interface ConfigStorePaths {
 }
 
 export interface InitInput {
-  owner: Owner;
+  node: Node;
   port?: number;
 }
 
@@ -52,7 +52,7 @@ export interface WorkspaceInput {
   root: string;
 }
 
-export interface ClientInput {
+export interface AgentInput {
   id: string;
   tailcatKey: string;
 }
@@ -77,10 +77,10 @@ export class ConfigStore {
       const config = yield* Effect.sync(() =>
         parseConfig({
           version: 1,
-          owner: input.owner,
+          node: input.node,
           server: { host: "127.0.0.1", port: input.port ?? DEFAULT_PORT },
           workspaces: [],
-          clients: [],
+          peers: [],
         }),
       );
       yield* Effect.all(
@@ -98,7 +98,7 @@ export class ConfigStore {
                 if (!(error instanceof Error) || !error.message.includes("Config file not found"))
                   return Effect.fail(error);
                 return Effect.gen({ self: this }, function* () {
-                  yield* this.writeJsonEffect(this.tombstonesPath, { workspaces: [], clients: [] });
+                  yield* this.writeJsonEffect(this.tombstonesPath, { workspaces: [], peers: [] });
                   yield* this.writeJsonEffect(this.configPath, config);
                 });
               },
@@ -137,7 +137,7 @@ export class ConfigStore {
       return {
         ...config,
         workspaces: config.workspaces.filter(({ id }) => !tombstones.workspaces.includes(id)),
-        clients: config.clients.filter(({ id }) => !tombstones.clients.includes(id)),
+        peers: config.peers.filter(({ id }) => !tombstones.peers.includes(id)),
       };
     });
   }
@@ -230,7 +230,7 @@ export class ConfigStore {
     });
   }
 
-  addClientEffect(input: ClientInput, bearer = createBearer()) {
+  addAgentEffect(input: AgentInput, bearer = createBearer()) {
     return Effect.gen({ self: this }, function* () {
       const parsed = yield* Effect.sync(() => ({
         id: parseIdentifier(input.id),
@@ -243,12 +243,12 @@ export class ConfigStore {
             this.readEffect(),
             this.readTombstonesEffect(),
           ]);
-          if (tombstones.clients.includes(parsed.id))
-            throw new Error("Client ID was revoked and cannot be reused");
-          if (config.clients.some(({ id }) => id === parsed.id))
-            throw new Error(`Client already exists: ${parsed.id}`);
+          if (tombstones.peers.includes(parsed.id))
+            throw new Error("Peer credential ID was revoked and cannot be reused");
+          if (config.peers.some(({ id }) => id === parsed.id))
+            throw new Error(`Peer credential already exists: ${parsed.id}`);
           const now = new Date().toISOString();
-          const client = parseGatewayClient({
+          const agent = parsePeerCredential({
             id: parsed.id,
             tailcatKey: parsed.tailcatKey,
             bearerHash: hashBearer(parsed.bearer),
@@ -257,7 +257,7 @@ export class ConfigStore {
           });
           yield* this.writeJsonEffect(
             this.configPath,
-            parseConfig({ ...config, clients: [...config.clients, client] }),
+            parseConfig({ ...config, peers: [...config.peers, agent] }),
           );
           return { bearer: parsed.bearer };
         }),
@@ -265,7 +265,7 @@ export class ConfigStore {
     });
   }
 
-  rotateClientEffect(id: string, tailcatKey: string) {
+  rotateAgentEffect(id: string, tailcatKey: string) {
     return Effect.gen({ self: this }, function* () {
       yield* Effect.sync(() => {
         parseIdentifier(id);
@@ -277,15 +277,15 @@ export class ConfigStore {
             this.readEffect(),
             this.readTombstonesEffect(),
           ]);
-          if (tombstones.clients.includes(id)) throw new Error(`Client not found: ${id}`);
-          if (!config.clients.some((entry) => entry.id === id))
-            throw new Error(`Client not found: ${id}`);
+          if (tombstones.peers.includes(id)) throw new Error(`Peer credential not found: ${id}`);
+          if (!config.peers.some((entry) => entry.id === id))
+            throw new Error(`Peer credential not found: ${id}`);
           const bearer = createBearer();
           yield* this.writeJsonEffect(
             this.configPath,
             parseConfig({
               ...config,
-              clients: config.clients.map((entry) =>
+              peers: config.peers.map((entry) =>
                 entry.id === id
                   ? {
                       ...entry,
@@ -303,25 +303,23 @@ export class ConfigStore {
     });
   }
 
-  revokeClientEffect(id: string) {
+  revokeAgentEffect(id: string) {
     return Effect.gen({ self: this }, function* () {
       yield* Effect.sync(() => parseIdentifier(id));
       return yield* this.withLockEffect(
         Effect.gen({ self: this }, function* () {
           const config = yield* this.readEffect();
-          const clients = config.clients.filter((entry) => entry.id !== id);
-          if (clients.length === config.clients.length) return false;
+          const peers = config.peers.filter((entry) => entry.id !== id);
+          if (peers.length === config.peers.length) return false;
           const tombstones = yield* this.readTombstonesEffect();
           yield* this.writeJsonEffect(
             this.tombstonesPath,
             parseTombstones({
               ...tombstones,
-              clients: tombstones.clients.includes(id)
-                ? tombstones.clients
-                : [...tombstones.clients, id],
+              peers: tombstones.peers.includes(id) ? tombstones.peers : [...tombstones.peers, id],
             }),
           );
-          yield* this.writeJsonEffect(this.configPath, parseConfig({ ...config, clients }));
+          yield* this.writeJsonEffect(this.configPath, parseConfig({ ...config, peers }));
           return true;
         }),
       );
@@ -340,16 +338,6 @@ export class ConfigStore {
     });
   }
 
-  usePiRuntimeEffect() {
-    return this.withLockEffect(
-      Effect.gen({ self: this }, function* () {
-        const config = yield* this.readEffect();
-        const { runtime: _runtime, ...next } = config;
-        yield* this.writeJsonEffect(this.configPath, parseConfig(next));
-      }),
-    );
-  }
-
   authenticateEffect(bearer: string) {
     return Effect.gen({ self: this }, function* () {
       const hash = hashBearer(bearer);
@@ -357,10 +345,10 @@ export class ConfigStore {
         [this.readEffect(), this.readTombstonesEffect()],
         { concurrency: "unbounded" },
       );
-      const client = config.clients.find(
-        (entry) => !tombstones.clients.includes(entry.id) && sameBearerHash(entry.bearerHash, hash),
+      const agent = config.peers.find(
+        (entry) => !tombstones.peers.includes(entry.id) && sameBearerHash(entry.bearerHash, hash),
       );
-      return client ? { id: client.id, credentialVersion: client.bearerHash } : undefined;
+      return agent ? { id: agent.id, credentialVersion: agent.bearerHash } : undefined;
     });
   }
 
@@ -376,16 +364,16 @@ export class ConfigStore {
     });
   }
 
-  hasClientEffect(client: ClientIdentity) {
+  hasAgentEffect(agent: PeerCredentialIdentity) {
     return Effect.gen({ self: this }, function* () {
       const [config, tombstones] = yield* Effect.all(
         [this.readEffect(), this.readTombstonesEffect()],
         { concurrency: "unbounded" },
       );
       return (
-        !tombstones.clients.includes(client.id) &&
-        config.clients.some(
-          (entry) => entry.id === client.id && entry.bearerHash === client.credentialVersion,
+        !tombstones.peers.includes(agent.id) &&
+        config.peers.some(
+          (entry) => entry.id === agent.id && entry.bearerHash === agent.credentialVersion,
         )
       );
     });

@@ -9,16 +9,16 @@ it.live("runs CLI through Effect entrypoint", () =>
     const io: CliIo = {
       configPath: "",
       stateRoot: "",
-      clientConfigPath: "",
-      clientStateRoot: "",
+      agentConfigPath: "",
+      agentStateRoot: "",
       writeOut: (text) => {
         output += text;
       },
       writeError: () => {},
       readStdinEffect: () => Effect.succeed(""),
       validateTailcatKeyEffect: () => Effect.void,
-      verifyLineEffect: () => Effect.void,
-      clientDoctorEffect: () => Effect.succeed({ ok: true, checks: [] }),
+      verifyPeerEffect: () => Effect.void,
+      agentDoctorEffect: () => Effect.succeed({ ok: true, checks: [] }),
     };
     expect(yield* runCliEffect(["--help"], io)).toBe(0);
     expect(output).toContain("Usage: qj");
@@ -31,16 +31,16 @@ it.live("prints version", () =>
     const io: CliIo = {
       configPath: "",
       stateRoot: "",
-      clientConfigPath: "",
-      clientStateRoot: "",
+      agentConfigPath: "",
+      agentStateRoot: "",
       writeOut: (text) => {
         output += text;
       },
       writeError: () => {},
       readStdinEffect: () => Effect.succeed(""),
       validateTailcatKeyEffect: () => Effect.void,
-      verifyLineEffect: () => Effect.void,
-      clientDoctorEffect: () => Effect.succeed({ ok: true, checks: [] }),
+      verifyPeerEffect: () => Effect.void,
+      agentDoctorEffect: () => Effect.succeed({ ok: true, checks: [] }),
     };
     expect(yield* runCliEffect(["--version"], io)).toBe(0);
     expect(output).toBe(`${packageJson.version}\n`);

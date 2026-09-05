@@ -358,7 +358,7 @@ async function pathExists(path: string): Promise<boolean> {
   );
 }
 
-function processExists(pid: number): boolean {
+export function processExists(pid: number): boolean {
   try {
     process.kill(pid, 0);
     return true;

@@ -3,25 +3,25 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { expect, it } from "@effect/vitest";
 import { Effect } from "effect";
-import { ClientConfigStore } from "../src/client-config";
-import { runClientDoctorEffect } from "../src/client-doctor";
+import { AgentConfigStore } from "../src/agent-config";
+import { runAgentDoctorEffect } from "../src/agent-doctor";
 
-it.effect("runs Client doctor Effect", () =>
+it.effect("runs Agent doctor Effect", () =>
   Effect.gen(function* () {
-    const root = yield* promise(() => mkdtemp(join(tmpdir(), "qujing-client-doctor-effect-")));
+    const root = yield* promise(() => mkdtemp(join(tmpdir(), "qujing-agent-doctor-effect-")));
     const paths = {
-      clientConfigPath: join(root, "config", "client.json"),
-      clientStateRoot: join(root, "state"),
+      agentConfigPath: join(root, "config", "agent.json"),
+      agentStateRoot: join(root, "state"),
       transportBinary: join(root, "transport"),
     };
     try {
       yield* promise(() => Bun.write(paths.transportBinary, "binary"));
       yield* promise(() => chmod(paths.transportBinary, 0o700));
-      const store = new ClientConfigStore({ configPath: paths.clientConfigPath });
+      const store = new AgentConfigStore({ configPath: paths.agentConfigPath });
       yield* store.initEffect();
-      const report = yield* runClientDoctorEffect(paths, {
+      const report = yield* runAgentDoctorEffect(paths, {
         checkPort: () => Effect.succeed(true),
-        inspectLines: () => Effect.succeed([]),
+        inspectPeers: () => Effect.succeed([]),
       });
       expect(report.ok).toBe(true);
       expect(report.checks.map(({ name }) => name)).toEqual([

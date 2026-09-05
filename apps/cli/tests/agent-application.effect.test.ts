@@ -1,14 +1,14 @@
 import { expect, it } from "@effect/vitest";
 import { Duration, Effect, Fiber } from "effect";
-import { ClientApplication } from "../src/client-application";
-import type { ClientConfig, LineConfig } from "../src/client-config";
-import { LineRuntime } from "../src/line-runtime";
+import { AgentApplication } from "../src/agent-application";
+import type { AgentConfig, PeerConfig } from "../src/agent-config";
+import { PeerRuntime } from "../src/peer-runtime";
 
 const now = new Date().toISOString();
-const line: LineConfig = {
+const peer: PeerConfig = {
   id: "one",
-  expectedOwnerId: "owner-one",
-  remoteClientId: "one",
+  expectedNodeId: "node-one",
+  remoteAgentId: "one",
   serverAddress: "one",
   remotePort: 1,
   keyPath: "/one",
@@ -16,11 +16,11 @@ const line: LineConfig = {
   createdAt: now,
   updatedAt: now,
 };
-const config: ClientConfig = {
+const config: AgentConfig = {
   version: 1,
   server: { host: "127.0.0.1", port: 1 },
   localBearerHash: "a".repeat(64),
-  lines: [line],
+  peers: [peer],
 };
 
 const waitUntil = (condition: () => boolean): Effect.Effect<void> =>
@@ -30,22 +30,22 @@ const waitUntil = (condition: () => boolean): Effect.Effect<void> =>
       : Effect.sleep(Duration.millis(5)).pipe(Effect.andThen(waitUntil(condition))),
   );
 
-it.live("runs ClientApplication Effect API", () =>
+it.live("runs AgentApplication Effect API", () =>
   Effect.gen(function* () {
-    const app = new ClientApplication({
+    const app = new AgentApplication({
       config: {
         readEffect: () => Effect.succeed(config),
       },
       createRuntime: () => ({
         listWorkspacesEffect: () =>
-          Effect.succeed({ owner: { id: "owner-one", name: "One" }, workspaces: [] }),
+          Effect.succeed({ node: { id: "node-one", name: "One" }, workspaces: [] }),
         askEffect: (workspace, question) => Effect.succeed({ workspace, answer: question }),
         closeEffect: () => Effect.void,
       }),
     });
-    expect(yield* app.listLinesEffect()).toMatchObject([{ id: "one", available: true }]);
-    expect(yield* app.askEffect({ line: "one", workspace: "docs", question: "hi" })).toEqual({
-      line: "one",
+    expect(yield* app.listPeersEffect()).toMatchObject([{ id: "one", available: true }]);
+    expect(yield* app.askEffect({ peer: "one", workspace: "docs", question: "hi" })).toEqual({
+      peer: "one",
       workspace: "docs",
       answer: "hi",
     });
@@ -59,8 +59,8 @@ it.live("waits for aborted upstream call before retiring runtime lease", () =>
     let closed = false;
     let resolveAsk!: (result: Record<string, unknown>) => void;
     const events: string[] = [];
-    const runtime = new LineRuntime({
-      line,
+    const runtime = new PeerRuntime({
+      peer,
       startConnectorEffect: () =>
         Effect.succeed({
           ready: { ready: true, localAddress: "127.0.0.1:4567" },
@@ -73,12 +73,12 @@ it.live("waits for aborted upstream call before retiring runtime lease", () =>
             events.push("terminate");
           },
         },
-        client: {
+        agent: {
           connect: async () => {},
           callTool: ({ name }, _schema, options) => {
             if (name === "list_workspaces")
               return Promise.resolve({
-                structuredContent: { owner: { id: "owner-one", name: "One" }, workspaces: [] },
+                structuredContent: { node: { id: "node-one", name: "One" }, workspaces: [] },
               });
             return new Promise((resolve) => {
               resolveAsk = resolve;
@@ -92,17 +92,17 @@ it.live("waits for aborted upstream call before retiring runtime lease", () =>
             });
           },
           close: async () => {
-            events.push("client-close");
+            events.push("agent-close");
           },
         },
       }),
     });
-    const app = new ClientApplication({
+    const app = new AgentApplication({
       config: { readEffect: () => Effect.succeed(config) },
       createRuntime: () => runtime,
     });
     const request = yield* app
-      .askEffect({ line: "one", workspace: "docs", question: "hi" })
+      .askEffect({ peer: "one", workspace: "docs", question: "hi" })
       .pipe(Effect.forkChild);
     yield* waitUntil(() => !!resolveAsk);
     const interrupted = yield* Fiber.interrupt(request).pipe(Effect.forkChild);
@@ -121,6 +121,6 @@ it.live("waits for aborted upstream call before retiring runtime lease", () =>
     resolveAsk({ structuredContent: { workspace: "docs", answer: "late" } });
     yield* Fiber.await(interrupted);
     yield* Fiber.join(closing);
-    expect(events).toEqual(["terminate", "client-close", "connector-close"]);
+    expect(events).toEqual(["terminate", "agent-close", "connector-close"]);
   }),
 );

@@ -2,7 +2,7 @@ import { Effect } from "effect";
 import type { ConfigStore } from "./config";
 import { QujingError } from "./errors";
 import type { RuntimeCoordinator } from "./runtime/coordinator";
-import type { AskRequest, ClientIdentity, LineAskResult, LineWorkspaces } from "./schemas";
+import type { AskRequest, PeerCredentialIdentity, PeerAskResult, PeerWorkspaces } from "./schemas";
 
 export interface QujingDependencies {
   config: ConfigStore;
@@ -10,23 +10,23 @@ export interface QujingDependencies {
 }
 
 export interface QujingEffectApi {
-  listWorkspacesEffect(client: ClientIdentity): Effect.Effect<LineWorkspaces, unknown>;
-  askEffect(request: AskRequest, signal: AbortSignal): Effect.Effect<LineAskResult, unknown>;
+  listWorkspacesEffect(peer: PeerCredentialIdentity): Effect.Effect<PeerWorkspaces, unknown>;
+  askEffect(request: AskRequest, signal: AbortSignal): Effect.Effect<PeerAskResult, unknown>;
 }
 
 export function createQujing(dependencies: QujingDependencies): QujingEffectApi {
-  const listWorkspacesEffect = (client: ClientIdentity) =>
+  const listWorkspacesEffect = (peer: PeerCredentialIdentity) =>
     Effect.gen(function* () {
       const config = yield* dependencies.config.withLockEffect(
         dependencies.config
           .readEffectiveEffect()
           .pipe(
             Effect.flatMap((config) =>
-              config.clients.some(
-                (entry) => entry.id === client.id && entry.bearerHash === client.credentialVersion,
+              config.peers.some(
+                (entry) => entry.id === peer.id && entry.bearerHash === peer.credentialVersion,
               )
                 ? Effect.succeed(config)
-                : Effect.fail(new QujingError("UNAUTHORIZED", "Client is not authorized")),
+                : Effect.fail(new QujingError("UNAUTHORIZED", "Agent is not authorized")),
             ),
           ),
       );
@@ -38,21 +38,21 @@ export function createQujing(dependencies: QujingDependencies): QujingEffectApi 
         ),
         { concurrency: "unbounded" },
       );
-      const owner =
-        config.owner.summary === undefined
-          ? { id: config.owner.id, name: config.owner.name }
+      const node =
+        config.node.summary === undefined
+          ? { id: config.node.id, name: config.node.name }
           : {
-              id: config.owner.id,
-              name: config.owner.name,
-              summary: config.owner.summary,
+              id: config.node.id,
+              name: config.node.name,
+              summary: config.node.summary,
             };
-      return { owner, workspaces };
+      return { node, workspaces };
     });
 
   const askEffect = (request: AskRequest, signal: AbortSignal) =>
     dependencies.coordinator
       .answerEffect({
-        client: request.client,
+        peer: request.peer,
         workspaceId: request.workspace,
         question: request.question,
         signal,

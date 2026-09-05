@@ -23,26 +23,26 @@ it.live("runs Qujing Effect API", () =>
     yield* Effect.ensuring(
       Effect.gen(function* () {
         yield* node(() => mkdir(workspace));
-        yield* config.initEffect({ owner: { id: "owner", name: "Owner" } });
+        yield* config.initEffect({ node: { id: "node", name: "Node" } });
         yield* config.addWorkspaceEffect({
           id: "docs",
           name: "Docs",
           summary: "Docs",
           root: workspace,
         });
-        const { bearer } = yield* config.addClientEffect({
-          id: "client",
+        const { bearer } = yield* config.addAgentEffect({
+          id: "agent",
           tailcatKey: "nodekey:test",
         });
-        const client = yield* config.authenticateEffect(bearer);
-        expect(client).toBeDefined();
-        expect(yield* app.listWorkspacesEffect(client!)).toEqual({
-          owner: { id: "owner", name: "Owner" },
+        const agent = yield* config.authenticateEffect(bearer);
+        expect(agent).toBeDefined();
+        expect(yield* app.listWorkspacesEffect(agent!)).toEqual({
+          node: { id: "node", name: "Node" },
           workspaces: [{ id: "docs", name: "Docs", summary: "Docs", available: true }],
         });
         expect(
           yield* app.askEffect(
-            { client: client!, workspace: "docs", question: "hello" },
+            { peer: agent!, workspace: "docs", question: "hello" },
             new AbortController().signal,
           ),
         ).toEqual({ workspace: "docs", answer: "answer:hello" });

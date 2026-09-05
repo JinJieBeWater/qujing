@@ -10,40 +10,40 @@ import {
   writePrivateJsonEffect,
 } from "./private-files";
 import {
-  ClientConfig as ClientConfigSchema,
+  AgentConfig as AgentConfigSchema,
   decode,
   Identifier,
-  Line as LineSchema,
-  LineCredentials as LineCredentialsSchema,
-  LineInput as LineInputSchema,
-  type ClientConfig as ClientConfigData,
-  type Line as LineData,
-  type LineInput as LineInputData,
+  Peer as PeerSchema,
+  PeerCredentials as PeerCredentialsSchema,
+  PeerInput as PeerInputSchema,
+  type AgentConfig as AgentConfigData,
+  type Peer as PeerData,
+  type PeerInput as PeerInputData,
 } from "./schemas";
 
-const parseConfig = decode(ClientConfigSchema);
+const parseConfig = decode(AgentConfigSchema);
 const parseIdentifier = decode(Identifier);
-const parseLine = decode(LineSchema);
-const parseLineInput = decode(LineInputSchema);
-const parseLineCredentials = decode(LineCredentialsSchema);
+const parsePeer = decode(PeerSchema);
+const parsePeerInput = decode(PeerInputSchema);
+const parsePeerCredentials = decode(PeerCredentialsSchema);
 
-export type ClientConfig = ClientConfigData;
-export type LineConfig = LineData;
-export type LineInput = LineInputData;
-export type PublicLine = Pick<
-  LineConfig,
-  "id" | "expectedOwnerId" | "remoteClientId" | "remotePort" | "createdAt" | "updatedAt"
+export type AgentConfig = AgentConfigData;
+export type PeerConfig = PeerData;
+export type PeerInput = PeerInputData;
+export type PublicPeer = Pick<
+  PeerConfig,
+  "id" | "expectedNodeId" | "remoteAgentId" | "remotePort" | "createdAt" | "updatedAt"
 >;
-export const LOCAL_CLIENT_ID = "local-agent";
-export interface ClientConfigStorePaths {
+export const LOCAL_AGENT_ID = "local-agent";
+export interface AgentConfigStorePaths {
   configPath: string;
 }
-export type ClientInitResult =
+export type AgentInitResult =
   | { initialized: true; bearer: string }
   | { initialized: false; alreadyInitialized: true };
 
-export class ClientConfigStore {
-  constructor(readonly paths: ClientConfigStorePaths) {}
+export class AgentConfigStore {
+  constructor(readonly paths: AgentConfigStorePaths) {}
 
   initEffect(input: { port?: number } = {}) {
     return Effect.gen({ self: this }, function* () {
@@ -59,13 +59,13 @@ export class ClientConfigStore {
                   version: 1,
                   server: { host: "127.0.0.1", port: input.port ?? 43_111 },
                   localBearerHash: hashBearer(bearer),
-                  lines: [],
+                  peers: [],
                 }),
               ).pipe(Effect.as({ initialized: true as const, bearer }));
             },
             onSuccess: (current) =>
               input.port !== undefined && current.server.port !== input.port
-                ? Effect.fail(new Error("Client is already initialized with a different port"))
+                ? Effect.fail(new Error("Agent is already initialized with a different port"))
                 : Effect.succeed({
                     initialized: false as const,
                     alreadyInitialized: true as const,
@@ -105,38 +105,38 @@ export class ClientConfigStore {
     return Effect.gen({ self: this }, function* () {
       const config = yield* this.readEffect();
       return sameBearerHash(config.localBearerHash, hashBearer(bearer))
-        ? { id: LOCAL_CLIENT_ID, credentialVersion: config.localBearerHash }
+        ? { id: LOCAL_AGENT_ID, credentialVersion: config.localBearerHash }
         : undefined;
     });
   }
 
-  validateEffect(input: LineInput) {
-    return this.validateLineEffect(input).pipe(Effect.map(({ line }) => line));
+  validateEffect(input: PeerInput) {
+    return this.validatePeerEffect(input).pipe(Effect.map(({ peer }) => peer));
   }
 
-  addEffect(input: LineInput) {
+  addEffect(input: PeerInput) {
     return Effect.gen({ self: this }, function* () {
-      const { line, fingerprint } = yield* this.validateLineEffect(input);
+      const { peer, fingerprint } = yield* this.validatePeerEffect(input);
       yield* this.withLockEffect(
         Effect.gen({ self: this }, function* () {
           const config = yield* this.readEffect();
-          const existing = config.lines.find(({ id }) => id === line.id);
+          const existing = config.peers.find(({ id }) => id === peer.id);
           if (existing) {
             const { createdAt: _createdAt, updatedAt: _updatedAt, ...comparable } = existing;
-            if (JSON.stringify(comparable) === JSON.stringify(line)) return;
-            throw new Error(`Line already exists with different configuration: ${line.id}`);
+            if (JSON.stringify(comparable) === JSON.stringify(peer)) return;
+            throw new Error(`Peer already exists with different configuration: ${peer.id}`);
           }
           yield* this.assertDistinctCredentialsEffect(
-            config.lines,
-            line.id,
-            line.remoteBearer,
+            config.peers,
+            peer.id,
+            peer.remoteBearer,
             fingerprint,
           );
           const now = new Date().toISOString();
           yield* this.writeJsonEffect(
             parseConfig({
               ...config,
-              lines: [...config.lines, parseLine({ ...line, createdAt: now, updatedAt: now })],
+              peers: [...config.peers, parsePeer({ ...peer, createdAt: now, updatedAt: now })],
             }),
           );
         }),
@@ -147,11 +147,11 @@ export class ClientConfigStore {
   listEffect() {
     return this.readEffect().pipe(
       Effect.map((config) =>
-        config.lines.map(
-          ({ id, expectedOwnerId, remoteClientId, remotePort, createdAt, updatedAt }) => ({
+        config.peers.map(
+          ({ id, expectedNodeId, remoteAgentId, remotePort, createdAt, updatedAt }) => ({
             id,
-            expectedOwnerId,
-            remoteClientId,
+            expectedNodeId,
+            remoteAgentId,
             remotePort,
             createdAt,
             updatedAt,
@@ -164,27 +164,27 @@ export class ClientConfigStore {
   getEffect(id: string) {
     return Effect.gen({ self: this }, function* () {
       yield* Effect.sync(() => parseIdentifier(id));
-      return (yield* this.readEffect()).lines.find((line) => line.id === id);
+      return (yield* this.readEffect()).peers.find((peer) => peer.id === id);
     });
   }
 
-  validateCredentialsEffect(input: Pick<LineConfig, "keyPath" | "remoteBearer">) {
+  validateCredentialsEffect(input: Pick<PeerConfig, "keyPath" | "remoteBearer">) {
     return this.validateCredentialInputEffect(input).pipe(
       Effect.map(({ credentials }) => credentials),
     );
   }
 
-  updateCredentialsEffect(id: string, update: Pick<LineConfig, "keyPath" | "remoteBearer">) {
+  updateCredentialsEffect(id: string, update: Pick<PeerConfig, "keyPath" | "remoteBearer">) {
     return Effect.gen({ self: this }, function* () {
       yield* Effect.sync(() => parseIdentifier(id));
       const { credentials, fingerprint } = yield* this.validateCredentialInputEffect(update);
       yield* this.withLockEffect(
         Effect.gen({ self: this }, function* () {
           const config = yield* this.readEffect();
-          if (!config.lines.some((entry) => entry.id === id))
-            throw new Error(`Line not found: ${id}`);
+          if (!config.peers.some((entry) => entry.id === id))
+            throw new Error(`Peer not found: ${id}`);
           yield* this.assertDistinctCredentialsEffect(
-            config.lines,
+            config.peers,
             id,
             credentials.remoteBearer,
             fingerprint,
@@ -192,10 +192,10 @@ export class ClientConfigStore {
           yield* this.writeJsonEffect(
             parseConfig({
               ...config,
-              lines: config.lines.map((line) =>
-                line.id === id
-                  ? { ...line, ...credentials, updatedAt: new Date().toISOString() }
-                  : line,
+              peers: config.peers.map((peer) =>
+                peer.id === id
+                  ? { ...peer, ...credentials, updatedAt: new Date().toISOString() }
+                  : peer,
               ),
             }),
           );
@@ -210,24 +210,24 @@ export class ClientConfigStore {
       return yield* this.withLockEffect(
         Effect.gen({ self: this }, function* () {
           const config = yield* this.readEffect();
-          const lines = config.lines.filter((line) => line.id !== id);
-          if (lines.length === config.lines.length) return false;
-          yield* this.writeJsonEffect(parseConfig({ ...config, lines }));
+          const peers = config.peers.filter((peer) => peer.id !== id);
+          if (peers.length === config.peers.length) return false;
+          yield* this.writeJsonEffect(parseConfig({ ...config, peers }));
           return true;
         }),
       );
     });
   }
 
-  private validateLineEffect(input: LineInput) {
+  private validatePeerEffect(input: PeerInput) {
     return Effect.gen({ self: this }, function* () {
-      const line = yield* Effect.sync(() => parseLineInput(input));
-      return { line, fingerprint: yield* this.validateKeyEffect(line.keyPath) };
+      const peer = yield* Effect.sync(() => parsePeerInput(input));
+      return { peer, fingerprint: yield* this.validateKeyEffect(peer.keyPath) };
     });
   }
-  private validateCredentialInputEffect(input: Pick<LineConfig, "keyPath" | "remoteBearer">) {
+  private validateCredentialInputEffect(input: Pick<PeerConfig, "keyPath" | "remoteBearer">) {
     return Effect.gen({ self: this }, function* () {
-      const credentials = yield* Effect.sync(() => parseLineCredentials(input));
+      const credentials = yield* Effect.sync(() => parsePeerCredentials(input));
       return { credentials, fingerprint: yield* this.validateKeyEffect(credentials.keyPath) };
     });
   }
@@ -235,11 +235,11 @@ export class ClientConfigStore {
     return Effect.gen(function* () {
       const key = yield* Effect.tryPromise({
         try: () => stat(path),
-        catch: () => new Error(`Line key not found: ${path}`),
+        catch: () => new Error(`Peer key not found: ${path}`),
       });
-      if (!key.isFile()) throw new Error(`Line key is not a file: ${path}`);
+      if (!key.isFile()) throw new Error(`Peer key is not a file: ${path}`);
       yield* assertPrivatePathEffect(path, false).pipe(
-        Effect.mapError(() => new Error(`Line key permissions must be 0600: ${path}`)),
+        Effect.mapError(() => new Error(`Peer key permissions must be 0600: ${path}`)),
       );
       const contents = yield* Effect.tryPromise({
         try: () => readFile(path),
@@ -249,18 +249,18 @@ export class ClientConfigStore {
     });
   }
   private assertDistinctCredentialsEffect(
-    lines: ReadonlyArray<LineConfig>,
+    peers: ReadonlyArray<PeerConfig>,
     id: string,
     bearer: string,
     keyFingerprint: string,
   ) {
     return Effect.gen({ self: this }, function* () {
-      for (const line of lines) {
-        if (line.id === id) continue;
-        if (sameBearerHash(hashBearer(line.remoteBearer), hashBearer(bearer)))
-          throw new Error("Each Line must use a distinct remote bearer");
-        if ((yield* this.validateKeyEffect(line.keyPath)) === keyFingerprint)
-          throw new Error("Each Line must use a distinct Tailcat key");
+      for (const peer of peers) {
+        if (peer.id === id) continue;
+        if (sameBearerHash(hashBearer(peer.remoteBearer), hashBearer(bearer)))
+          throw new Error("Each Peer must use a distinct remote bearer");
+        if ((yield* this.validateKeyEffect(peer.keyPath)) === keyFingerprint)
+          throw new Error("Each Peer must use a distinct Tailcat key");
       }
     });
   }

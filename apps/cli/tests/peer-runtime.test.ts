@@ -3,12 +3,12 @@ import { Deferred, Duration, Effect, Exit, Fiber } from "effect";
 
 const sleep = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
-import { LineRuntime, type UpstreamClient, type UpstreamTransport } from "../src/line-runtime";
+import { PeerRuntime, type UpstreamAgent, type UpstreamTransport } from "../src/peer-runtime";
 
-const line = {
-  id: "line",
-  expectedOwnerId: "owner",
-  remoteClientId: "remote",
+const peer = {
+  id: "peer",
+  expectedNodeId: "node",
+  remoteAgentId: "remote",
   serverAddress: "tailcat",
   remotePort: 43110,
   keyPath: "/key",
@@ -17,15 +17,15 @@ const line = {
   updatedAt: new Date().toISOString(),
 };
 
-function workspaceResult(name = "Owner") {
-  return { structuredContent: { owner: { id: "owner", name }, workspaces: [] } };
+function workspaceResult(name = "Node") {
+  return { structuredContent: { node: { id: "node", name }, workspaces: [] } };
 }
 
-function fixture(callTool: UpstreamClient["callTool"]) {
+function fixture(callTool: UpstreamAgent["callTool"]) {
   let starts = 0;
   const events: string[] = [];
-  const runtime = new LineRuntime({
-    line,
+  const runtime = new PeerRuntime({
+    peer,
     startConnectorEffect: () =>
       Effect.sync(() => {
         starts++;
@@ -41,10 +41,10 @@ function fixture(callTool: UpstreamClient["callTool"]) {
           events.push("terminate");
         },
       } satisfies UpstreamTransport,
-      client: {
+      agent: {
         connect: async () => {},
         close: async () => {
-          events.push("client-close");
+          events.push("agent-close");
         },
         callTool,
       },
@@ -58,11 +58,11 @@ test("uses one verified lazy session and refreshes Workspace metadata", async ()
   const { runtime, starts } = fixture(async ({ name }) => {
     if (name !== "list_workspaces") throw new Error("unexpected tool");
     lists++;
-    return workspaceResult(`Owner ${lists}`);
+    return workspaceResult(`Node ${lists}`);
   });
 
-  expect((await Effect.runPromise(runtime.listWorkspacesEffect())).owner.name).toBe("Owner 2");
-  expect((await Effect.runPromise(runtime.listWorkspacesEffect())).owner.name).toBe("Owner 3");
+  expect((await Effect.runPromise(runtime.listWorkspacesEffect())).node.name).toBe("Node 2");
+  expect((await Effect.runPromise(runtime.listWorkspacesEffect())).node.name).toBe("Node 3");
   expect(starts()).toBe(1);
   await Effect.runPromise(runtime.closeEffect());
 });
@@ -73,8 +73,8 @@ test("shares one pending bootstrap across concurrent first requests", () =>
       const started = yield* Deferred.make<void>();
       const release = yield* Deferred.make<void>();
       let starts = 0;
-      const runtime = new LineRuntime({
-        line,
+      const runtime = new PeerRuntime({
+        peer,
         startConnectorEffect: () =>
           Effect.sync(() => {
             starts++;
@@ -89,7 +89,7 @@ test("shares one pending bootstrap across concurrent first requests", () =>
           ),
         createUpstream: () => ({
           transport: {},
-          client: {
+          agent: {
             connect: async () => {},
             callTool: async () => workspaceResult(),
             close: async () => {},
@@ -149,7 +149,7 @@ test("never retries a dispatched ask and reconnects only on a later call", async
   await expect(
     Effect.runPromise(runtime.askEffect("ws", "q", controller.signal)),
   ).rejects.toMatchObject({
-    code: "LINE_UNAVAILABLE",
+    code: "PEER_UNAVAILABLE",
   });
   expect(asks).toBe(1);
   expect(askOptions?.signal).not.toBe(controller.signal);
@@ -160,7 +160,7 @@ test("never retries a dispatched ask and reconnects only on a later call", async
   await Effect.runPromise(runtime.closeEffect());
 });
 
-test("preserves safe Gateway errors without dropping the session", async () => {
+test("preserves safe Node errors without dropping the session", async () => {
   const { runtime, starts } = fixture(async ({ name }) =>
     name === "list_workspaces"
       ? workspaceResult()
@@ -178,22 +178,22 @@ test("preserves safe Gateway errors without dropping the session", async () => {
   await Effect.runPromise(runtime.closeEffect());
 });
 
-test("rejects Owner mismatch and closes upstream in protocol order", async () => {
+test("rejects Node mismatch and closes upstream in protocol order", async () => {
   const { runtime, events } = fixture(async () => ({
-    structuredContent: { owner: { id: "other", name: "Other" }, workspaces: [] },
+    structuredContent: { node: { id: "other", name: "Other" }, workspaces: [] },
   }));
 
   await expect(Effect.runPromise(runtime.listWorkspacesEffect())).rejects.toMatchObject({
-    code: "OWNER_ID_MISMATCH",
+    code: "NODE_ID_MISMATCH",
   });
-  expect(events.indexOf("terminate")).toBeLessThan(events.indexOf("client-close"));
+  expect(events.indexOf("terminate")).toBeLessThan(events.indexOf("agent-close"));
   expect(events).toContain("connector-close");
 });
 
 test("retries after a transient bootstrap failure", async () => {
   let starts = 0;
-  const runtime = new LineRuntime({
-    line,
+  const runtime = new PeerRuntime({
+    peer,
     startConnectorEffect: () =>
       Effect.tryPromise({
         try: async () => {
@@ -209,7 +209,7 @@ test("retries after a transient bootstrap failure", async () => {
       }),
     createUpstream: () => ({
       transport: {},
-      client: {
+      agent: {
         connect: async () => {},
         callTool: async () => workspaceResult(),
         close: async () => {},
@@ -221,7 +221,7 @@ test("retries after a transient bootstrap failure", async () => {
     "temporary network failure",
   );
   await expect(Effect.runPromise(runtime.listWorkspacesEffect())).resolves.toMatchObject({
-    owner: { id: "owner" },
+    node: { id: "node" },
   });
   expect(starts).toBe(2);
   await Effect.runPromise(runtime.closeEffect());
@@ -230,8 +230,8 @@ test("retries after a transient bootstrap failure", async () => {
 test("aborts and cleans up a cancelled first-request bootstrap", async () => {
   let bootstrapAborted = false;
   let connectorClosed = false;
-  const runtime = new LineRuntime({
-    line,
+  const runtime = new PeerRuntime({
+    peer,
     startConnectorEffect: (_options, signal) =>
       Effect.tryPromise({
         try: async () => {
@@ -277,8 +277,8 @@ test("interrupts a never-settling bootstrap during close", () =>
     Effect.scoped(
       Effect.gen(function* () {
         const started = yield* Deferred.make<void>();
-        const runtime = new LineRuntime({
-          line,
+        const runtime = new PeerRuntime({
+          peer,
           startConnectorEffect: () =>
             Deferred.succeed(started, undefined).pipe(Effect.andThen(Effect.never)),
           createUpstream: () => {
@@ -298,9 +298,9 @@ test("interrupts a never-settling bootstrap during close", () =>
 test("disposes a late bootstrap result after its only waiter cancels", async () => {
   let releaseConnect!: () => void;
   let connectorClosed = false;
-  let clientClosed = false;
-  const runtime = new LineRuntime({
-    line,
+  let agentClosed = false;
+  const runtime = new PeerRuntime({
+    peer,
     startConnectorEffect: () =>
       Effect.succeed({
         ready: { ready: true, localAddress: "127.0.0.1:4567" },
@@ -312,14 +312,14 @@ test("disposes a late bootstrap result after its only waiter cancels", async () 
       }),
     createUpstream: () => ({
       transport: {},
-      client: {
+      agent: {
         connect: () =>
           new Promise<void>((resolve) => {
             releaseConnect = resolve;
           }),
         callTool: async () => workspaceResult(),
         close: async () => {
-          clientClosed = true;
+          agentClosed = true;
         },
       },
     }),
@@ -331,7 +331,7 @@ test("disposes a late bootstrap result after its only waiter cancels", async () 
   await expect(pending).rejects.toMatchObject({ name: "AbortError" });
   releaseConnect();
   await sleep(10);
-  expect(clientClosed).toBe(true);
+  expect(agentClosed).toBe(true);
   expect(connectorClosed).toBe(true);
   await Effect.runPromise(runtime.closeEffect());
 });
@@ -348,6 +348,6 @@ test("runs session close as scoped finalizer", () =>
           Effect.asVoid,
         ),
       );
-      expect(events).toEqual(["terminate", "client-close", "connector-close"]);
+      expect(events).toEqual(["terminate", "agent-close", "connector-close"]);
     }),
   ));

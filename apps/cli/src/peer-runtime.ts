@@ -1,26 +1,15 @@
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import {
-  Context,
-  Deferred,
-  Duration,
-  Effect,
-  Exit,
-  Fiber,
-  Option,
-  Ref,
-  Schema,
-  Scope,
-} from "effect";
+import { Context, Deferred, Duration, Effect, Exit, Option, Ref, Schema, Scope } from "effect";
 import packageJson from "../package.json";
-import type { LineConfig } from "./client-config";
+import type { PeerConfig } from "./agent-config";
 import { QujingError, type ErrorCode } from "./errors";
 import {
   ErrorCodePayload,
-  LineAskResult as LineAskResultSchema,
-  LineWorkspaces as LineWorkspacesSchema,
-  type LineAskResult,
-  type LineWorkspaces,
+  PeerAskResult as PeerAskResultSchema,
+  PeerWorkspaces as PeerWorkspacesSchema,
+  type PeerAskResult,
+  type PeerWorkspaces,
 } from "./schemas";
 import {
   startConnectorEffect,
@@ -31,8 +20,8 @@ import {
 const BOOTSTRAP_TIMEOUT = Duration.seconds(40);
 const UPSTREAM_ASK_TIMEOUT_MS = 130_000;
 const CLOSE_TIMEOUT = Duration.seconds(6);
-const parseWorkspaces = Schema.decodeUnknownSync(LineWorkspacesSchema);
-const parseAsk = Schema.decodeUnknownSync(LineAskResultSchema);
+const parseWorkspaces = Schema.decodeUnknownSync(PeerWorkspacesSchema);
+const parseAsk = Schema.decodeUnknownSync(PeerAskResultSchema);
 const parseErrorCode = Schema.decodeUnknownOption(ErrorCodePayload);
 const safeCodes = new Set<string>([
   "WORKSPACE_NOT_FOUND",
@@ -44,11 +33,11 @@ const safeCodes = new Set<string>([
   "BUSY",
 ]);
 
-export type { LineAskResult, LineWorkspaces };
+export type { PeerAskResult, PeerWorkspaces };
 export interface UpstreamTransport {
   terminateSession?(): Promise<void>;
 }
-export interface UpstreamClient {
+export interface UpstreamAgent {
   connect(transport: unknown, options?: { signal?: AbortSignal; timeout?: number }): Promise<void>;
   callTool(
     params: { name: string; arguments: Record<string, unknown> },
@@ -57,8 +46,8 @@ export interface UpstreamClient {
   ): Promise<Record<string, unknown>>;
   close(): Promise<void>;
 }
-export interface LineRuntimeOptions {
-  line: LineConfig;
+export interface PeerRuntimeOptions {
+  peer: PeerConfig;
   startConnectorEffect?: (
     options: ConnectorOptions,
     signal?: AbortSignal,
@@ -66,18 +55,17 @@ export interface LineRuntimeOptions {
   createUpstream?: (
     url: URL,
     bearer: string,
-  ) => { client: UpstreamClient; transport: UpstreamTransport };
+  ) => { agent: UpstreamAgent; transport: UpstreamTransport };
 }
 interface Session {
   connector: TransportProcess;
-  client: UpstreamClient;
+  agent: UpstreamAgent;
   transport: UpstreamTransport;
   scope: Scope.Closeable;
 }
 interface PendingSession {
   deferred: Deferred.Deferred<Session, unknown>;
   controller: AbortController;
-  fiber?: Fiber.Fiber<unknown, unknown>;
   waiters: number;
 }
 interface State {
@@ -87,7 +75,7 @@ interface State {
 }
 
 /** Effect owns session lifecycle. */
-export class LineRuntime {
+export class PeerRuntime {
   private readonly state: Ref.Ref<State>;
   private readonly scope = Scope.makeUnsafe("sequential");
   private readonly start: (
@@ -97,9 +85,9 @@ export class LineRuntime {
   private readonly createUpstream: (
     url: URL,
     bearer: string,
-  ) => { client: UpstreamClient; transport: UpstreamTransport };
+  ) => { agent: UpstreamAgent; transport: UpstreamTransport };
 
-  constructor(private readonly options: LineRuntimeOptions) {
+  constructor(private readonly options: PeerRuntimeOptions) {
     this.state = Effect.runSync(Ref.make<State>({ closed: false }));
     this.start =
       options.startConnectorEffect ??
@@ -111,10 +99,10 @@ export class LineRuntime {
           requestInit: { headers: { Authorization: `Bearer ${bearer}` } },
         });
         return {
-          client: new Client({
-            name: "qujing-client",
+          agent: new Client({
+            name: "qujing-agent",
             version: packageJson.version,
-          }) as unknown as UpstreamClient,
+          }),
           transport,
         };
       });
@@ -153,7 +141,6 @@ export class LineRuntime {
         { closed: true },
       ]);
       pending?.controller.abort();
-      if (pending?.fiber) yield* Fiber.interrupt(pending.fiber);
       yield* Effect.all(
         [session ? this.closeScope(session.scope) : Effect.void, this.closeScope(this.scope)],
         { concurrency: "unbounded" },
@@ -168,7 +155,7 @@ export class LineRuntime {
         const candidate: PendingSession = {
           deferred: yield* Deferred.make<Session, unknown>(),
           controller: new AbortController(),
-          waiters: 0,
+          waiters: 1,
         };
         const [session, pending] = yield* Ref.modify(
           this.state,
@@ -176,28 +163,27 @@ export class LineRuntime {
             if (state.closed) return [[undefined, undefined] as const, state];
             if (state.session) return [[state.session, undefined] as const, state];
             if (state.pending) {
-              state.pending.waiters++;
-              return [[undefined, state.pending] as const, state];
+              const pending = { ...state.pending, waiters: state.pending.waiters + 1 };
+              return [[undefined, pending] as const, { ...state, pending }];
             }
-            candidate.waiters++;
             return [[undefined, candidate] as const, { ...state, pending: candidate }];
           },
         );
         if (pending === candidate) {
           const created = pending;
-          created.fiber = yield* this.createSessionEffect(created.controller.signal).pipe(
+          yield* this.createSessionEffect(created.controller.signal).pipe(
             Effect.interruptible,
             Effect.matchEffect({
               onFailure: (error) =>
                 Ref.update(this.state, (current) => {
-                  if (current.pending !== created) return current;
+                  if (current.pending?.deferred !== created.deferred) return current;
                   const { pending: _pending, ...withoutPending } = current;
                   return withoutPending;
                 }).pipe(Effect.andThen(Deferred.fail(created.deferred, error))),
               onSuccess: (session) =>
                 Ref.modify(this.state, (current) => {
-                  const keep =
-                    !current.closed && current.pending === created && created.waiters > 0;
+                  if (current.pending?.deferred !== created.deferred) return [false, current];
+                  const keep = !current.closed && current.pending.waiters > 0;
                   const { pending: _pending, ...withoutPending } = current;
                   return [keep, keep ? { ...withoutPending, session } : withoutPending] as const;
                 }).pipe(
@@ -218,7 +204,7 @@ export class LineRuntime {
             Effect.onExit((exit) =>
               Exit.isFailure(exit)
                 ? Ref.update(this.state, (current) => {
-                    if (current.pending !== created) return current;
+                    if (current.pending?.deferred !== created.deferred) return current;
                     const { pending: _pending, ...withoutPending } = current;
                     return withoutPending;
                   }).pipe(
@@ -233,16 +219,25 @@ export class LineRuntime {
         }
         if (session) return session;
         if (!pending)
-          return yield* Effect.fail(new QujingError("LINE_UNAVAILABLE", "Line unavailable"));
+          return yield* Effect.fail(new QujingError("PEER_UNAVAILABLE", "Peer unavailable"));
         const active = pending;
         return yield* restore(this.waitForSessionEffect(active, signal)).pipe(
           Effect.ensuring(
-            Ref.update(this.state, (current) => {
-              active.waiters--;
-              if (active.waiters === 0 && current.pending === active && !current.session)
-                active.controller.abort();
-              return current;
-            }),
+            Ref.modify(this.state, (current) => {
+              if (current.pending?.deferred !== active.deferred) return [undefined, current];
+              const waiters = current.pending.waiters - 1;
+              const pending = { ...current.pending, waiters };
+              return [
+                waiters === 0 && !current.session ? pending.controller : undefined,
+                { ...current, pending },
+              ] as const;
+            }).pipe(
+              Effect.flatMap((controller) =>
+                controller
+                  ? Effect.sync(() => controller.abort(new DOMException("Aborted", "AbortError")))
+                  : Effect.void,
+              ),
+            ),
           ),
         );
       }),
@@ -265,9 +260,9 @@ export class LineRuntime {
               this.timeout(
                 this.start(
                   {
-                    serverAddress: this.options.line.serverAddress,
-                    remotePort: this.options.line.remotePort,
-                    keyPath: this.options.line.keyPath,
+                    serverAddress: this.options.peer.serverAddress,
+                    remotePort: this.options.peer.remotePort,
+                    keyPath: this.options.peer.keyPath,
                     localHost: "127.0.0.1",
                     localPort: 0,
                   },
@@ -281,24 +276,24 @@ export class LineRuntime {
               return yield* Effect.fail(new Error("Connector did not provide local address"));
             const upstream = this.createUpstream(
               new URL(`http://${connector.ready.localAddress}/mcp`),
-              this.options.line.remoteBearer,
+              this.options.peer.remoteBearer,
             );
             yield* Effect.acquireRelease(
               this.timeout(
                 this.promise(() =>
-                  upstream.client.connect(upstream.transport, { signal, timeout: 40_000 }),
+                  upstream.agent.connect(upstream.transport, { signal, timeout: 40_000 }),
                 ),
               ),
               () =>
                 this.closePromise(async () => {
                   await upstream.transport.terminateSession?.();
-                  await upstream.client.close();
+                  await upstream.agent.close();
                 }),
               { interruptible: true },
             );
             const result = yield* this.timeout(
               this.promise(() =>
-                upstream.client.callTool({ name: "list_workspaces", arguments: {} }, undefined, {
+                upstream.agent.callTool({ name: "list_workspaces", arguments: {} }, undefined, {
                   signal,
                   timeout: 40_000,
                 }),
@@ -309,7 +304,7 @@ export class LineRuntime {
               catch: (error) => error,
             });
             yield* Effect.try({ try: () => signal.throwIfAborted(), catch: (error) => error });
-            return { connector, client: upstream.client, transport: upstream.transport, scope };
+            return { connector, agent: upstream.agent, transport: upstream.transport, scope };
           }),
           Context.make(Scope.Scope, scope),
         ),
@@ -332,7 +327,7 @@ export class LineRuntime {
       })),
       (request) =>
         Effect.sync(() => {
-          request.promise = session.client.callTool(
+          request.promise = session.agent.callTool(
             params,
             undefined,
             requestOptions(mergeSignals(signal, request.controller.signal), timeout),
@@ -388,21 +383,21 @@ export class LineRuntime {
   private closePromise(try_: () => Promise<void>) {
     return this.promise(try_).pipe(Effect.catchEager(() => Effect.void));
   }
-  private verifiedWorkspaces(result: Record<string, unknown>): LineWorkspaces {
+  private verifiedWorkspaces(result: Record<string, unknown>): PeerWorkspaces {
     const workspaces = this.result(result, parseWorkspaces);
-    if (workspaces.owner.id !== this.options.line.expectedOwnerId)
-      throw new QujingError("OWNER_ID_MISMATCH", "Owner identity mismatch");
+    if (workspaces.node.id !== this.options.peer.expectedNodeId)
+      throw new QujingError("NODE_ID_MISMATCH", "Node identity mismatch");
     return workspaces;
   }
   private result<T>(result: Record<string, unknown>, parse: (input: unknown) => T): T {
-    if (result.isError) throw this.gatewayFailure(result);
+    if (result.isError) throw this.nodeFailure(result);
     try {
       return parse(result.structuredContent);
     } catch (error) {
       throw new Error("Invalid upstream response", { cause: error });
     }
   }
-  private gatewayFailure(result: Record<string, unknown>): QujingError {
+  private nodeFailure(result: Record<string, unknown>): QujingError {
     const structured = Option.getOrUndefined(parseErrorCode(result.structuredContent))?.code;
     const text = Array.isArray(result.content)
       ? result.content.find(
@@ -422,7 +417,7 @@ export class LineRuntime {
   private safeFailure(error: unknown): QujingError {
     return error instanceof QujingError
       ? error
-      : new QujingError("LINE_UNAVAILABLE", "Line unavailable");
+      : new QujingError("PEER_UNAVAILABLE", "Peer unavailable");
   }
 }
 

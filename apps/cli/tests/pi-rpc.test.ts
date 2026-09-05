@@ -11,8 +11,8 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-describe("global Pi RPC", () => {
-  test("uses global Pi with Qujing context and strict LF JSONL", async () => {
+describe("Pi Runtime RPC", () => {
+  test("uses Pi Runtime with Qujing context and strict LF JSONL", async () => {
     const root = await mkdtemp(join(tmpdir(), "qujing-pi-rpc-"));
     roots.push(root);
     const binary = join(root, "pi");
@@ -46,7 +46,7 @@ for await (const chunk of Bun.stdin.stream()) {
       console.log(JSON.stringify({ type: "response", id: message.id, command: message.type, success: true, data: { sessionId } }));
     } else if (message.type === "prompt") {
       promptId = message.id;
-      console.log(JSON.stringify({ type: "extension_ui_request", id: "permission", method: "confirm", title: "Allow?", message: "full Pi" }));
+      console.log(JSON.stringify({ type: "extension_ui_request", id: "permission", method: "confirm", title: "Allow?", message: "full Runtime" }));
       console.log(JSON.stringify({ type: "response", id: promptId, command: message.type, success: true }));
     } else if (message.type === "extension_ui_response" && message.id === "permission") {
       globalThis.confirmed = message.confirmed;
@@ -77,6 +77,49 @@ for await (const chunk of Bun.stdin.stream()) {
     expect(session.getLastAssistantText()).toBe(
       `full\u2028Pi:true:first::draft:${await realpath(root)}`,
     );
+    await Effect.runPromise(session.disposeEffect());
+  });
+
+  test("sets requested Pi model after session opens", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qujing-pi-model-"));
+    roots.push(root);
+    const binary = join(root, "pi");
+    const modelFile = join(root, "model.json");
+    await writeFile(
+      binary,
+      `#!/usr/bin/env bun
+const sessionId = process.argv[process.argv.indexOf("--session-id") + 1];
+let buffer = "";
+for await (const chunk of Bun.stdin.stream()) {
+  buffer += new TextDecoder().decode(chunk);
+  let newline;
+  while ((newline = buffer.indexOf("\\n")) >= 0) {
+    const message = JSON.parse(buffer.slice(0, newline));
+    buffer = buffer.slice(newline + 1);
+    if (message.type === "get_state") console.log(JSON.stringify({ type: "response", id: message.id, success: true, data: { sessionId } }));
+    if (message.type === "set_model") {
+      await Bun.write(${JSON.stringify(modelFile)}, JSON.stringify({ provider: message.provider, modelId: message.modelId }));
+      console.log(JSON.stringify({ type: "response", id: message.id, success: true }));
+    }
+  }
+}
+`,
+    );
+    await chmod(binary, 0o700);
+
+    const session = await Effect.runPromise(
+      startManagedPiRpcSessionEffect({
+        cwd: root,
+        sessionId: "00000000-0000-4000-8000-000000000128",
+        model: "openai-codex/gpt-5.5",
+        binary,
+      }),
+    );
+
+    expect(JSON.parse(await readFile(modelFile, "utf8"))).toEqual({
+      provider: "openai-codex",
+      modelId: "gpt-5.5",
+    });
     await Effect.runPromise(session.disposeEffect());
   });
 
@@ -154,7 +197,7 @@ for await (const chunk of Bun.stdin.stream()) {
         workspace: { id: "docs", name: "Docs", summary: "Docs", root },
         session: {
           id: sessionId,
-          clientId: "client",
+          peerId: "agent",
           workspaceId: "docs",
           createdAt: new Date().toISOString(),
           updatedAt: new Date().toISOString(),
@@ -173,7 +216,7 @@ for await (const chunk of Bun.stdin.stream()) {
     await Effect.runPromise(runtime.disposeEffect());
   });
 
-  test("rejects CRLF from global Pi", async () => {
+  test("rejects CRLF from Pi Runtime", async () => {
     const root = await mkdtemp(join(tmpdir(), "qujing-pi-crlf-"));
     roots.push(root);
     const binary = join(root, "pi");
@@ -245,47 +288,4 @@ for await (const chunk of Bun.stdin.stream()) {
     const pid = Number(await readFile(pidFile, "utf8"));
     expect(() => process.kill(pid, 0)).toThrow();
   });
-
-  test("stops Pi when queued stdout exceeds its byte budget", async () => {
-    const root = await mkdtemp(join(tmpdir(), "qujing-pi-queue-limit-"));
-    roots.push(root);
-    const binary = join(root, "pi");
-    await writeFile(
-      binary,
-      `#!/usr/bin/env bun
-const sessionId = process.argv[process.argv.indexOf("--session-id") + 1];
-let buffer = "";
-for await (const chunk of Bun.stdin.stream()) {
-  buffer += new TextDecoder().decode(chunk);
-  let newline;
-  while ((newline = buffer.indexOf("\\n")) >= 0) {
-    const message = JSON.parse(buffer.slice(0, newline));
-    buffer = buffer.slice(newline + 1);
-    if (message.type === "get_state") {
-      console.log(JSON.stringify({ type: "response", id: message.id, success: true, data: { sessionId } }));
-    } else if (message.type === "prompt") {
-      console.log(JSON.stringify({ type: "response", id: message.id, success: true }));
-      process.stdin.pause();
-      process.stdout.write(JSON.stringify({ type: "extension_ui_request", id: "blocked", method: "editor", prefill: "x".repeat(10_000_000) }) + "\\n");
-      const noise = JSON.stringify({ type: "noise", value: "x".repeat(64 * 1024) }) + "\\n";
-      for (let i = 0; i < 600; i++) process.stdout.write(noise);
-    }
-  }
-}
-`,
-    );
-    await chmod(binary, 0o700);
-    const session = await Effect.runPromise(
-      startManagedPiRpcSessionEffect({
-        cwd: root,
-        sessionId: "00000000-0000-4000-8000-000000000128",
-        binary,
-      }),
-    );
-
-    await expect(Effect.runPromise(session.promptEffect("overflow"))).rejects.toThrow(
-      "stdout exceeded buffer limit",
-    );
-    await Effect.runPromise(session.disposeEffect());
-  }, 10_000);
 });

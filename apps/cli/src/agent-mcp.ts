@@ -1,7 +1,7 @@
 import { Effect, Layer, Schema } from "effect";
 import { McpServer, Tool, Toolkit } from "effect/unstable/ai";
-import { ClientApplication } from "./client-application";
-import type { ClientConfigStore } from "./client-config";
+import { AgentApplication } from "./agent-application";
+import type { AgentConfigStore } from "./agent-config";
 import { QujingError } from "./errors";
 import {
   createEffectMcpSession,
@@ -9,34 +9,34 @@ import {
   McpToolFailure,
   withAbortSignal,
   type EffectMcpSession,
-  type McpGateway,
+  type McpHttpServer,
   type McpHttpOptions,
 } from "./mcp";
-import { ClientAskResult, ClientLinesResult, NonEmptyString } from "./schemas";
+import { AgentAskResult, AgentPeersResult, NonEmptyString } from "./schemas";
 
-export interface ClientMcpOptions extends Omit<
+export interface AgentMcpOptions extends Omit<
   McpHttpOptions,
   "authenticateEffect" | "createServer"
 > {
-  app: ClientApplication;
-  config: Pick<ClientConfigStore, "authenticateLocalEffect">;
+  app: AgentApplication;
+  config: Pick<AgentConfigStore, "authenticateLocalEffect">;
 }
 
-export function createClientMcp(options: ClientMcpOptions): McpGateway {
+export function createAgentMcp(options: AgentMcpOptions): McpHttpServer {
   return createMcpHttpServer({
     ...options,
     authenticateEffect: (bearer) => options.config.authenticateLocalEffect(bearer),
-    createServer: () => createClientServer(options.app, options.allowedOrigins),
+    createServer: (_node) => createAgentServer(options.app, options.allowedOrigins),
   });
 }
 
-function createClientServer(
-  app: ClientApplication,
+function createAgentServer(
+  app: AgentApplication,
   allowedOrigins: readonly string[],
 ): EffectMcpSession {
-  const listLines = Tool.make("list_lines", {
-    description: "List configured Lines and each Line's public Workspace metadata.",
-    success: ClientLinesResult,
+  const listPeers = Tool.make("list_peers", {
+    description: "List configured Peers and each Peer's public Workspace metadata.",
+    success: AgentPeersResult,
     failure: McpToolFailure,
   })
     .annotate(Tool.Readonly, true)
@@ -44,48 +44,48 @@ function createClientServer(
     .annotate(Tool.Destructive, false)
     .annotate(Tool.OpenWorld, false);
   const ask = Tool.make("ask", {
-    description: "Ask one exact Workspace on one exact Line for colleague consultation.",
+    description: "Ask one exact Workspace on one exact Peer for colleague consultation.",
     parameters: Schema.Struct({
-      line: NonEmptyString,
+      peer: NonEmptyString,
       workspace: NonEmptyString,
       question: Schema.String,
     }),
-    success: ClientAskResult,
+    success: AgentAskResult,
     failure: McpToolFailure,
   })
     .annotate(Tool.Readonly, false)
     .annotate(Tool.Idempotent, false)
     .annotate(Tool.Destructive, true)
     .annotate(Tool.OpenWorld, true);
-  const toolkit = Toolkit.make(listLines, ask);
+  const toolkit = Toolkit.make(listPeers, ask);
   const handlers = toolkit.toLayer({
-    list_lines: () =>
+    list_peers: () =>
       withAbortSignal((signal) =>
-        app.listLinesEffect(signal).pipe(
-          Effect.map((lines) => ({ lines })),
-          Effect.mapError(clientToolFailure),
+        app.listPeersEffect(signal).pipe(
+          Effect.map((peers) => ({ peers })),
+          Effect.mapError(agentToolFailure),
         ),
       ),
-    ask: ({ line, workspace, question }) =>
+    ask: ({ peer, workspace, question }) =>
       withAbortSignal((signal) =>
         app
-          .askEffect({ line, workspace, question }, signal)
-          .pipe(Effect.mapError(clientToolFailure)),
+          .askEffect({ peer, workspace, question }, signal)
+          .pipe(Effect.mapError(agentToolFailure)),
       ),
   });
   const registrations = Layer.effectDiscard(McpServer.registerToolkit(toolkit)).pipe(
     Layer.provide(handlers),
   );
-  return createEffectMcpSession("qujing-client", registrations, allowedOrigins);
+  return createEffectMcpSession("qujing-agent", registrations, allowedOrigins);
 }
 
-function clientToolFailure(error: unknown): McpToolFailure {
+function agentToolFailure(error: unknown): McpToolFailure {
   return new McpToolFailure({
     message:
       error instanceof QujingError
         ? `${error.code}: ${error.message}`
         : error instanceof DOMException && error.name === "AbortError"
           ? "CANCELLED: Request cancelled"
-          : "LINE_UNAVAILABLE: Line unavailable",
+          : "PEER_UNAVAILABLE: Peer unavailable",
   });
 }

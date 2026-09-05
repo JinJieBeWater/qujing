@@ -14,32 +14,29 @@ import {
 
 describe("role user service definitions", () => {
   test("creates separate restartable macOS LaunchAgents", () => {
-    const gateway = serviceDefinition(
+    const node = serviceDefinition("darwin", ["/Applications/Qujing/qj", "serve", "node"], "node");
+    const agent = serviceDefinition(
       "darwin",
-      ["/Applications/Qujing/qj", "serve", "gateway"],
-      "gateway",
+      ["/Applications/Qujing/qj", "serve", "agent"],
+      "agent",
     );
-    const client = serviceDefinition(
-      "darwin",
-      ["/Applications/Qujing/qj", "serve", "client"],
-      "client",
-    );
-    expect(gateway.path).toContain("com.qujing.gateway.plist");
-    expect(client.path).toContain("com.qujing.client.plist");
-    expect(gateway.content).toContain("<string>serve</string><string>gateway</string>");
-    expect(gateway.content).toContain("<key>KeepAlive</key>");
-    expect(gateway.content).toContain("<key>StandardOutPath</key><string>/dev/null</string>");
-    expect(gateway.content).not.toContain("sh -c");
+    expect(node.path).toContain("com.qujing.node.plist");
+    expect(agent.path).toContain("com.qujing.agent.plist");
+    expect(node.content).toContain("<string>serve</string><string>node</string>");
+    expect(node.content).toContain("<key>KeepAlive</key>");
+    expect(node.content).toContain("<key>StandardOutPath</key><string>/dev/null</string>");
+    expect(node.content).not.toContain("sh -c");
   });
 
   test("creates separate restartable Linux services", () => {
     const definition = serviceDefinition(
       "linux",
-      ["/home/alice/Qujing/qj", "serve", "client"],
-      "client",
+      ["/home/alice/Qujing/qj", "serve", "agent"],
+      "agent",
     );
-    expect(definition.path).toContain("systemd/user/qujing-client.service");
-    expect(definition.content).toContain('ExecStart="/home/alice/Qujing/qj" "serve" "client"');
+    expect(definition.path).toContain("systemd/user/qujing-agent.service");
+    expect(definition.content).toContain("After=network-online.target");
+    expect(definition.content).toContain('ExecStart="/home/alice/Qujing/qj" "serve" "agent"');
     expect(definition.content).toContain("Restart=on-failure");
     expect(definition.content).toContain("StandardOutput=null");
   });
@@ -48,61 +45,61 @@ describe("role user service definitions", () => {
 test("removes Linux unit before daemon reload", async () => {
   const events: string[] = [];
   await Effect.runPromise(
-    removeUserServiceEffect("client", "linux", {
+    removeUserServiceEffect("agent", "linux", {
       run: (command) => Effect.sync(() => void events.push(command.join(" "))),
       remove: () => Effect.sync(() => void events.push("remove")),
     }),
   );
   expect(events).toEqual([
-    "systemctl --user disable --now qujing-client.service",
+    "systemctl --user disable --now qujing-agent.service",
     "remove",
     "systemctl --user daemon-reload",
   ]);
 });
 
 test("uses role-named launchers for macOS services", () => {
-  expect(currentServeCommand("gateway", "darwin", "/opt/qujing/qj", "service")).toEqual([
-    serviceLauncherPath("gateway"),
+  expect(currentServeCommand("node", "darwin", "/opt/qujing/qj", "service")).toEqual([
+    serviceLauncherPath("node"),
     "serve",
-    "gateway",
+    "node",
   ]);
-  expect(currentServeCommand("client", "darwin", "/opt/homebrew/bin/bun", "/src/cli.ts")).toEqual([
-    serviceLauncherPath("client"),
+  expect(currentServeCommand("agent", "darwin", "/opt/homebrew/bin/bun", "/src/cli.ts")).toEqual([
+    serviceLauncherPath("agent"),
     "/src/cli.ts",
     "serve",
-    "client",
+    "agent",
   ]);
 });
 
 test("removes macOS service launcher with its plist", async () => {
   const events: string[] = [];
   await Effect.runPromise(
-    removeUserServiceEffect("gateway", "darwin", {
+    removeUserServiceEffect("node", "darwin", {
       run: (command) => Effect.sync(() => void events.push(command.join(" "))),
       remove: (path) => Effect.sync(() => void events.push(`remove ${path}`)),
     }),
   );
   expect(events).toEqual([
-    `launchctl bootout gui/${process.getuid?.() ?? 0}/com.qujing.gateway`,
-    `remove ${serviceDefinition("darwin", [], "gateway").path}`,
-    `remove ${serviceLauncherPath("gateway")}`,
+    `launchctl bootout gui/${process.getuid?.() ?? 0}/com.qujing.node`,
+    `remove ${serviceDefinition("darwin", [], "node").path}`,
+    `remove ${serviceLauncherPath("node")}`,
   ]);
 });
 
 test("installs and atomically replaces a macOS service launcher", async () => {
   const home = await mkdtemp(join(tmpdir(), "qujing-service-"));
-  const launcher = serviceLauncherPath("gateway", home);
+  const launcher = serviceLauncherPath("node", home);
   const definition = serviceDefinition(
     "darwin",
-    [launcher, "/src/a&b.ts", "serve", "gateway"],
-    "gateway",
+    [launcher, "/src/a&b.ts", "serve", "node"],
+    "node",
     home,
   );
   try {
     await mkdir(dirname(launcher), { recursive: true });
     await symlink("/old/qj", launcher);
     await Effect.runPromise(
-      installUserServiceEffect([launcher, "/src/a&b.ts", "serve", "gateway"], "gateway", {
+      installUserServiceEffect([launcher, "/src/a&b.ts", "serve", "node"], "node", {
         platform: "darwin",
         home,
         executable: "/new/qj",
@@ -119,7 +116,7 @@ test("installs and atomically replaces a macOS service launcher", async () => {
 test("rolls back macOS service launcher when installation fails", async () => {
   for (const previousTarget of [undefined, "/old/qj"] as const) {
     const home = await mkdtemp(join(tmpdir(), "qujing-service-"));
-    const launcher = serviceLauncherPath("gateway", home);
+    const launcher = serviceLauncherPath("node", home);
     try {
       if (previousTarget !== undefined) {
         await mkdir(dirname(launcher), { recursive: true });
@@ -127,7 +124,7 @@ test("rolls back macOS service launcher when installation fails", async () => {
       }
       await expect(
         Effect.runPromise(
-          installUserServiceEffect([launcher, "serve", "gateway"], "gateway", {
+          installUserServiceEffect([launcher, "serve", "node"], "node", {
             platform: "darwin",
             home,
             executable: "/new/qj",

@@ -19,15 +19,15 @@ it.live("runs ConfigStore Effect API", () =>
     yield* Effect.ensuring(
       Effect.gen(function* () {
         yield* Effect.tryPromise({ try: () => mkdir(workspace), catch: (error) => error });
-        yield* store.initEffect({ owner: { id: "jason", name: "Jason" } });
+        yield* store.initEffect({ node: { id: "jason", name: "Jason" } });
         yield* store.addWorkspaceEffect({
           id: "tooling",
           name: "Tooling",
-          summary: "Pi tooling",
+          summary: "Runtime tooling",
           root: workspace,
         });
         expect(yield* store.listPublicWorkspacesEffect()).toEqual([
-          { id: "tooling", name: "Tooling", summary: "Pi tooling", available: true },
+          { id: "tooling", name: "Tooling", summary: "Runtime tooling", available: true },
         ]);
       }),
       Effect.tryPromise({

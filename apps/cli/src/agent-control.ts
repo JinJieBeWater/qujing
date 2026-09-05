@@ -2,90 +2,102 @@ import { randomUUID } from "node:crypto";
 import { readFile, rm } from "node:fs/promises";
 import { join } from "node:path";
 import { Effect } from "effect";
-import { ClientApplication, lineFingerprint } from "./client-application";
-import type { ClientConfig, LineConfig } from "./client-config";
+import { AgentApplication, peerFingerprint } from "./agent-application";
+import type { AgentConfig, PeerConfig } from "./agent-config";
 import { sleep } from "./effect-runtime";
-import { configFingerprint } from "./gateway-reload";
-import { writePrivateJsonEffect } from "./private-files";
+import { configFingerprint } from "./reload";
+import { processExists, writePrivateJsonEffect } from "./private-files";
 import { processLockActiveEffect } from "./process-lock";
 import {
-  ClientLineRetirement as ClientLineRetirementSchema,
-  ClientLineRetirementAcknowledgement,
+  PeerRetirement as PeerRetirementSchema,
+  PeerRetirementAcknowledgement,
   decode,
-  type ClientLineRetirement as ClientLineRetirementData,
+  type PeerRetirement as PeerRetirementData,
 } from "./schemas";
 
-const parseRequest = decode(ClientLineRetirementSchema);
-const parseAcknowledgement = decode(ClientLineRetirementAcknowledgement);
+const parseRequest = decode(PeerRetirementSchema);
+const parseAcknowledgement = decode(PeerRetirementAcknowledgement);
 
-export type ClientLineRetirement = ClientLineRetirementData;
+export type PeerRetirement = PeerRetirementData;
 
-export function requestClientLineRetirementEffect(
+export function requestPeerRetirementEffect(
   stateRoot: string,
-  config: ClientConfig,
-  line: LineConfig,
-): Effect.Effect<ClientLineRetirement, unknown> {
+  config: AgentConfig,
+  peer: PeerConfig,
+): Effect.Effect<PeerRetirement, unknown> {
   return Effect.gen(function* () {
     const request = parseRequest({
       version: 1,
       id: randomUUID(),
-      lineId: line.id,
-      lineFingerprint: lineFingerprint(line),
+      peerId: peer.id,
+      peerFingerprint: peerFingerprint(peer),
       configFingerprint: configFingerprint(config),
       requesterPid: process.pid,
       createdAt: new Date().toISOString(),
     });
-    yield* promise(() => rm(acknowledgementPath(stateRoot), { force: true }));
+    yield* Effect.tryPromise({
+      try: () => rm(acknowledgementPath(stateRoot), { force: true }),
+      catch: (error) => error,
+    });
     yield* writePrivateJsonEffect(requestPath(stateRoot), request);
     return request;
   });
 }
 
-export function cancelClientLineRetirementEffect(
+export function cancelPeerRetirementEffect(
   stateRoot: string,
-  request: ClientLineRetirement,
+  request: PeerRetirement,
 ): Effect.Effect<void, unknown> {
   return writePrivateJsonEffect(requestPath(stateRoot), { ...request, cancelled: true });
 }
 
-export function waitForClientLineRetirementEffect(
+export function waitForPeerRetirementEffect(
   stateRoot: string,
-  request: ClientLineRetirement,
+  request: PeerRetirement,
   timeoutMs = 45_000,
 ): Effect.Effect<boolean, unknown> {
   const deadline = Date.now() + timeoutMs;
   return Effect.gen(function* () {
     for (;;) {
-      const acknowledgement = yield* promise(() => readAcknowledgement(stateRoot));
+      const acknowledgement = yield* Effect.tryPromise({
+        try: () => readAcknowledgement(stateRoot),
+        catch: (error) => error,
+      });
       if (acknowledgement?.requestId === request.id) return true;
-      if (!(yield* processLockActiveEffect(join(stateRoot, "client.lock")))) return false;
+      if (!(yield* processLockActiveEffect(join(stateRoot, "agent.lock")))) return false;
       if (Date.now() >= deadline)
-        return yield* Effect.fail(new Error("Timed out waiting for Client Line retirement"));
+        return yield* Effect.fail(new Error("Timed out waiting for Agent Peer retirement"));
       yield* sleep(50);
     }
   });
 }
 
-export function processClientLineRetirementEffect(
+export function processPeerRetirementEffect(
   stateRoot: string,
-  config: ClientConfig,
-  app: ClientApplication,
+  config: AgentConfig,
+  app: AgentApplication,
 ): Effect.Effect<void, unknown> {
   return Effect.gen(function* () {
-    const request = yield* promise(() => readRequest(stateRoot));
+    const request = yield* Effect.tryPromise({
+      try: () => readRequest(stateRoot),
+      catch: (error) => error,
+    });
     if (!request) return;
     if (
       request.cancelled ||
       request.configFingerprint !== configFingerprint(config) ||
       !processExists(request.requesterPid)
     ) {
-      yield* app.resumeLineEffect(request.lineId, request.lineFingerprint);
-      yield* promise(() => clearControl(stateRoot));
+      yield* app.resumePeerEffect(request.peerId, request.peerFingerprint);
+      yield* Effect.tryPromise({ try: () => clearControl(stateRoot), catch: (error) => error });
       return;
     }
-    const acknowledgement = yield* promise(() => readAcknowledgement(stateRoot));
+    const acknowledgement = yield* Effect.tryPromise({
+      try: () => readAcknowledgement(stateRoot),
+      catch: (error) => error,
+    });
     if (acknowledgement?.requestId === request.id) return;
-    yield* app.retireLineEffect(request.lineId, request.lineFingerprint);
+    yield* app.retirePeerEffect(request.peerId, request.peerFingerprint);
     yield* writePrivateJsonEffect(acknowledgementPath(stateRoot), {
       requestId: request.id,
       updatedAt: new Date().toISOString(),
@@ -93,7 +105,7 @@ export function processClientLineRetirementEffect(
   });
 }
 
-async function readRequest(stateRoot: string): Promise<ClientLineRetirement | undefined> {
+async function readRequest(stateRoot: string): Promise<PeerRetirement | undefined> {
   return readJson(requestPath(stateRoot), parseRequest);
 }
 
@@ -118,22 +130,9 @@ async function clearControl(stateRoot: string): Promise<void> {
 }
 
 function requestPath(stateRoot: string): string {
-  return join(stateRoot, "client-line-retirement.json");
+  return join(stateRoot, "agent-peer-retirement.json");
 }
 
 function acknowledgementPath(stateRoot: string): string {
-  return join(stateRoot, "client-line-retirement-ack.json");
-}
-
-function processExists(pid: number): boolean {
-  try {
-    process.kill(pid, 0);
-    return true;
-  } catch (error) {
-    return (error as NodeJS.ErrnoException).code === "EPERM";
-  }
-}
-
-function promise<A>(try_: () => Promise<A>) {
-  return Effect.tryPromise({ try: try_, catch: (error) => error });
+  return join(stateRoot, "agent-peer-retirement-ack.json");
 }

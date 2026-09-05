@@ -3,32 +3,32 @@ import { Effect } from "effect";
 import { chmod, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ClientConfigStore } from "../src/client-config";
-import { runClientDoctorEffect } from "../src/client-doctor";
+import { AgentConfigStore } from "../src/agent-config";
+import { runAgentDoctorEffect } from "../src/agent-doctor";
 
 const roots: string[] = [];
 afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-test("checks private Client state, transport, port, and each Line independently", async () => {
-  const root = await mkdtemp(join(tmpdir(), "qujing-client-doctor-"));
+test("checks private Agent state, transport, port, and each Peer independently", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qujing-agent-doctor-"));
   roots.push(root);
-  const configPath = join(root, "config", "client.json");
+  const configPath = join(root, "config", "agent.json");
   const stateRoot = join(root, "state");
   const transportBinary = join(root, "transport");
-  const keyPath = join(root, "line.key");
+  const keyPath = join(root, "peer.key");
   await Bun.write(transportBinary, "binary");
   await chmod(transportBinary, 0o700);
   await Bun.write(keyPath, "key");
   await chmod(keyPath, 0o600);
-  const store = new ClientConfigStore({ configPath });
+  const store = new AgentConfigStore({ configPath });
   await Effect.runPromise(store.initEffect({ port: 43222 }));
   await Effect.runPromise(
     store.addEffect({
       id: "one",
-      expectedOwnerId: "owner",
-      remoteClientId: "remote",
+      expectedNodeId: "node",
+      remoteAgentId: "remote",
       serverAddress: "tailcat",
       remotePort: 43110,
       keyPath,
@@ -37,62 +37,62 @@ test("checks private Client state, transport, port, and each Line independently"
   );
 
   const report = await Effect.runPromise(
-    runClientDoctorEffect(
-      { clientConfigPath: configPath, clientStateRoot: stateRoot, transportBinary },
+    runAgentDoctorEffect(
+      { agentConfigPath: configPath, agentStateRoot: stateRoot, transportBinary },
       {
         checkPort: () => Effect.succeed(true),
-        inspectLines: () => Effect.succeed([{ id: "one", available: false }]),
+        inspectPeers: () => Effect.succeed([{ id: "one", available: false }]),
       },
     ),
   );
   expect(report.ok).toBe(false);
   expect(report.checks).toEqual(
     expect.arrayContaining([
-      { name: "config", status: "ok", message: "Client config is valid and private" },
-      { name: "line-key:one", status: "ok", message: "Line key is private" },
-      { name: "line:one", status: "error", message: "Line is unavailable" },
+      { name: "config", status: "ok", message: "Agent config is valid and private" },
+      { name: "peer-key:one", status: "ok", message: "Peer key is private" },
+      { name: "peer:one", status: "error", message: "Peer is unavailable" },
     ]),
   );
 });
 
-test("reports unsafe Client state permissions", async () => {
+test("reports unsafe Agent state permissions", async () => {
   if (process.platform === "win32") return;
-  const root = await mkdtemp(join(tmpdir(), "qujing-client-doctor-state-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-agent-doctor-state-"));
   roots.push(root);
-  const configPath = join(root, "config", "client.json");
+  const configPath = join(root, "config", "agent.json");
   const stateRoot = join(root, "state");
   const transportBinary = join(root, "transport");
   await Bun.write(transportBinary, "binary");
   await chmod(transportBinary, 0o700);
   await Bun.write(join(stateRoot, "entry"), "state");
   await chmod(stateRoot, 0o755);
-  const store = new ClientConfigStore({ configPath });
+  const store = new AgentConfigStore({ configPath });
   await Effect.runPromise(store.initEffect());
   const report = await Effect.runPromise(
-    runClientDoctorEffect(
-      { clientConfigPath: configPath, clientStateRoot: stateRoot, transportBinary },
-      { checkPort: () => Effect.succeed(true), inspectLines: () => Effect.succeed([]) },
+    runAgentDoctorEffect(
+      { agentConfigPath: configPath, agentStateRoot: stateRoot, transportBinary },
+      { checkPort: () => Effect.succeed(true), inspectPeers: () => Effect.succeed([]) },
     ),
   );
   expect(report.checks.find(({ name }) => name === "state")?.status).toBe("error");
 });
 
-test("reports invalid Client config without aborting doctor", async () => {
-  const root = await mkdtemp(join(tmpdir(), "qujing-client-doctor-config-"));
+test("reports invalid Agent config without aborting doctor", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qujing-agent-doctor-config-"));
   roots.push(root);
-  const configPath = join(root, "config", "client.json");
+  const configPath = join(root, "config", "agent.json");
   const stateRoot = join(root, "state");
   const transportBinary = join(root, "transport");
   await Bun.write(transportBinary, "binary");
   await chmod(transportBinary, 0o700);
-  await Effect.runPromise(new ClientConfigStore({ configPath }).initEffect());
+  await Effect.runPromise(new AgentConfigStore({ configPath }).initEffect());
   await Bun.write(configPath, "not-json");
   if (process.platform !== "win32") await chmod(configPath, 0o600);
 
   const report = await Effect.runPromise(
-    runClientDoctorEffect({
-      clientConfigPath: configPath,
-      clientStateRoot: stateRoot,
+    runAgentDoctorEffect({
+      agentConfigPath: configPath,
+      agentStateRoot: stateRoot,
       transportBinary,
     }),
   );

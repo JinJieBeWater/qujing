@@ -2,32 +2,32 @@
 
 **English** | [简体中文](README.zh-CN.md)
 
-Qujing lets one MCP Agent ask multiple real colleagues through one local endpoint. Each colleague runs an Owner Gateway over manually registered Workspaces. Agent-side Client keeps one private **Line** per Owner and routes only when Agent supplies exact Line and Workspace IDs.
+Qujing lets one MCP Agent ask multiple real colleagues through one local Node endpoint. Each colleague is a Qujing Node with manually registered Workspaces. Local Node keeps one private **Peer Link** per paired Peer and routes only when Agent supplies exact Peer and Workspace IDs.
 
 ```text
-Agent → local Client MCP → selected Line/Tailcat → Owner Gateway → Runtime → Workspace
+Agent → local Node MCP → selected Peer Link/Tailcat → Peer Node → Runtime → Workspace
 ```
 
-No automatic routing, shared knowledge index, public Gateway, or per-Owner Agent MCP configuration.
+No automatic routing, shared knowledge index, public Node, network discovery, or per-Peer Agent MCP configuration.
 
 > **Platforms:** macOS Apple Silicon and Linux x64 supported. Windows x64 release remains **Preview** pending native acceptance.
 
 ## Agent-facing MCP
 
-Client exposes exactly two Streamable HTTP tools at `/mcp`:
+Local Node exposes exactly two Streamable HTTP tools at `/mcp`:
 
-- `list_lines()` returns each Line’s availability, verified Owner metadata, and public Workspace metadata.
-- `ask({ line, workspace, question })` asks one exact Workspace through one exact Line.
+- `list_peers()` returns visible Peer candidates plus each paired Peer’s availability, verified Node metadata, and public Workspace metadata.
+- `ask({ peer, workspace, question })` asks one exact Workspace through one exact Peer.
 
-Agent authenticates with one local bearer. Set MCP tool-call timeout to at least **135 seconds**. Owner Gateway’s internal `list_workspaces()` and `ask({ workspace, question })` are never configured directly in Agent.
+Agent authenticates with one local bearer. Agent is not a Peer. Discovery is only visibility; `ask` still requires paired Peer credentials. Set MCP tool-call timeout to at least **135 seconds**. Node’s internal `list_workspaces()` and `ask({ workspace, question })` are never configured directly in Agent.
 
-## Roles
+## Model
 
-- **Owner** runs Gateway, Runtime, and Workspaces.
-- **Client** runs one local MCP service and private Lines to any number of Owners.
-- **Agent** connects only to Client at `http://127.0.0.1:43111/mcp` by default.
+- **Node** is one Qujing identity controlled by one person. One installation has one Node identity.
+- **Peer** is another Qujing Node visible to local Node. Manual PeerDirectory can list candidates; empty directory lists none.
+- **Agent** connects only to local Node at `http://127.0.0.1:43111/mcp` by default and is not part of Peer mesh.
 
-One machine may run both Owner and Client roles. Their commands, configs, locks, and services remain separate.
+Current process roles still split Node, Agent-facing MCP service, and Connector. They are implementation boundaries, not product identities.
 
 ## Install
 
@@ -77,103 +77,97 @@ For a version-pinned or offline release bundle, run `bunx --bun skills add ./ski
 
 ## Minimal setup
 
-Both installation methods keep `qj` and `qujing-transport` from the same release together. By default, Owner machine must also have its normal global `pi` CLI available on `PATH`. Gateway can instead run a TanStack AI ACP harness configured with `qj runtime set-acp`.
+Both installation methods keep `qj` and `qujing-transport` from the same release together. Node Runtime is either built-in Pi RPC or a configured TanStack AI ACP harness.
 
-### 1. Start Owner Gateway
-
-```bash
-qj init gateway --owner-id jinjiebewater --owner-name JinJieBeWater
-qj workspace add pi-tooling --name "Pi Tooling" --root ~/src/pi --summary "Pi SDK and extensions"
-```
-
-Optional: replace default Pi Runtime with any ACP-compatible TanStack AI harness:
+### 1. Start Node
 
 ```bash
-qj runtime set-acp codex \
-  --model gpt-5-codex \
-  --command 'codex --acp --model {model} --cwd {cwd}' \
-  --auth host
+qj init node --node-id jinjiebewater --node-name JinJieBeWater
+qj workspace add runtime-tooling --name "Runtime Tooling" --root ~/src/runtime --summary "Runtime SDK and extensions"
 ```
 
-Use `qj runtime use-pi` to return to default global Pi Runtime.
-
-In separate Owner terminal, run and leave Gateway active:
+Configure Runtime before starting Node:
 
 ```bash
-qj serve gateway
+qj runtime set-pi --model openai-codex/gpt-5.5
 ```
 
-### 2. Initialize Agent Client once
+In separate Node terminal, run and leave Node active:
 
 ```bash
-qj init client
+qj serve node
 ```
 
-In separate Client terminal, run and leave Client active:
+### 2. Initialize Agent-facing service once
 
 ```bash
-qj serve client
+qj init agent
 ```
 
-`qj init client` prints local bearer once. Configure Agent once:
+In separate local Node terminal, run and leave Agent-facing service active:
+
+```bash
+qj serve agent
+```
+
+`qj init agent` prints local bearer once. Configure Agent once:
 
 - URL: `http://127.0.0.1:43111/mcp`
 - Header: `Authorization: Bearer <local-bearer>`
 - Timeout: at least `135` seconds
 
-If Client was already initialized but its local bearer was lost, run `qj token rotate` and replace Agent's stored bearer.
+If local bearer was lost, run `qj token rotate` and replace Agent's stored bearer.
 
-### 3. Pair one Line
+### 3. Pair one Peer
 
-On Client machine, create Line key:
+On local Node machine, create Peer Link key:
 
 ```bash
-qj line key-create jinjiebewater
+qj peer key-create jinjiebewater
 ```
 
-Send printed public key to Owner. With Gateway still running, Owner registers one remote Gateway Client identity:
+Send printed public key to Peer Node. With Node still running, Peer Node registers one remote Peer credential:
 
 ```bash
-qj pair create alice-jinjiebewater \
+qj peer invite alice-jinjiebewater \
   --key 'nodekey:...' \
   --out ./alice-jinjiebewater.pairing.json
 ```
 
-Transfer the private pairing bundle to Client through a trusted channel. Client imports it, uses the key created for `jinjiebewater` by default, verifies Owner, and saves Line:
+Transfer the private pairing bundle to local Node through a trusted channel. Local Node imports it, uses the key created for `jinjiebewater` by default, verifies Peer Node, and saves Peer Link:
 
 ```bash
-qj pair accept jinjiebewater --from ./alice-jinjiebewater.pairing.json && rm ./alice-jinjiebewater.pairing.json
+qj peer accept jinjiebewater --from ./alice-jinjiebewater.pairing.json && rm ./alice-jinjiebewater.pairing.json
 ```
 
-After Client confirms import, Owner also removes its source `alice-jinjiebewater.pairing.json`. The bundle contains the one-time remote bearer and Tailcat coordinates. Keep it private and remove every source, transferred, and intermediate copy after import. Omit `--out` to emit JSON on stdout; use `--from -` to import from stdin.
+After local Node confirms import, Peer Node also removes its source `alice-jinjiebewater.pairing.json`. The bundle contains one-time remote bearer and Tailcat coordinates. Keep it private and remove every source, transferred, and intermediate copy after import. Omit `--out` to emit JSON on stdout; use `--from -` to import from stdin.
 
-Repeat only step 3 for more Owners. Agent endpoint and local bearer stay unchanged.
+Repeat only step 3 for more Peers. Agent endpoint and local bearer stay unchanged.
 
 For agent-run installation, pairing, verification, credential rotation, upgrades, or recovery, use [`skills/qujing-setup/SKILL.md`](skills/qujing-setup/SKILL.md).
 
 ## Trust model
 
-- Gateway, Client, and ephemeral Connectors bind loopback only; Tailcat forwards only Gateway port.
-- Agent local bearer and every Line’s Tailcat key/remote bearer are distinct.
-- Client verifies expected Owner ID on every rebuilt upstream MCP session.
-- Default Gateway Runtime runs Owner’s full global `pi --mode rpc --approve`: default model, authentication, settings, skills, extensions, builtin tools, and `~/.pi/agent/sessions/`.
-- Optional TanStack ACP Runtime runs configured ACP-compatible CLI through `@tanstack/ai`, `@tanstack/ai-acp`, local process sandbox, TanStack persistence, and TanStack locks.
+- Node, Agent-facing MCP service, and ephemeral Connectors bind loopback only; Tailcat forwards only Node port.
+- Agent local bearer and every Peer Link’s Tailcat key/remote bearer are distinct.
+- Local Node verifies expected Peer Node ID on every rebuilt upstream MCP session.
+- Node Runtime can run built-in Pi RPC with explicit `provider/model`, or any ACP-compatible CLI through `@tanstack/ai`, `@tanstack/ai-acp`, local process sandbox, TanStack persistence, and TanStack locks.
 - Qujing appends a fixed consultation prompt that asks Runtime to gather relevant context and behave read-only. It does not replace or filter Runtime configuration; the prompt is behavior guidance, not a security boundary.
-- Every paired remote Gateway Client is therefore trusted with Owner-level Runtime capability, including shell execution, file changes, and access outside selected Workspace when Runtime chooses it.
-- Runtime Session IDs remain distinct by remote Gateway Client and Workspace. Revocation removes binding but does not delete Owner’s global Pi archive or TanStack transcript state unless removed separately.
+- Every paired Peer is therefore trusted with Node-level Runtime capability, including shell execution, file changes, and access outside selected Workspace when Runtime chooses it.
+- Runtime Session IDs remain distinct by remote Peer credential and Workspace. Revocation removes binding but does not delete TanStack transcript state unless removed separately.
 - Default Qujing logs exclude credentials, addresses, roots, questions, answers, and file contents.
 
 ## Operations
 
 ```bash
-qj doctor gateway
-qj doctor client
+qj doctor node
+qj doctor agent
 
-qj service install gateway --yes
-qj service install client --yes
+qj service install node --yes
+qj service install agent --yes
 ```
 
-Role services use separate launchd/systemd units on macOS/Linux. macOS Background Items identify them as `qujing-gateway` or `qujing-client`; terminal commands remain `qj`. Windows Preview is foreground-only. Run `qj serve gateway` or `qj serve client` in foreground while diagnosing.
+Process services use separate launchd/systemd units on macOS/Linux. macOS Background Items identify them as `qujing-node` or `qujing-agent`; terminal commands remain `qj`. Windows Preview is foreground-only. Run `qj serve node` or `qj serve agent` in foreground while diagnosing.
 
 ## Source checkout
 

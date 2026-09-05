@@ -81,7 +81,7 @@ func serve(args []string) error {
 	keyPath := flags.String("key", "", "server key path")
 	port := flags.Int("port", 0, "only local TCP port to serve")
 	var allowed repeatedStrings
-	flags.Var(&allowed, "allow", "allowed client public key")
+	flags.Var(&allowed, "allow", "allowed peer public key")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -101,7 +101,7 @@ func serve(args []string) error {
 		var public key.NodePublic
 		if text != "none" {
 			if err := public.UnmarshalText([]byte(text)); err != nil {
-				return fmt.Errorf("invalid allowed client key: %w", err)
+				return fmt.Errorf("invalid allowed peer key: %w", err)
 			}
 		}
 		server.AddAllowedClient(public)
@@ -134,7 +134,7 @@ func serve(args []string) error {
 
 func keyCreate(args []string) error {
 	flags := flag.NewFlagSet("key-create", flag.ContinueOnError)
-	output := flags.String("output", "", "client key path")
+	output := flags.String("output", "", "peer key path")
 	if err := flags.Parse(args); err != nil {
 		return err
 	}
@@ -154,7 +154,7 @@ func connect(args []string) error {
 	flags := flag.NewFlagSet("connect", flag.ContinueOnError)
 	serverAddress := flags.String("server", "", "Tailcat server address")
 	port := flags.Int("port", 0, "remote port")
-	keyPath := flags.String("key", "", "client key path")
+	keyPath := flags.String("key", "", "peer key path")
 	listenAddress := flags.String("listen", "", "loopback listen address")
 	if err := flags.Parse(args); err != nil {
 		return err
@@ -167,15 +167,15 @@ func connect(args []string) error {
 	}
 	privateKey, err := readPrivateKey(*keyPath)
 	if err != nil {
-		return fmt.Errorf("client key: %w", err)
+		return fmt.Errorf("peer key: %w", err)
 	}
-	clients := &clientManager{server: tailcat.ConnBlob(*serverAddress), privateKey: privateKey.Private}
-	defer clients.close()
+	peers := &peerManager{server: tailcat.ConnBlob(*serverAddress), privateKey: privateKey.Private}
+	defer peers.close()
 	ctx, cancel := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer cancel()
 	readyCtx, readyCancel := context.WithTimeout(ctx, 35*time.Second)
 	defer readyCancel()
-	if err := clients.prepare(readyCtx); err != nil {
+	if err := peers.prepare(readyCtx); err != nil {
 		return fmt.Errorf("Tailcat connection failed: %w", err)
 	}
 	transportDebugf("Tailcat connection ready")
@@ -202,28 +202,28 @@ func connect(args []string) error {
 			return err
 		}
 		transportDebugf("accepted local connection")
-		go bridge(clients, local, uint16(*port))
+		go bridge(peers, local, uint16(*port))
 	}
 }
 
-func (manager *clientManager) prepare(ctx context.Context) error {
+func (manager *peerManager) prepare(ctx context.Context) error {
 	for {
-		client := &tailcat.Client{Server: manager.server, Key: manager.privateKey, Logf: discardLog}
+		peerSession := &tailcat.Client{Server: manager.server, Key: manager.privateKey, Logf: discardLog}
 		attemptCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
-		_, err := client.Ping(attemptCtx)
+		_, err := peerSession.Ping(attemptCtx)
 		cancel()
 		if err == nil {
 			manager.mu.Lock()
-			if manager.client == nil {
-				manager.client = client
+			if manager.peer == nil {
+				manager.peer = peerSession
 				manager.mu.Unlock()
 				return nil
 			}
 			manager.mu.Unlock()
-			client.Close()
+			peerSession.Close()
 			return nil
 		}
-		client.Close()
+		peerSession.Close()
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
@@ -232,35 +232,35 @@ func (manager *clientManager) prepare(ctx context.Context) error {
 	}
 }
 
-type clientManager struct {
+type peerManager struct {
 	mu         sync.Mutex
 	setupMu    sync.Mutex
 	server     tailcat.ConnBlob
 	privateKey key.NodePrivate
-	client     *tailcat.Client
+	peer       *tailcat.Client
 	active     int
 	idleTimer  *time.Timer
 	idleDelay  time.Duration
-	pingClient func(context.Context, *tailcat.Client) error
+	pingPeer   func(context.Context, *tailcat.Client) error
 }
 
-func (manager *clientManager) acquire() (*tailcat.Client, func()) {
+func (manager *peerManager) acquire() (*tailcat.Client, func()) {
 	manager.mu.Lock()
 	if manager.idleTimer != nil {
 		manager.idleTimer.Stop()
 		manager.idleTimer = nil
 	}
-	if manager.client == nil {
-		manager.client = &tailcat.Client{Server: manager.server, Key: manager.privateKey, Logf: discardLog}
+	if manager.peer == nil {
+		manager.peer = &tailcat.Client{Server: manager.server, Key: manager.privateKey, Logf: discardLog}
 	}
-	client := manager.client
+	peerSession := manager.peer
 	manager.active++
 	manager.mu.Unlock()
-	return client, func() {
+	return peerSession, func() {
 		manager.mu.Lock()
 		defer manager.mu.Unlock()
 		manager.active--
-		if manager.active == 0 && manager.client == client {
+		if manager.active == 0 && manager.peer == peerSession {
 			delay := manager.idleDelay
 			if delay == 0 {
 				delay = time.Second
@@ -268,9 +268,9 @@ func (manager *clientManager) acquire() (*tailcat.Client, func()) {
 			manager.idleTimer = time.AfterFunc(delay, func() {
 				manager.mu.Lock()
 				defer manager.mu.Unlock()
-				if manager.active == 0 && manager.client == client {
-					client.Close()
-					manager.client = nil
+				if manager.active == 0 && manager.peer == peerSession {
+					peerSession.Close()
+					manager.peer = nil
 				}
 				manager.idleTimer = nil
 			})
@@ -278,46 +278,46 @@ func (manager *clientManager) acquire() (*tailcat.Client, func()) {
 	}
 }
 
-func (manager *clientManager) close() {
+func (manager *peerManager) close() {
 	manager.mu.Lock()
 	defer manager.mu.Unlock()
 	if manager.idleTimer != nil {
 		manager.idleTimer.Stop()
 		manager.idleTimer = nil
 	}
-	if manager.client != nil {
-		manager.client.Close()
-		manager.client = nil
+	if manager.peer != nil {
+		manager.peer.Close()
+		manager.peer = nil
 	}
 }
 
-func (manager *clientManager) ensureReady(ctx context.Context, client *tailcat.Client) error {
+func (manager *peerManager) ensureReady(ctx context.Context, peerSession *tailcat.Client) error {
 	manager.setupMu.Lock()
 	defer manager.setupMu.Unlock()
-	if err := manager.ping(ctx, client); err != nil {
+	if err := manager.ping(ctx, peerSession); err != nil {
 		return err
 	}
 	return nil
 }
 
-func (manager *clientManager) ping(ctx context.Context, client *tailcat.Client) error {
-	if manager.pingClient != nil {
-		return manager.pingClient(ctx, client)
+func (manager *peerManager) ping(ctx context.Context, peerSession *tailcat.Client) error {
+	if manager.pingPeer != nil {
+		return manager.pingPeer(ctx, peerSession)
 	}
-	_, err := client.Ping(ctx)
+	_, err := peerSession.Ping(ctx)
 	return err
 }
 
-func bridge(manager *clientManager, local net.Conn, port uint16) {
+func bridge(manager *peerManager, local net.Conn, port uint16) {
 	defer local.Close()
-	client, release := manager.acquire()
+	peerSession, release := manager.acquire()
 	defer release()
 	transportDebugf("starting bridge")
 	ctx, cancel := context.WithTimeout(context.Background(), 35*time.Second)
 	defer cancel()
 	remote, err := bootstrap(ctx,
-		func(ctx context.Context) error { return manager.ensureReady(ctx, client) },
-		func(ctx context.Context) (net.Conn, error) { return client.DialTCPPort(ctx, port) },
+		func(ctx context.Context) error { return manager.ensureReady(ctx, peerSession) },
+		func(ctx context.Context) (net.Conn, error) { return peerSession.DialTCPPort(ctx, port) },
 	)
 	if err != nil {
 		transportDebugf("bridge bootstrap failed: %v", err)

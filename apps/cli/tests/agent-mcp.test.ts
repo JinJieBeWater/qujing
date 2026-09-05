@@ -1,21 +1,24 @@
-import { afterEach, expect, test } from "bun:test";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
-import { ClientApplication, type LineRuntimeClient } from "../src/client-application";
-import type { ClientConfig, LineConfig } from "../src/client-config";
-import { createClientMcp, type ClientMcpOptions } from "../src/client-mcp";
+import { afterEach, expect, test } from "bun:test";
+import { AgentApplication, type PeerRuntimeAgent } from "../src/agent-application";
+import type { AgentConfig, PeerConfig } from "../src/agent-config";
+import { createAgentMcp, type AgentMcpOptions } from "../src/agent-mcp";
 import { QujingError } from "../src/errors";
-import type { McpGateway } from "../src/mcp";
+import type { McpHttpServer } from "../src/mcp";
 import { Effect } from "effect";
 
-const resources: Array<{ mcp: McpGateway; server: ReturnType<typeof Bun.serve>; client?: Client }> =
-  [];
+const resources: Array<{
+  mcp: McpHttpServer;
+  server: ReturnType<typeof Bun.serve>;
+  agent?: Client;
+}> = [];
 afterEach(async () => {
   await Promise.all(
-    resources.splice(0).map(async ({ mcp, server, client }) => {
+    resources.splice(0).map(async ({ mcp, server, agent }) => {
       server.stop(true);
       await Promise.all([
-        Promise.race([client?.close().catch(() => {}), Bun.sleep(100)]),
+        Promise.race([agent?.close().catch(() => {}), Bun.sleep(100)]),
         Promise.race([Effect.runPromise(mcp.closeEffect).catch(() => {}), Bun.sleep(100)]),
       ]);
     }),
@@ -23,10 +26,10 @@ afterEach(async () => {
 });
 
 const now = new Date().toISOString();
-const line: LineConfig = {
-  id: "line",
-  expectedOwnerId: "owner",
-  remoteClientId: "remote",
+const peer: PeerConfig = {
+  id: "peer",
+  expectedNodeId: "node",
+  remoteAgentId: "remote",
   serverAddress: "private",
   remotePort: 1,
   keyPath: "/key",
@@ -37,35 +40,35 @@ const line: LineConfig = {
 
 function fixture(
   options: {
-    config?: ClientConfig;
-    createRuntime?: (line: LineConfig) => LineRuntimeClient;
+    config?: AgentConfig;
+    createRuntime?: (peer: PeerConfig) => PeerRuntimeAgent;
   } = {},
 ) {
-  const config: ClientConfig = options.config ?? {
+  const config: AgentConfig = options.config ?? {
     version: 1,
     server: { host: "127.0.0.1", port: 1 },
     localBearerHash: "a".repeat(64),
-    lines: [line],
+    peers: [peer],
   };
-  const app = new ClientApplication({
+  const app = new AgentApplication({
     config: { readEffect: () => Effect.succeed(config) },
     createRuntime:
       options.createRuntime ??
       (() => ({
         listWorkspacesEffect: () =>
-          Effect.succeed({ owner: { id: "owner", name: "Owner" }, workspaces: [] }),
+          Effect.succeed({ node: { id: "node", name: "Node" }, workspaces: [] }),
         askEffect: (workspace, question) =>
           Effect.succeed({ workspace, answer: `answer:${question}` }),
         closeEffect: () => Effect.void,
       })),
   });
-  let mcp!: McpGateway;
+  let mcp!: McpHttpServer;
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     fetch: (request) => mcp.fetch(request),
   });
-  mcp = createClientMcp({
+  mcp = createAgentMcp({
     app,
     config: {
       authenticateLocalEffect: (bearer) =>
@@ -75,22 +78,22 @@ function fixture(
     },
     allowedHosts: ["127.0.0.1"],
     allowedOrigins: [],
-  } satisfies ClientMcpOptions);
+  } satisfies AgentMcpOptions);
   resources.push({ mcp, server });
   return { mcp, server, url: new URL(`http://127.0.0.1:${server.port}/mcp`) };
 }
 
-test("Client MCP exposes only Client tools with local auth", async () => {
+test("Agent MCP exposes only Agent tools with local auth", async () => {
   const { mcp, server, url } = fixture();
   const transport = new StreamableHTTPClientTransport(url, {
     requestInit: { headers: { Authorization: "Bearer local" } },
   });
-  const client = new Client({ name: "test", version: "1" });
-  resources[0] = { mcp, server, client };
-  await client.connect(transport as Parameters<Client["connect"]>[0]);
-  const tools = (await client.listTools()).tools;
-  expect(tools.map(({ name }) => name)).toEqual(["list_lines", "ask"]);
-  expect(tools.find(({ name }) => name === "list_lines")?.annotations).toEqual({
+  const agent = new Client({ name: "test", version: "1" });
+  resources[0] = { mcp, server, agent };
+  await agent.connect(transport as Parameters<Client["connect"]>[0]);
+  const tools = (await agent.listTools()).tools;
+  expect(tools.map(({ name }) => name)).toEqual(["list_peers", "ask"]);
+  expect(tools.find(({ name }) => name === "list_peers")?.annotations).toEqual({
     readOnlyHint: true,
     idempotentHint: true,
     destructiveHint: false,
@@ -102,19 +105,19 @@ test("Client MCP exposes only Client tools with local auth", async () => {
     destructiveHint: true,
     openWorldHint: true,
   });
-  const listed = await client.callTool({ name: "list_lines", arguments: {} });
+  const listed = await agent.callTool({ name: "list_peers", arguments: {} });
   expect(listed.structuredContent).toEqual({
-    lines: [{ id: "line", available: true, owner: { id: "owner", name: "Owner" }, workspaces: [] }],
+    peers: [{ id: "peer", available: true, node: { id: "node", name: "Node" }, workspaces: [] }],
   });
   expect(listed.content).toEqual([
     { type: "text", text: JSON.stringify(listed.structuredContent) },
   ]);
   expect(
-    await client.callTool({
+    await agent.callTool({
       name: "ask",
-      arguments: { line: "line", workspace: "ws", question: "q" },
+      arguments: { peer: "peer", workspace: "ws", question: "q" },
     }),
-  ).toMatchObject({ structuredContent: { line: "line", workspace: "ws", answer: "answer:q" } });
+  ).toMatchObject({ structuredContent: { peer: "peer", workspace: "ws", answer: "answer:q" } });
   const stale = await fetch(url, {
     method: "POST",
     headers: { Authorization: "Bearer old", "content-type": "application/json" },
@@ -123,7 +126,7 @@ test("Client MCP exposes only Client tools with local auth", async () => {
   expect(stale.status).toBe(401);
 });
 
-test("Agent MCP cancellation reaches the selected Line runtime", async () => {
+test("Agent MCP cancellation reaches the selected Peer runtime", async () => {
   let cancelled = false;
   let markStarted!: () => void;
   const started = new Promise<void>((resolve) => {
@@ -133,18 +136,18 @@ test("Agent MCP cancellation reaches the selected Line runtime", async () => {
   const cancellationObserved = new Promise<void>((resolve) => {
     markCancelled = resolve;
   });
-  const config: ClientConfig = {
+  const config: AgentConfig = {
     version: 1,
     server: { host: "127.0.0.1", port: 1 },
     localBearerHash: "a".repeat(64),
-    lines: [line],
+    peers: [peer],
   };
-  const app = new ClientApplication({
+  const app = new AgentApplication({
     config: { readEffect: () => Effect.succeed(config) },
     createRuntime: () =>
       ({
         listWorkspacesEffect: () =>
-          Effect.succeed({ owner: { id: "owner", name: "Owner" }, workspaces: [] }),
+          Effect.succeed({ node: { id: "node", name: "Node" }, workspaces: [] }),
         askEffect: (_workspace, _question, signal) =>
           Effect.tryPromise({
             try: () =>
@@ -163,15 +166,15 @@ test("Agent MCP cancellation reaches the selected Line runtime", async () => {
             catch: (error) => error,
           }),
         closeEffect: () => Effect.void,
-      }) satisfies LineRuntimeClient,
+      }) satisfies PeerRuntimeAgent,
   });
-  let mcp!: McpGateway;
+  let mcp!: McpHttpServer;
   const server = Bun.serve({
     port: 0,
     hostname: "127.0.0.1",
     fetch: (request) => mcp.fetch(request),
   });
-  mcp = createClientMcp({
+  mcp = createAgentMcp({
     app,
     config: {
       authenticateLocalEffect: (bearer) =>
@@ -184,14 +187,16 @@ test("Agent MCP cancellation reaches the selected Line runtime", async () => {
   });
   const transport = new StreamableHTTPClientTransport(
     new URL(`http://127.0.0.1:${server.port}/mcp`),
-    { requestInit: { headers: { Authorization: "Bearer local" } } },
+    {
+      requestInit: { headers: { Authorization: "Bearer local" } },
+    },
   );
-  const client = new Client({ name: "test", version: "1" });
-  resources.push({ mcp, server, client });
-  await client.connect(transport as Parameters<Client["connect"]>[0]);
+  const agent = new Client({ name: "test", version: "1" });
+  resources.push({ mcp, server, agent });
+  await agent.connect(transport as Parameters<Client["connect"]>[0]);
   const controller = new AbortController();
-  const pending = client.callTool(
-    { name: "ask", arguments: { line: "line", workspace: "ws", question: "wait" } },
+  const pending = agent.callTool(
+    { name: "ask", arguments: { peer: "peer", workspace: "ws", question: "wait" } },
     undefined,
     { signal: controller.signal },
   );
@@ -203,12 +208,12 @@ test("Agent MCP cancellation reaches the selected Line runtime", async () => {
   expect(cancelled).toBe(true);
 });
 
-test("forwards raw questions to the Owner Line for domain validation", async () => {
+test("forwards raw questions to the Node Peer for domain validation", async () => {
   let received: string | undefined;
   const { mcp, server, url } = fixture({
     createRuntime: () => ({
       listWorkspacesEffect: () =>
-        Effect.succeed({ owner: { id: "owner", name: "Owner" }, workspaces: [] }),
+        Effect.succeed({ node: { id: "node", name: "Node" }, workspaces: [] }),
       askEffect: (_workspace, question) =>
         Effect.sync(() => {
           received = question;
@@ -220,32 +225,32 @@ test("forwards raw questions to the Owner Line for domain validation", async () 
   const transport = new StreamableHTTPClientTransport(url, {
     requestInit: { headers: { Authorization: "Bearer local" } },
   });
-  const client = new Client({ name: "test", version: "1" });
-  resources[0] = { mcp, server, client };
-  await client.connect(transport as Parameters<Client["connect"]>[0]);
+  const agent = new Client({ name: "test", version: "1" });
+  resources[0] = { mcp, server, agent };
+  await agent.connect(transport as Parameters<Client["connect"]>[0]);
 
-  const result = await client.callTool({
+  const result = await agent.callTool({
     name: "ask",
-    arguments: { line: "line", workspace: "ws", question: "   " },
+    arguments: { peer: "peer", workspace: "ws", question: "   " },
   });
 
   expect(received).toBe("   ");
   expect(result).toMatchObject({ isError: true });
 });
 
-test("Agent MCP lists two Lines independently and routes each ask exactly", async () => {
+test("Agent MCP lists two Peers independently and routes each ask exactly", async () => {
   const second = {
-    ...line,
+    ...peer,
     id: "second",
-    expectedOwnerId: "owner-second",
-    remoteClientId: "remote-second",
+    expectedNodeId: "node-second",
+    remoteAgentId: "remote-second",
     remoteBearer: "secret-second",
   };
-  const config: ClientConfig = {
+  const config: AgentConfig = {
     version: 1,
     server: { host: "127.0.0.1", port: 1 },
     localBearerHash: "a".repeat(64),
-    lines: [line, second],
+    peers: [peer, second],
   };
   const routed: string[] = [];
   const { mcp, server, url } = fixture({
@@ -255,7 +260,7 @@ test("Agent MCP lists two Lines independently and routes each ask exactly", asyn
         entry.id === "second"
           ? Effect.fail(new Error("offline"))
           : Effect.succeed({
-              owner: { id: entry.expectedOwnerId, name: "Owner" },
+              node: { id: entry.expectedNodeId, name: "Node" },
               workspaces: [{ id: "docs", name: "Docs", summary: "Docs", available: true }],
             }),
       askEffect: (workspace, question) =>
@@ -269,28 +274,28 @@ test("Agent MCP lists two Lines independently and routes each ask exactly", asyn
   const transport = new StreamableHTTPClientTransport(url, {
     requestInit: { headers: { Authorization: "Bearer local" } },
   });
-  const client = new Client({ name: "test", version: "1" });
-  resources[0] = { mcp, server, client };
-  await client.connect(transport as Parameters<Client["connect"]>[0]);
+  const agent = new Client({ name: "test", version: "1" });
+  resources[0] = { mcp, server, agent };
+  await agent.connect(transport as Parameters<Client["connect"]>[0]);
 
-  expect((await client.callTool({ name: "list_lines", arguments: {} })).structuredContent).toEqual({
-    lines: [
+  expect((await agent.callTool({ name: "list_peers", arguments: {} })).structuredContent).toEqual({
+    peers: [
       {
-        id: "line",
+        id: "peer",
         available: true,
-        owner: { id: "owner", name: "Owner" },
+        node: { id: "node", name: "Node" },
         workspaces: [{ id: "docs", name: "Docs", summary: "Docs", available: true }],
       },
       { id: "second", available: false, workspaces: [] },
     ],
   });
-  await client.callTool({
+  await agent.callTool({
     name: "ask",
-    arguments: { line: "line", workspace: "docs", question: "one" },
+    arguments: { peer: "peer", workspace: "docs", question: "one" },
   });
-  await client.callTool({
+  await agent.callTool({
     name: "ask",
-    arguments: { line: "second", workspace: "docs", question: "two" },
+    arguments: { peer: "second", workspace: "docs", question: "two" },
   });
-  expect(routed).toEqual(["line", "second"]);
+  expect(routed).toEqual(["peer", "second"]);
 });

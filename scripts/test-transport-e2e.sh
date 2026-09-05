@@ -15,7 +15,7 @@ trap cleanup EXIT
 
 binary=${QUJING_TRANSPORT_BIN:-apps/cli/native/transport/bin/qujing-transport}
 before=$(tailscale debug prefs 2>/dev/null | shasum -a 256 | cut -d' ' -f1 || true)
-"$binary" key-create --output "$root/client.json" > "$root/key.out"
+"$binary" key-create --output "$root/peer.json" > "$root/key.out"
 public_key=$(python3 -c 'import json,sys; print(json.load(open(sys.argv[1]))["publicKey"])' "$root/key.out")
 python3 -m http.server 43220 --bind 127.0.0.1 --directory "$root" >"$root/http.log" 2>&1 & http_pid=$!
 start_server() {
@@ -31,7 +31,7 @@ start_server() {
 }
 start_connector() {
   rm -f "$root/connector.out" "$root/connector.err"
-  "$binary" connect --server "$server_address" --port 43220 --key "$root/client.json" --listen 127.0.0.1:43221 >"$root/connector.out" 2>"$root/connector.err" & connector_pid=$!
+  "$binary" connect --server "$server_address" --port 43220 --key "$root/peer.json" --listen 127.0.0.1:43221 >"$root/connector.out" 2>"$root/connector.err" & connector_pid=$!
   for _ in {1..80}; do
     [[ -s "$root/connector.out" ]] && return
     kill -0 "$connector_pid" 2>/dev/null || { cat "$root/connector.err"; exit 1; }
@@ -85,5 +85,5 @@ fi
 after=$(tailscale debug prefs 2>/dev/null | shasum -a 256 | cut -d' ' -f1 || true)
 [[ "$before" == "$after" ]]
 [[ "$(stat -f '%Lp' "$root/server.json" 2>/dev/null || stat -c '%a' "$root/server.json")" == "600" ]]
-[[ "$(stat -f '%Lp' "$root/client.json" 2>/dev/null || stat -c '%a' "$root/client.json")" == "600" ]]
+[[ "$(stat -f '%Lp' "$root/peer.json" 2>/dev/null || stat -c '%a' "$root/peer.json")" == "600" ]]
 echo "transport e2e: ok"

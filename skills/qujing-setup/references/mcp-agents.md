@@ -4,13 +4,13 @@ Configure Agent’s native Streamable HTTP MCP support. Check installed Agent’
 
 ## Contract
 
-- URL: `http://127.0.0.1:43111/mcp` unless `qj init client --port` chose another loopback port
+- URL: `http://127.0.0.1:43111/mcp` unless `qj init agent --port` chose another loopback port
 - Header: `Authorization: Bearer <local-bearer>`
 - Tool-call timeout: at least 135 seconds
-- Tools: exactly `list_lines`, `ask`
-- Prerequisite: `qj serve client` or Client role service running
+- Tools: exactly `list_peers`, `ask`
+- Prerequisite: `qj serve agent` or Agent role service running
 
-Local bearer comes only from `qj init client` or `qj token rotate`. Store it in Agent secret storage or private user config. It is not any Line remote bearer. Never commit it.
+Local bearer comes only from `qj init agent` or `qj token rotate`. Store it in Agent secret storage or private user config. It is not any Peer remote bearer. Never commit it.
 
 Generic shape; verify Agent-specific schema:
 
@@ -33,7 +33,7 @@ Generic shape; verify Agent-specific schema:
 | OpenAI Codex CLI   | `tool_timeout_sec`                         | seconds | Set `135` or higher                                                           |
 | Gemini CLI         | per-server `timeout`                       |      ms | Keep at least `135000`                                                        |
 | GitHub Copilot CLI | per-server `timeout`                       |      ms | Set `135000` or higher                                                        |
-| Cline              | per-server `timeout`                       | seconds | Set `135` or higher                                                           |
+| Cpeer              | per-server `timeout`                       | seconds | Set `135` or higher                                                           |
 | Roo Code           | per-server `timeout`                       | seconds | Set `135` or higher                                                           |
 | OpenCode v2        | `mcp.timeout.execution`                    |      ms | Verify installed v2 schema and set `135000` or higher; do not rely on default |
 | Zed                | `context_server_timeout`                   | seconds | Set `135` or higher                                                           |
@@ -44,8 +44,8 @@ Cursor has no verified configurable long tool timeout and is unsupported. VS Cod
 ## Verification
 
 1. Restart/reload Agent after configuration.
-2. Require exactly `list_lines` and `ask`; presence of `list_workspaces` means wrong endpoint.
-3. Call `list_lines`; reject any roots, credentials, model, Runtime, session, or Tailcat details.
-4. Call `ask` with exact Line ID, Workspace ID, and non-empty question.
-5. Ask follow-up with same Line and Workspace. No thread/conversation parameter exists.
-6. Pair second Line without adding another Agent MCP server.
+2. Require exactly `list_peers` and `ask`; presence of `list_workspaces` means wrong endpoint.
+3. Call `list_peers`; reject any roots, credentials, model, Runtime, session, or Tailcat details.
+4. Call `ask` with exact Peer ID, Workspace ID, and non-empty question.
+5. Ask follow-up with same Peer and Workspace. No thread/conversation parameter exists.
+6. Pair second Peer without adding another Agent MCP server.

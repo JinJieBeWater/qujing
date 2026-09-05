@@ -4,33 +4,33 @@ import { readFile, rm } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { Deferred, Effect, Exit, Scope } from "effect";
 import packageJson from "../package.json";
-import { ClientConfigStore, type LineConfig, type LineInput } from "./client-config";
+import { AgentConfigStore, type PeerConfig, type PeerInput } from "./agent-config";
 import {
-  cancelClientLineRetirementEffect,
-  requestClientLineRetirementEffect,
-  waitForClientLineRetirementEffect,
-} from "./client-control";
-import { runClientDoctorEffect } from "./client-doctor";
-import { startClientServerEffect } from "./client-server";
+  cancelPeerRetirementEffect,
+  requestPeerRetirementEffect,
+  waitForPeerRetirementEffect,
+} from "./agent-control";
+import { runAgentDoctorEffect } from "./agent-doctor";
+import { startAgentServerEffect } from "./agent-server";
 import { ConfigStore, type Config } from "./config";
 import { createBearer } from "./credentials";
 import { runDoctorEffect, type DoctorReport } from "./doctor";
-import { waitForClientReloadEffect, waitForGatewayReloadEffect } from "./gateway-reload";
-import { LineRuntime } from "./line-runtime";
-import { defaultClientPaths, defaultPaths } from "./paths";
+import { waitForAgentReloadEffect, waitForNodeReloadEffect } from "./reload";
+import { PeerRuntime } from "./peer-runtime";
+import { defaultAgentPaths, defaultPaths } from "./paths";
 import { assertPrivatePathEffect, writeNewPrivateJsonEffect } from "./private-files";
 import { acquireProcessLockEffect, processLockActiveEffect } from "./process-lock";
 import {
-  purgeClientRuntimeSessionsEffect,
+  purgePeerRuntimeSessionsEffect,
   purgeWorkspaceRuntimeSessionsEffect,
 } from "./runtime/cleanup";
 import { RuntimeSessionStore } from "./runtime/sessions";
 import {
   decode,
-  LinePairing as LinePairingSchema,
+  PeerInvite as PeerInviteSchema,
   TANSTACK_ACP_AUTH_MODES,
   TANSTACK_ACP_PERMISSION_MODES,
-  type LinePairing,
+  type PeerInvite,
 } from "./schemas";
 import { currentServeCommand, installUserServiceEffect, removeUserServiceEffect } from "./service";
 import { startServerEffect } from "./server";
@@ -41,21 +41,21 @@ import {
 } from "./transport/process";
 import { readTailcatStateEffect } from "./transport/supervisor";
 
-const parseLinePairing = decode(LinePairingSchema);
+const parsePeerInvite = decode(PeerInviteSchema);
 
 export interface CliIo {
   configPath: string;
   stateRoot: string;
-  clientConfigPath: string;
-  clientStateRoot: string;
+  agentConfigPath: string;
+  agentStateRoot: string;
   writeOut(text: string): void;
   writeError(text: string): void;
   readStdinEffect(): Effect.Effect<string, unknown>;
   transportBinary?: string;
-  gatewayReloadTimeoutMs?: number;
+  nodeReloadTimeoutMs?: number;
   validateTailcatKeyEffect(key: string): Effect.Effect<void, unknown>;
-  verifyLineEffect(line: LineConfig): Effect.Effect<void, unknown>;
-  clientDoctorEffect(): Effect.Effect<DoctorReport, unknown>;
+  verifyPeerEffect(peer: PeerConfig): Effect.Effect<void, unknown>;
+  agentDoctorEffect(): Effect.Effect<DoctorReport, unknown>;
 }
 
 class UsageError extends Error {}
@@ -68,76 +68,71 @@ Options:
   -V, --version
 
 Commands:
-  init <gateway|client>
+  init <node|agent>
   workspace <add|list|update|remove>
-  pair <create|accept|list|rotate|revoke>
-  runtime <set-acp|use-pi>
-  line <key-create|list|update|remove>
+  peer <invite|accept|key-create|list|update|remove|rotate|revoke>
+  runtime <set-pi|set-acp>
   token rotate
-  doctor <gateway|client>
-  serve <gateway|client>
-  service <install|remove> <gateway|client>
+  doctor <node|agent>
+  serve <node|agent>
+  service <install|remove> <node|agent>
 
 Examples:
-  qj init gateway --owner-id jinjiebewater --owner-name JinJieBeWater
-  qj pair create alice-line --key - --out ./alice-line.pairing.json
-  qj pair accept jinjiebewater --from ./alice-line.pairing.json
-  qj serve client
+  qj init node --node-id jinjiebewater --node-name JinJieBeWater
+  qj peer invite alice-peer --key - --out ./alice-peer.pairing.json
+  qj peer accept jinjiebewater --from ./alice-peer.pairing.json
+  qj serve agent
 `;
 
 const help: Record<string, string> = {
-  init: `Usage: qj init <gateway|client>
+  init: `Usage: qj init <node|agent>
 
 Examples:
-  qj init client`,
+  qj init agent`,
   workspace: `Usage: qj workspace <add|list|update|remove>
 
 Examples:
   qj workspace list --json`,
-  pair: `Usage: qj pair <create|accept|list|rotate|revoke>
+  peer: `Usage: qj peer <invite|accept|key-create|list|update|remove|rotate|revoke>
 
 Examples:
-  qj pair list --json`,
-  runtime: `Usage: qj runtime <set-acp|use-pi>
+  qj peer list --json`,
+  runtime: `Usage: qj runtime <set-pi|set-acp>
 
 Examples:
-  qj runtime set-acp codex --model gpt-5-codex --command 'codex --acp --model {model} --cwd {cwd}' --auth host
-  qj runtime use-pi`,
-  line: `Usage: qj line <key-create|list|update|remove>
-
-Examples:
-  qj line list --json`,
+  qj runtime set-pi --model openai-codex/gpt-5.5
+  qj runtime set-acp custom --model model-id --command 'agent --acp --model {model} --cwd {cwd}' --auth host`,
   token: `Usage: qj token rotate
 
 Examples:
   qj token rotate`,
-  doctor: `Usage: qj doctor <gateway|client>
+  doctor: `Usage: qj doctor <node|agent>
 
 Examples:
-  qj doctor client`,
-  serve: `Usage: qj serve <gateway|client>
+  qj doctor agent`,
+  serve: `Usage: qj serve <node|agent>
 
 Examples:
-  qj serve client`,
-  service: `Usage: qj service <install|remove> <gateway|client>
+  qj serve agent`,
+  service: `Usage: qj service <install|remove> <node|agent>
 
 Examples:
-  qj service install client --yes`,
-  "init gateway": `Usage: qj init gateway --owner-id <id> --owner-name <name> [--owner-summary <summary>]
+  qj service install agent --yes`,
+  "init node": `Usage: qj init node --node-id <id> --node-name <name> [--node-summary <summary>]
 
 Examples:
-  qj init gateway --owner-id jinjiebewater --owner-name JinJieBeWater
+  qj init node --node-id jinjiebewater --node-name JinJieBeWater
 `,
-  "init client": `Usage: qj init client [--port <loopback-port>]
+  "init agent": `Usage: qj init agent [--port <loopback-port>]
 
 Examples:
-  qj init client
-  qj init client --port 43111
+  qj init agent
+  qj init agent --port 43111
 `,
   "workspace add": `Usage: qj workspace add <id> --name <name> --root <directory> --summary <summary>
 
 Examples:
-  qj workspace add pi-tooling --name "Pi Tooling" --root ~/src/pi --summary "Pi SDK and extensions"
+  qj workspace add runtime-tooling --name "Runtime Tooling" --root ~/src/runtime --summary "Runtime SDK and extensions"
 `,
   "workspace list": `Usage: qj workspace list [--json]
 
@@ -147,106 +142,101 @@ Examples:
   "workspace update": `Usage: qj workspace update <id> [--name <name>] [--summary <summary>]
 
 Examples:
-  qj workspace update pi-tooling --summary "Pi SDK and runtime"
+  qj workspace update runtime-tooling --summary "Runtime SDK and runtime"
 `,
   "workspace remove": `Usage: qj workspace remove <id> --yes
 
 Examples:
   qj workspace remove old-workspace --yes
 `,
-  "pair create": `Usage: qj pair create <id> --key <public-key|-> [--out <path|->]
+  "peer invite": `Usage: qj peer invite <id> --key <public-key|-> [--out <path|->]
 
 Examples:
-  printf '%s' 'nodekey:...' | qj pair create alice-line --key - --out ./alice-line.pairing.json
+  printf '%s' 'nodekey:...' | qj peer invite alice-peer --key - --out ./alice-peer.pairing.json
 `,
-  "pair accept": `Usage: qj pair accept <line-id> --from <path|-> [--key <private-key-path>]
+  "peer accept": `Usage: qj peer accept <peer-id> --from <path|-> [--key <private-key-path>]
 
 Examples:
-  qj pair accept jinjiebewater --from ./alice-line.pairing.json
-  cat ./alice-line.pairing.json | qj pair accept jinjiebewater --from -
+  qj peer accept jinjiebewater --from ./alice-peer.pairing.json
+  cat ./alice-peer.pairing.json | qj peer accept jinjiebewater --from -
 `,
-  "pair list": `Usage: qj pair list [--json]
+  "peer rotate": `Usage: qj peer rotate <id> --key <new-public-key|-> --yes
 
 Examples:
-  qj pair list --json
+  printf '%s' 'nodekey:...' | qj peer rotate alice-peer --key - --yes
 `,
-  "pair rotate": `Usage: qj pair rotate <id> --key <new-public-key|-> --yes
+  "peer revoke": `Usage: qj peer revoke <id> --yes
 
 Examples:
-  printf '%s' 'nodekey:...' | qj pair rotate alice-line --key - --yes
-`,
-  "pair revoke": `Usage: qj pair revoke <id> --yes
-
-Examples:
-  qj pair revoke alice-line --yes
+  qj peer revoke alice-peer --yes
 `,
   "runtime set-acp": `Usage: qj runtime set-acp <name> --model <model> --command <command> [--auth <host|api-key>] [--auth-method-id <id>] [--permission <default|acceptEdits|bypassPermissions>]
 
 Examples:
-  qj runtime set-acp codex --model gpt-5-codex --command 'codex --acp --model {model} --cwd {cwd}' --auth host
+  qj runtime set-acp custom --model model-id --command 'agent --acp --model {model} --cwd {cwd}' --auth host
 `,
-  "runtime use-pi": `Usage: qj runtime use-pi
+  "runtime set-pi": `Usage: qj runtime set-pi --model <provider/model> [--binary <pi>]
 
 Examples:
-  qj runtime use-pi
+  qj runtime set-pi --model openai-codex/gpt-5.5
 `,
-  "line key-create": `Usage: qj line key-create <line-id> [--output <private-key-path>]
+  "peer key-create": `Usage: qj peer key-create <peer-id> [--output <private-key-path>]
 
 Examples:
-  qj line key-create jinjiebewater
+  qj peer key-create jinjiebewater
 `,
-  "line list": `Usage: qj line list [--json]
+  "peer list": `Usage: qj peer list [--json]
 
 Examples:
-  qj line list --json
+  qj peer list --json
 `,
-  "line update": `Usage: qj line update <line-id> --key <private-key-path> --bearer <token|-> --yes
+  "peer update": `Usage: qj peer update <peer-id> --key <private-key-path> --bearer <token|-> --yes
 
 Examples:
-  printf '%s' '<new-remote-bearer>' | qj line update jinjiebewater --key ~/.local/share/qujing/client/keys/jinjiebewater.json --bearer - --yes
+  printf '%s' '<new-remote-bearer>' | qj peer update jinjiebewater --key ~/.local/share/qujing/agent/keys/jinjiebewater.json --bearer - --yes
 `,
-  "line remove": `Usage: qj line remove <line-id> --yes
+  "peer remove": `Usage: qj peer remove <peer-id> --yes
 
 Examples:
-  qj line remove jinjiebewater --yes
+  qj peer remove jinjiebewater --yes
 `,
   "token rotate": `Usage: qj token rotate
 
 Examples:
   qj token rotate
 `,
-  "doctor gateway": `Usage: qj doctor gateway [--json]
+  "doctor node": `Usage: qj doctor node [--json]
 
 Examples:
-  qj doctor gateway --json`,
-  "doctor client": `Usage: qj doctor client [--json]
+  qj doctor node --json`,
+  "doctor agent": `Usage: qj doctor agent [--json]
 
 Examples:
-  qj doctor client --json`,
-  "serve gateway": `Usage: qj serve gateway
+  qj doctor agent --json`,
+  "serve node": `Usage: qj serve node
 
 Examples:
-  qj serve gateway`,
-  "serve client": `Usage: qj serve client
+  qj serve node`,
+  "serve agent": `Usage: qj serve agent
 
 Examples:
-  qj serve client`,
-  "service install gateway": `Usage: qj service install gateway --yes
+  qj serve agent`,
+  "service install node": `Usage: qj service install node --yes
 
 Examples:
-  qj service install gateway --yes`,
-  "service install client": `Usage: qj service install client --yes
+  qj service install node --yes`,
+  "service install agent": `Usage: qj service install agent --yes
 
 Examples:
-  qj service install client --yes`,
-  "service remove gateway": `Usage: qj service remove gateway --yes
+  qj service install agent --yes`,
+  "service remove node": `Usage: qj service remove node --yes
 
 Examples:
-  qj service remove gateway --yes`,
-  "service remove client": `Usage: qj service remove client --yes
+  qj service remove node --yes`,
+  "service remove agent": `Usage: qj service remove agent --yes
 
 Examples:
-  qj service remove client --yes`,
+  qj service remove agent --yes`,
 };
 
 /** Authoritative CLI orchestration. */
@@ -272,8 +262,8 @@ export function runCliEffect(args: string[], io: CliIo = defaultIo()) {
       },
       catch: (error) => error,
     });
-    if (gatewayCommands.has(command)) return yield* runGatewayEffect(command, parsed, io);
-    if (clientCommands.has(command)) return yield* runClientEffect(command, parsed, io);
+    if (nodeCommands.has(command)) return yield* runNodeEffect(command, parsed, io);
+    if (agentCommands.has(command)) return yield* runAgentEffect(command, parsed, io);
     return yield* Effect.fail(new UsageError(rootHelp));
   }).pipe(
     Effect.scoped,
@@ -290,13 +280,13 @@ export function runCliEffect(args: string[], io: CliIo = defaultIo()) {
   );
 }
 
-function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
+function runNodeEffect(command: string, parsed: ParsedArgs, io: CliIo) {
   const store = new ConfigStore(io);
   return Effect.gen(function* () {
     switch (command) {
-      case "init gateway":
-        yield* store.initEffect({ owner: ownerInput(parsed, help[command]!) });
-        out(io, `initialized Gateway: ${io.configPath}`);
+      case "init node":
+        yield* store.initEffect({ node: nodeInput(parsed, help[command]!) });
+        out(io, `initialized Node: ${io.configPath}`);
         return 0;
       case "workspace add": {
         const id = positional(parsed, 0, help[command]!);
@@ -344,7 +334,7 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         const id = positional(parsed, 0, help[command]!);
         if (!(yield* store.removeWorkspaceEffect(id)))
           throw new Error(`Workspace not found: ${id}`);
-        const handled = yield* waitIfGatewayRunningEffect(
+        const handled = yield* waitIfNodeRunningEffect(
           store,
           io,
           (config) => !config.workspaces.some((workspace) => workspace.id === id),
@@ -354,25 +344,25 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         out(io, `removed workspace: ${id}`);
         return 0;
       }
-      case "pair create": {
+      case "peer invite": {
         const id = positional(parsed, 0, help[command]!);
         const tailcatKey = yield* inputValueEffect(required(parsed, "key", help[command]!), io);
         yield* io.validateTailcatKeyEffect(tailcatKey);
-        if (!(yield* processLockActiveEffect(join(io.stateRoot, "gateway.lock"))))
-          return yield* Effect.fail(new Error("Gateway must be running before pairing a Client"));
+        if (!(yield* processLockActiveEffect(join(io.stateRoot, "node.lock"))))
+          return yield* Effect.fail(new Error("Node must be running before inviting a peer"));
         const [config, tailcat] = yield* Effect.all([
           store.readEffectiveEffect(),
           readTailcatStateEffect(io.stateRoot),
         ]);
         if (!tailcat)
           return yield* Effect.fail(
-            new Error("Gateway transport is not ready; start Gateway before pairing a Client"),
+            new Error("Node transport is not ready; start Node before inviting a peer"),
           );
         const bearer = createBearer();
-        const pairing = parseLinePairing({
+        const pairing = parsePeerInvite({
           version: 1,
-          ownerId: config.owner.id,
-          remoteClientId: id,
+          nodeId: config.node.id,
+          remoteAgentId: id,
           serverAddress: tailcat.serverAddress,
           remotePort: tailcat.remotePort,
           remoteBearer: bearer,
@@ -383,10 +373,10 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
           Effect.gen(function* () {
             if (pairingPath) yield* writeNewPrivateJsonEffect(pairingPath, pairing);
             const announce = announcePairingEffect(destination, pairing, io);
-            const added = yield* Effect.exit(store.addClientEffect({ id, tailcatKey }, bearer));
+            const added = yield* Effect.exit(store.addAgentEffect({ id, tailcatKey }, bearer));
             if (Exit.isFailure(added)) {
               const committed = yield* store.authenticateEffect(bearer).pipe(
-                Effect.map((client) => client?.id === id),
+                Effect.map((agent) => agent?.id === id),
                 Effect.catch(() => Effect.succeed(undefined)),
               );
               if (committed === false && pairingPath)
@@ -397,19 +387,17 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
               if (committed !== false) yield* announce;
               return yield* added;
             }
-            yield* waitForGatewayReloadEffect(
+            yield* waitForNodeReloadEffect(
               store,
               io.stateRoot,
               (config) =>
-                config.clients.some(
-                  (client) => client.id === id && client.tailcatKey === tailcatKey,
-                ),
-              io.gatewayReloadTimeoutMs ?? 45_000,
+                config.peers.some((agent) => agent.id === id && agent.tailcatKey === tailcatKey),
+              io.nodeReloadTimeoutMs ?? 45_000,
             ).pipe(
               Effect.flatMap((reloaded) =>
                 reloaded
                   ? Effect.void
-                  : Effect.fail(new Error("Gateway stopped before Client pairing became active")),
+                  : Effect.fail(new Error("Node stopped before peer invite became active")),
               ),
               Effect.onError(() => announce),
             );
@@ -418,44 +406,30 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         );
         return 0;
       }
-      case "pair list": {
-        const config = yield* store.readEffectiveEffect();
-        printRows(
-          io,
-          config.clients.map(({ id, createdAt, updatedAt }) => ({
-            id,
-            createdAt,
-            updatedAt,
-          })),
-          parsed.flags.has("json"),
-        );
-        return 0;
-      }
-      case "pair rotate": {
+      case "peer rotate": {
         confirm(parsed, help[command]!);
         const id = positional(parsed, 0, help[command]!);
         const tailcatKey = yield* inputValueEffect(required(parsed, "key", help[command]!), io);
         yield* io.validateTailcatKeyEffect(tailcatKey);
-        const result = yield* store.rotateClientEffect(id, tailcatKey);
-        out(io, `remote-client: ${id}\nbearer: ${result.bearer}`);
-        yield* waitIfGatewayRunningEffect(store, io, (config) =>
-          config.clients.some((client) => client.id === id && client.tailcatKey === tailcatKey),
+        const result = yield* store.rotateAgentEffect(id, tailcatKey);
+        out(io, `peer: ${id}\nbearer: ${result.bearer}`);
+        yield* waitIfNodeRunningEffect(store, io, (config) =>
+          config.peers.some((agent) => agent.id === id && agent.tailcatKey === tailcatKey),
         );
         return 0;
       }
-      case "pair revoke": {
+      case "peer revoke": {
         confirm(parsed, help[command]!);
         const id = positional(parsed, 0, help[command]!);
-        if (!(yield* store.revokeClientEffect(id)))
-          throw new Error(`Remote Client not found: ${id}`);
-        const handled = yield* waitIfGatewayRunningEffect(
+        if (!(yield* store.revokeAgentEffect(id))) throw new Error(`Peer not found: ${id}`);
+        const handled = yield* waitIfNodeRunningEffect(
           store,
           io,
-          (config) => !config.clients.some((client) => client.id === id),
+          (config) => !config.peers.some((agent) => agent.id === id),
         );
         if (!handled)
-          yield* purgeClientRuntimeSessionsEffect(id, new RuntimeSessionStore(io.stateRoot));
-        out(io, `revoked remote-client: ${id}`);
+          yield* purgePeerRuntimeSessionsEffect(id, new RuntimeSessionStore(io.stateRoot));
+        out(io, `revoked peer: ${id}`);
         return 0;
       }
       case "runtime set-acp": {
@@ -482,36 +456,46 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
           ...(permissionMode === undefined ? {} : { permissionMode }),
         });
         out(io, `runtime: tanstack-acp\nagent: ${name}`);
-        yield* waitIfGatewayRunningEffect(
+        yield* waitIfNodeRunningEffect(
           store,
           io,
           (config) => config.runtime?.kind === "tanstack-acp" && config.runtime.name === name,
         );
         return 0;
       }
-      case "runtime use-pi":
-        yield* store.usePiRuntimeEffect();
-        out(io, "runtime: pi");
-        yield* waitIfGatewayRunningEffect(store, io, (config) => config.runtime === undefined);
+      case "runtime set-pi": {
+        const model = required(parsed, "model", help[command]!);
+        yield* store.setRuntimeEffect({
+          kind: "pi-rpc",
+          model,
+          ...(parsed.values.get("binary") === undefined
+            ? {}
+            : { binary: parsed.values.get("binary")! }),
+        });
+        out(io, `runtime: pi-rpc\nmodel: ${model}`);
+        yield* waitIfNodeRunningEffect(
+          store,
+          io,
+          (config) => config.runtime?.kind === "pi-rpc" && config.runtime.model === model,
+        );
         return 0;
-      case "doctor gateway":
+      }
+      case "doctor node":
         return printDoctor(io, yield* runDoctorEffect(io), parsed.flags.has("json"));
-      case "serve gateway": {
+      case "serve node": {
         yield* startServerEffect(io, yield* Scope.Scope);
-        out(io, "gateway: ready");
+        out(io, "node: ready");
         yield* waitForShutdownEffect();
         return 0;
       }
-      case "service install gateway":
+      case "service install node": {
         confirm(parsed, help[command]!);
-        out(
-          io,
-          `service: ${yield* installUserServiceEffect(currentServeCommand("gateway"), "gateway")}`,
-        );
+        out(io, `service: ${yield* installUserServiceEffect(currentServeCommand("node"), "node")}`);
         return 0;
-      case "service remove gateway":
+      }
+      case "service remove node":
         confirm(parsed, help[command]!);
-        out(io, `removed service: ${yield* removeUserServiceEffect("gateway")}`);
+        out(io, `removed service: ${yield* removeUserServiceEffect("node")}`);
         return 0;
       default:
         throw new UsageError(rootHelp);
@@ -519,50 +503,50 @@ function runGatewayEffect(command: string, parsed: ParsedArgs, io: CliIo) {
   }).pipe(Effect.catchDefect((defect) => Effect.fail(defect)));
 }
 
-function runClientEffect(command: string, parsed: ParsedArgs, io: CliIo) {
-  const store = new ClientConfigStore({ configPath: io.clientConfigPath });
+function runAgentEffect(command: string, parsed: ParsedArgs, io: CliIo) {
+  const store = new AgentConfigStore({ configPath: io.agentConfigPath });
   return Effect.gen(function* () {
     switch (command) {
-      case "init client": {
+      case "init agent": {
         const port = portValue(parsed.values.get("port") ?? "43111", "port");
         const result = yield* store.initEffect({ port });
         if (!result.initialized) {
-          out(io, `Client already initialized: ${io.clientConfigPath}`);
+          out(io, `Agent already initialized: ${io.agentConfigPath}`);
           return 0;
         }
         out(
           io,
-          `initialized Client: ${io.clientConfigPath}\nlocal-bearer: ${result.bearer}\nmcp: http://127.0.0.1:${port}/mcp`,
+          `initialized Agent: ${io.agentConfigPath}\nlocal-bearer: ${result.bearer}\nmcp: http://127.0.0.1:${port}/mcp`,
         );
         return 0;
       }
-      case "line key-create": {
+      case "peer key-create": {
         const id = positional(parsed, 0, help[command]!);
         const output = resolve(
-          parsed.values.get("output") ?? join(io.clientStateRoot, "keys", `${id}.json`),
+          parsed.values.get("output") ?? join(io.agentStateRoot, "keys", `${id}.json`),
         );
         const key = yield* createTransportKeyEffect(output, io.transportBinary);
         out(io, `key: ${key.keyPath}\npublic-key: ${key.publicKey}`);
         return 0;
       }
-      case "pair accept": {
+      case "peer accept": {
         const id = positional(parsed, 0, help[command]!);
         const pairing = yield* readPairingEffect(required(parsed, "from", help[command]!), io);
-        const input: LineInput = {
+        const input: PeerInput = {
           id,
-          expectedOwnerId: pairing.ownerId,
-          remoteClientId: pairing.remoteClientId,
+          expectedNodeId: pairing.nodeId,
+          remoteAgentId: pairing.remoteAgentId,
           serverAddress: pairing.serverAddress,
           remotePort: pairing.remotePort,
           keyPath: resolve(
-            parsed.values.get("key") ?? join(io.clientStateRoot, "keys", `${id}.json`),
+            parsed.values.get("key") ?? join(io.agentStateRoot, "keys", `${id}.json`),
           ),
           remoteBearer: pairing.remoteBearer,
         };
         const validated = yield* store.validateEffect(input);
-        yield* withClientMutationEffect(
+        yield* withAgentMutationEffect(
           io,
-          verifyLineEffect(
+          verifyPeerEffect(
             {
               ...validated,
               createdAt: new Date().toISOString(),
@@ -571,33 +555,33 @@ function runClientEffect(command: string, parsed: ParsedArgs, io: CliIo) {
             io,
           ).pipe(
             Effect.andThen(store.addEffect(validated)),
-            Effect.andThen(waitIfClientRunningEffect(store, io)),
+            Effect.andThen(waitIfAgentRunningEffect(store, io)),
           ),
         );
-        out(io, `line: ${validated.id}`);
+        out(io, `peer: ${validated.id}`);
         return 0;
       }
-      case "line list":
+      case "peer list":
         printRows(io, yield* store.listEffect(), parsed.flags.has("json"));
         return 0;
-      case "line update": {
+      case "peer update": {
         confirm(parsed, help[command]!);
         const id = positional(parsed, 0, help[command]!);
         const credentials = yield* store.validateCredentialsEffect({
           keyPath: resolve(required(parsed, "key", help[command]!)),
           remoteBearer: yield* inputValueEffect(required(parsed, "bearer", help[command]!), io),
         });
-        yield* withClientMutationEffect(
+        yield* withAgentMutationEffect(
           io,
           Effect.gen(function* () {
             const current = yield* store.getEffect(id);
-            if (!current) return yield* Effect.fail(new Error(`Line not found: ${id}`));
-            yield* withRetiredClientLineEffect(
+            if (!current) return yield* Effect.fail(new Error(`Peer not found: ${id}`));
+            yield* withRetiredAgentPeerEffect(
               store,
               io,
               current,
               Effect.gen(function* () {
-                yield* verifyLineEffect(
+                yield* verifyPeerEffect(
                   {
                     ...current,
                     ...credentials,
@@ -610,18 +594,18 @@ function runClientEffect(command: string, parsed: ParsedArgs, io: CliIo) {
             );
           }),
         );
-        out(io, `line: ${id}`);
+        out(io, `peer: ${id}`);
         return 0;
       }
-      case "line remove": {
+      case "peer remove": {
         confirm(parsed, help[command]!);
         const id = positional(parsed, 0, help[command]!);
-        yield* withClientMutationEffect(
+        yield* withAgentMutationEffect(
           io,
           Effect.gen(function* () {
             const current = yield* store.getEffect(id);
-            if (!current) return yield* Effect.fail(new Error(`Line not found: ${id}`));
-            yield* withRetiredClientLineEffect(
+            if (!current) return yield* Effect.fail(new Error(`Peer not found: ${id}`));
+            yield* withRetiredAgentPeerEffect(
               store,
               io,
               current,
@@ -629,52 +613,53 @@ function runClientEffect(command: string, parsed: ParsedArgs, io: CliIo) {
                 .removeEffect(id)
                 .pipe(
                   Effect.flatMap((removed) =>
-                    removed ? Effect.void : Effect.fail(new Error(`Line not found: ${id}`)),
+                    removed ? Effect.void : Effect.fail(new Error(`Peer not found: ${id}`)),
                   ),
                 ),
             );
           }),
         );
-        out(io, `removed line: ${id}`);
+        out(io, `removed peer: ${id}`);
         return 0;
       }
       case "token rotate": {
-        const result = yield* withClientMutationEffect(
+        const result = yield* withAgentMutationEffect(
           io,
           store
             .rotateLocalBearerEffect()
-            .pipe(Effect.tap(() => waitIfClientRunningEffect(store, io))),
+            .pipe(Effect.tap(() => waitIfAgentRunningEffect(store, io))),
         );
         out(io, `local-bearer: ${result.bearer}`);
         return 0;
       }
-      case "doctor client": {
-        const report = yield* io.clientDoctorEffect();
+      case "doctor agent": {
+        const report = yield* io.agentDoctorEffect();
         return printDoctor(io, report, parsed.flags.has("json"));
       }
-      case "serve client": {
-        yield* startClientServerEffect(
+      case "serve agent": {
+        yield* startAgentServerEffect(
           {
-            configPath: io.clientConfigPath,
-            stateRoot: io.clientStateRoot,
+            configPath: io.agentConfigPath,
+            stateRoot: io.agentStateRoot,
             ...(io.transportBinary === undefined ? {} : { transportBinary: io.transportBinary }),
           },
           yield* Scope.Scope,
         );
-        out(io, "client: ready");
+        out(io, "agent: ready");
         yield* waitForShutdownEffect();
         return 0;
       }
-      case "service install client":
+      case "service install agent": {
         confirm(parsed, help[command]!);
         out(
           io,
-          `service: ${yield* installUserServiceEffect(currentServeCommand("client"), "client")}`,
+          `service: ${yield* installUserServiceEffect(currentServeCommand("agent"), "agent")}`,
         );
         return 0;
-      case "service remove client":
+      }
+      case "service remove agent":
         confirm(parsed, help[command]!);
-        out(io, `removed service: ${yield* removeUserServiceEffect("client")}`);
+        out(io, `removed service: ${yield* removeUserServiceEffect("agent")}`);
         return 0;
       default:
         throw new UsageError(rootHelp);
@@ -694,11 +679,11 @@ interface CommandSpec {
 }
 
 const commandSpecs: Record<string, CommandSpec> = {
-  "init gateway": {
+  "init node": {
     positionals: 0,
-    values: ["owner-id", "owner-name", "owner-summary"],
+    values: ["node-id", "node-name", "node-summary"],
   },
-  "init client": { positionals: 0, values: ["port"] },
+  "init agent": { positionals: 0, values: ["port"] },
   "workspace add": {
     positionals: 1,
     values: ["name", "root", "summary"],
@@ -706,75 +691,76 @@ const commandSpecs: Record<string, CommandSpec> = {
   "workspace list": { positionals: 0, flags: ["json"] },
   "workspace update": { positionals: 1, values: ["name", "summary"] },
   "workspace remove": { positionals: 1, flags: ["yes"] },
-  "pair create": {
+  "peer invite": {
     positionals: 1,
     values: ["key", "out"],
   },
-  "pair accept": {
+  "peer accept": {
     positionals: 1,
     values: ["from", "key"],
   },
-  "pair list": { positionals: 0, flags: ["json"] },
-  "pair rotate": {
+  "peer rotate": {
     positionals: 1,
     values: ["key"],
     flags: ["yes"],
   },
-  "pair revoke": { positionals: 1, flags: ["yes"] },
+  "peer revoke": { positionals: 1, flags: ["yes"] },
   "runtime set-acp": {
     positionals: 1,
     values: ["model", "command", "auth", "auth-method-id", "permission"],
   },
-  "runtime use-pi": { positionals: 0 },
-  "line key-create": { positionals: 1, values: ["output"] },
-  "line list": { positionals: 0, flags: ["json"] },
-  "line update": {
+  "runtime set-pi": {
+    positionals: 0,
+    values: ["model", "binary"],
+  },
+  "peer key-create": { positionals: 1, values: ["output"] },
+  "peer list": { positionals: 0, flags: ["json"] },
+  "peer update": {
     positionals: 1,
     values: ["key", "bearer"],
     flags: ["yes"],
   },
-  "line remove": { positionals: 1, flags: ["yes"] },
+  "peer remove": { positionals: 1, flags: ["yes"] },
   "token rotate": { positionals: 0 },
-  "doctor gateway": { positionals: 0, flags: ["json"] },
-  "doctor client": { positionals: 0, flags: ["json"] },
-  "serve gateway": { positionals: 0 },
-  "serve client": { positionals: 0 },
-  "service install gateway": { positionals: 0, flags: ["yes"] },
-  "service install client": { positionals: 0, flags: ["yes"] },
-  "service remove gateway": { positionals: 0, flags: ["yes"] },
-  "service remove client": { positionals: 0, flags: ["yes"] },
+  "doctor node": { positionals: 0, flags: ["json"] },
+  "doctor agent": { positionals: 0, flags: ["json"] },
+  "serve node": { positionals: 0 },
+  "serve agent": { positionals: 0 },
+  "service install node": { positionals: 0, flags: ["yes"] },
+  "service install agent": { positionals: 0, flags: ["yes"] },
+  "service remove node": { positionals: 0, flags: ["yes"] },
+  "service remove agent": { positionals: 0, flags: ["yes"] },
 };
 
-const gatewayCommands = new Set([
-  "init gateway",
+const nodeCommands = new Set([
+  "init node",
   "workspace add",
   "workspace list",
   "workspace update",
   "workspace remove",
-  "pair create",
-  "pair list",
-  "pair rotate",
-  "pair revoke",
+  "peer invite",
+  "peer rotate",
+  "peer revoke",
+  "runtime set-pi",
   "runtime set-acp",
-  "runtime use-pi",
-  "doctor gateway",
-  "serve gateway",
-  "service install gateway",
-  "service remove gateway",
+  "doctor node",
+  "serve node",
+  "service install node",
+  "service remove node",
 ]);
 
-const clientCommands = new Set([
-  "init client",
-  "pair accept",
-  "line key-create",
-  "line list",
-  "line update",
-  "line remove",
+const agentCommands = new Set([
+  "init agent",
+  "peer accept",
+  "peer key-create",
+  "peer list",
+  "peer update",
+  "peer remove",
   "token rotate",
-  "doctor client",
-  "serve client",
-  "service install client",
-  "service remove client",
+  "doctor agent",
+  "serve agent",
+  "service install agent",
+  "service remove agent",
 ]);
 
 function commandKey(args: string[]): string {
@@ -844,11 +830,11 @@ function positional(parsed: ParsedArgs, index: number, usage: string): string {
   return value;
 }
 
-function ownerInput(parsed: ParsedArgs, usage: string) {
-  const summary = parsed.values.get("owner-summary");
+function nodeInput(parsed: ParsedArgs, usage: string) {
+  const summary = parsed.values.get("node-summary");
   return {
-    id: required(parsed, "owner-id", usage),
-    name: required(parsed, "owner-name", usage),
+    id: required(parsed, "node-id", usage),
+    name: required(parsed, "node-name", usage),
     ...(summary === undefined ? {} : { summary }),
   };
 }
@@ -878,16 +864,16 @@ function readPairingEffect(source: string, io: CliIo) {
   return text.pipe(
     Effect.flatMap((value) =>
       Effect.try({
-        try: () => parseLinePairing(JSON.parse(value)),
-        catch: () => new UsageError("Invalid pairing bundle"),
+        try: () => parsePeerInvite(JSON.parse(value)),
+        catch: () => new UsageError("Invalid peer invite"),
       }),
     ),
   );
 }
 
-function announcePairingEffect(destination: string, pairing: LinePairing, io: CliIo) {
+function announcePairingEffect(destination: string, pairing: PeerInvite, io: CliIo) {
   if (destination === "-") return Effect.sync(() => out(io, JSON.stringify(pairing)));
-  return Effect.sync(() => out(io, `pairing: ${resolve(destination)}`));
+  return Effect.sync(() => out(io, `peer-invite: ${resolve(destination)}`));
 }
 
 function portValue(value: string, name: string): number {
@@ -897,92 +883,87 @@ function portValue(value: string, name: string): number {
   return port;
 }
 
-function verifyLineEffect(line: LineConfig, io: CliIo): Effect.Effect<void, unknown> {
-  return io.verifyLineEffect(line);
+function verifyPeerEffect(peer: PeerConfig, io: CliIo): Effect.Effect<void, unknown> {
+  return io.verifyPeerEffect(peer);
 }
 
-function withClientMutationEffect<A, E, R>(
+function withAgentMutationEffect<A, E, R>(
   io: CliIo,
   operation: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E | unknown, R> {
   return Effect.acquireUseRelease(
     acquireProcessLockEffect(
-      join(io.clientStateRoot, "mutation.lock"),
-      "Another Client configuration change is in progress",
+      join(io.agentStateRoot, "mutation.lock"),
+      "Another Agent configuration change is in progress",
     ),
     () => operation,
     (release) => release,
   );
 }
 
-function withRetiredClientLineEffect<A, E, R>(
-  store: ClientConfigStore,
+function withRetiredAgentPeerEffect<A, E, R>(
+  store: AgentConfigStore,
   io: CliIo,
-  line: LineConfig,
+  peer: PeerConfig,
   operation: Effect.Effect<A, E, R>,
 ): Effect.Effect<A, E | unknown, R> {
   return Effect.gen(function* () {
     const config = yield* store.readEffect();
-    const running = yield* processLockActiveEffect(join(io.clientStateRoot, "client.lock"));
+    const running = yield* processLockActiveEffect(join(io.agentStateRoot, "agent.lock"));
     const request = running
-      ? yield* requestClientLineRetirementEffect(io.clientStateRoot, config, line)
+      ? yield* requestPeerRetirementEffect(io.agentStateRoot, config, peer)
       : undefined;
     const guarded = Effect.gen(function* () {
       if (request)
-        yield* waitForClientLineRetirementEffect(
-          io.clientStateRoot,
+        yield* waitForPeerRetirementEffect(
+          io.agentStateRoot,
           request,
-          io.gatewayReloadTimeoutMs ?? 45_000,
+          io.nodeReloadTimeoutMs ?? 45_000,
         );
       const result = yield* operation;
-      yield* waitIfClientRunningEffect(store, io);
+      yield* waitIfAgentRunningEffect(store, io);
       return result;
     });
     return yield* guarded.pipe(
       Effect.onError(() =>
         request
-          ? cancelClientLineRetirementEffect(io.clientStateRoot, request).pipe(Effect.ignore)
+          ? cancelPeerRetirementEffect(io.agentStateRoot, request).pipe(Effect.ignore)
           : Effect.void,
       ),
     );
   });
 }
 
-function waitIfGatewayRunningEffect(
+function waitIfNodeRunningEffect(
   store: ConfigStore,
   io: CliIo,
   predicate: (config: Config) => boolean,
 ): Effect.Effect<boolean, unknown> {
-  return processLockActiveEffect(join(io.stateRoot, "gateway.lock")).pipe(
+  return processLockActiveEffect(join(io.stateRoot, "node.lock")).pipe(
     Effect.flatMap((running) =>
       running
-        ? waitForGatewayReloadEffect(
-            store,
-            io.stateRoot,
-            predicate,
-            io.gatewayReloadTimeoutMs ?? 45_000,
-          )
+        ? waitForNodeReloadEffect(store, io.stateRoot, predicate, io.nodeReloadTimeoutMs ?? 45_000)
         : Effect.succeed(false),
     ),
   );
 }
 
-function waitIfClientRunningEffect(
-  store: ClientConfigStore,
+function waitIfAgentRunningEffect(
+  store: AgentConfigStore,
   io: CliIo,
 ): Effect.Effect<boolean, unknown> {
-  return processLockActiveEffect(join(io.clientStateRoot, "client.lock")).pipe(
+  return processLockActiveEffect(join(io.agentStateRoot, "agent.lock")).pipe(
     Effect.flatMap((running) =>
       running
         ? store
             .readEffect()
             .pipe(
               Effect.flatMap((config) =>
-                waitForClientReloadEffect(
+                waitForAgentReloadEffect(
                   store,
-                  io.clientStateRoot,
+                  io.agentStateRoot,
                   config,
-                  io.gatewayReloadTimeoutMs ?? 45_000,
+                  io.nodeReloadTimeoutMs ?? 45_000,
                 ),
               ),
             )
@@ -1022,7 +1003,7 @@ function out(io: CliIo, text: string): void {
 function defaultIo(): CliIo {
   return {
     ...defaultPaths(),
-    ...defaultClientPaths(),
+    ...defaultAgentPaths(),
     writeOut: (text) => process.stdout.write(text),
     writeError: (text) => process.stderr.write(text),
     readStdinEffect: () =>
@@ -1031,9 +1012,9 @@ function defaultIo(): CliIo {
         catch: (error) => error,
       }),
     validateTailcatKeyEffect: (key) => validateTransportKeyEffect(key),
-    verifyLineEffect: (line) => {
-      const runtime = new LineRuntime({
-        line,
+    verifyPeerEffect: (peer) => {
+      const runtime = new PeerRuntime({
+        peer,
         startConnectorEffect: (connector, signal) =>
           startConnectorEffect(connector, undefined, signal),
       });
@@ -1043,7 +1024,7 @@ function defaultIo(): CliIo {
         (active) => active.closeEffect(),
       );
     },
-    clientDoctorEffect: () => runClientDoctorEffect(defaultClientPaths()),
+    agentDoctorEffect: () => runAgentDoctorEffect(defaultAgentPaths()),
   };
 }
 

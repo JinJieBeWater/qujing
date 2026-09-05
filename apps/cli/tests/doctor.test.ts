@@ -24,9 +24,7 @@ async function fixture() {
   await Bun.write(paths.transportBinary, "binary");
   await chmod(paths.transportBinary, 0o700);
   const config = new ConfigStore(paths);
-  await Effect.runPromise(
-    config.initEffect({ owner: { id: "owner", name: "Owner" }, port: 43_199 }),
-  );
+  await Effect.runPromise(config.initEffect({ node: { id: "node", name: "Node" }, port: 43_199 }));
   await Effect.runPromise(
     config.addWorkspaceEffect({ id: "docs", name: "Docs", summary: "Docs", root: workspace }),
   );
@@ -34,21 +32,35 @@ async function fixture() {
 }
 
 describe("doctor", () => {
-  test("checks owner config, global Pi, workspace, port, and transport without prompting", async () => {
+  test("checks node config, Runtime, workspace, port, and transport without prompting", async () => {
     const { paths } = await fixture();
+    await Effect.runPromise(
+      new ConfigStore(paths).setRuntimeEffect({
+        kind: "tanstack-acp",
+        name: "codex",
+        model: "test-model",
+        command: "agent --acp --model {model} --cwd {cwd}",
+      }),
+    );
+    let checkedExecutable: string | undefined;
     const report = await Effect.runPromise(
       runDoctorEffect(paths, {
-        checkPi: () => Effect.succeed(true),
+        checkExecutable: (binary) =>
+          Effect.sync(() => {
+            checkedExecutable = binary;
+            return true;
+          }),
         checkPort: () => Effect.succeed(true),
       }),
     );
 
     expect(report.ok).toBe(true);
+    expect(checkedExecutable).toBe("agent");
     expect(report.checks.map((check) => check.name)).toEqual(
       expect.arrayContaining([
         "config",
         "permissions",
-        "pi",
+        "runtime",
         "workspace:docs",
         "port",
         "transport",
@@ -63,7 +75,6 @@ describe("doctor", () => {
     await rm(workspace, { recursive: true });
     const report = await Effect.runPromise(
       runDoctorEffect(paths, {
-        checkPi: () => Effect.succeed(true),
         checkPort: () => Effect.succeed(true),
       }),
     );
@@ -74,21 +85,20 @@ describe("doctor", () => {
     ).toEqual(expect.arrayContaining(["permissions", "workspace:docs"]));
   });
 
-  test("checks TanStack ACP runtime without requiring global Pi", async () => {
+  test("checks TanStack ACP runtime", async () => {
     const { paths } = await fixture();
     let checkedExecutable: string | undefined;
     await Effect.runPromise(
       new ConfigStore(paths).setRuntimeEffect({
         kind: "tanstack-acp",
         name: "codex",
-        model: "gpt-5-codex",
-        command: "codex --acp --model {model} --cwd {cwd}",
+        model: "test-model",
+        command: "agent --acp --model {model} --cwd {cwd}",
       }),
     );
 
     const report = await Effect.runPromise(
       runDoctorEffect(paths, {
-        checkPi: () => Effect.succeed(false),
         checkExecutable: (binary) =>
           Effect.sync(() => {
             checkedExecutable = binary;
@@ -98,9 +108,47 @@ describe("doctor", () => {
       }),
     );
 
-    expect(report.checks.find((check) => check.name === "pi")).toBeUndefined();
-    expect(checkedExecutable).toBe("codex");
+    expect(checkedExecutable).toBe("agent");
     expect(report.checks.find((check) => check.name === "runtime")?.status).toBe("ok");
+  });
+
+  test("checks Pi RPC runtime", async () => {
+    const { paths } = await fixture();
+    let checkedExecutable: string | undefined;
+    await Effect.runPromise(
+      new ConfigStore(paths).setRuntimeEffect({
+        kind: "pi-rpc",
+        model: "openai-codex/gpt-5.5",
+      }),
+    );
+
+    const report = await Effect.runPromise(
+      runDoctorEffect(paths, {
+        checkExecutable: (binary) =>
+          Effect.sync(() => {
+            checkedExecutable = binary;
+            return true;
+          }),
+        checkPort: () => Effect.succeed(true),
+      }),
+    );
+
+    expect(checkedExecutable).toBe("pi");
+    const runtime = report.checks.find((check) => check.name === "runtime");
+    expect(runtime?.status).toBe("ok");
+    expect(runtime?.message).toContain("pi (openai-codex/gpt-5.5)");
+  });
+
+  test("reports missing Runtime configuration", async () => {
+    const { paths } = await fixture();
+    const report = await Effect.runPromise(
+      runDoctorEffect(paths, {
+        checkPort: () => Effect.succeed(true),
+      }),
+    );
+
+    expect(report.ok).toBe(false);
+    expect(report.checks.find((check) => check.name === "runtime")?.status).toBe("error");
   });
 
   test("reports unavailable TanStack ACP runtime command", async () => {
@@ -109,7 +157,7 @@ describe("doctor", () => {
       new ConfigStore(paths).setRuntimeEffect({
         kind: "tanstack-acp",
         name: "codex",
-        model: "gpt-5-codex",
+        model: "test-model",
         command: "MISSING=value missing-acp --model {model}",
       }),
     );
@@ -132,7 +180,6 @@ describe("doctor", () => {
 
     const report = await Effect.runPromise(
       runDoctorEffect(paths, {
-        checkPi: () => Effect.succeed(true),
         checkPort: () => Effect.succeed(true),
       }),
     );
@@ -148,7 +195,6 @@ describe("doctor", () => {
 
     const report = await Effect.runPromise(
       runDoctorEffect(paths, {
-        checkPi: () => Effect.succeed(true),
         checkPort: () => Effect.succeed(true),
       }),
     );
