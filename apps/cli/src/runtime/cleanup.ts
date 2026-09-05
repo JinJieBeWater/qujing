@@ -2,7 +2,7 @@ import { RuntimeSessionStore, type RuntimeSession } from "./sessions";
 import { Effect } from "effect";
 
 interface ActiveRuntimeState {
-  clientIds: string[];
+  peerIds: string[];
   workspaceIds: string[];
 }
 
@@ -10,11 +10,11 @@ export function purgeRemovedRuntimeSessionsEffect(
   active: ActiveRuntimeState,
   store: RuntimeSessionStore,
 ) {
-  const clientIds = new Set(active.clientIds);
+  const peerIds = new Set(active.peerIds);
   const workspaceIds = new Set(active.workspaceIds);
   return Effect.gen(function* () {
     const removed = yield* store.matchingEffect(
-      (session) => !clientIds.has(session.clientId) || !workspaceIds.has(session.workspaceId),
+      (session) => !peerIds.has(session.peerId) || !workspaceIds.has(session.workspaceId),
     );
     yield* Effect.all(
       removed.map((session) => store.removeEffect(session)),
@@ -26,8 +26,8 @@ export function purgeRemovedRuntimeSessionsEffect(
   });
 }
 
-export const purgeClientRuntimeSessionsEffect = (clientId: string, store: RuntimeSessionStore) =>
-  purgeRuntimeSessionsEffect((session) => session.clientId === clientId, store);
+export const purgePeerRuntimeSessionsEffect = (peerId: string, store: RuntimeSessionStore) =>
+  purgeRuntimeSessionsEffect((session) => session.peerId === peerId, store);
 
 export const purgeWorkspaceRuntimeSessionsEffect = (
   workspaceId: string,

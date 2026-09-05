@@ -28,11 +28,12 @@ export const Server = Schema.Struct({
   port: Port,
 });
 
-export const Owner = Schema.Struct({
+const NodeFields = {
   id: Identifier,
   name: NonEmptyString,
   summary: Schema.optionalKey(NonEmptyString),
-});
+};
+export const Node = Schema.Struct(NodeFields);
 
 export const Workspace = Schema.Struct({
   id: Identifier,
@@ -41,7 +42,7 @@ export const Workspace = Schema.Struct({
   root: AbsolutePath,
 });
 
-export const GatewayClient = Schema.Struct({
+export const PeerCredential = Schema.Struct({
   id: Identifier,
   tailcatKey: NonEmptyString,
   bearerHash: Hash,
@@ -55,6 +56,8 @@ export const TANSTACK_ACP_PERMISSION_MODES = [
   "acceptEdits",
   "bypassPermissions",
 ] as const;
+export const PI_MODEL_PATTERN = /^[^/]+\/.+$/;
+export const PiModel = Schema.String.check(Schema.isPattern(PI_MODEL_PATTERN));
 
 export const TanStackAcpRuntime = Schema.Struct({
   kind: Schema.Literal("tanstack-acp"),
@@ -66,68 +69,70 @@ export const TanStackAcpRuntime = Schema.Struct({
   permissionMode: Schema.optionalKey(Schema.Literals(TANSTACK_ACP_PERMISSION_MODES)),
 });
 
-export const RuntimeConfig = TanStackAcpRuntime;
+export const PiRpcRuntime = Schema.Struct({
+  kind: Schema.Literal("pi-rpc"),
+  model: PiModel,
+  binary: Schema.optionalKey(NonEmptyString),
+});
 
-export const GatewayConfig = Schema.Struct({
+export const RuntimeConfig = Schema.Union([TanStackAcpRuntime, PiRpcRuntime]);
+
+export const HostConfig = Schema.Struct({
   version: Schema.Literal(1),
-  owner: Owner,
+  node: Node,
   server: Server,
   runtime: Schema.optionalKey(RuntimeConfig),
   workspaces: Schema.Array(Workspace),
-  clients: Schema.Array(GatewayClient),
+  peers: Schema.Array(PeerCredential),
 });
 
 export const Tombstones = Schema.Struct({
   workspaces: Schema.Array(Identifier),
-  clients: Schema.Array(Identifier),
+  peers: Schema.Array(Identifier),
 });
 
-export const Line = Schema.Struct({
+const PeerFields = {
   id: Identifier,
-  expectedOwnerId: Identifier,
-  remoteClientId: Identifier,
+  expectedNodeId: Identifier,
+  remoteAgentId: Identifier,
   serverAddress: BoundedString,
   remotePort: Port,
   keyPath: AbsolutePath.check(Schema.isMaxLength(4_096)),
   remoteBearer: BoundedString,
+};
+
+export const PeerInput = Schema.Struct(PeerFields);
+
+export const Peer = Schema.Struct({
+  ...PeerFields,
   createdAt: Timestamp,
   updatedAt: Timestamp,
 });
 
-export const LineInput = Schema.Struct({
-  id: Identifier,
-  expectedOwnerId: Identifier,
-  remoteClientId: Identifier,
-  serverAddress: BoundedString,
-  remotePort: Port,
+export const PeerCredentials = Schema.Struct({
   keyPath: AbsolutePath.check(Schema.isMaxLength(4_096)),
   remoteBearer: BoundedString,
 });
 
-export const LineCredentials = Schema.Struct({
-  keyPath: AbsolutePath.check(Schema.isMaxLength(4_096)),
-  remoteBearer: BoundedString,
-});
-
-export const LinePairing = Schema.Struct({
+export const PeerInvite = Schema.Struct({
   version: Schema.Literal(1),
-  ownerId: Identifier,
-  remoteClientId: Identifier,
+  nodeId: Identifier,
+  remoteAgentId: Identifier,
   serverAddress: BoundedString,
   remotePort: Port,
   remoteBearer: BoundedString,
 });
 
-export const ClientConfig = Schema.Struct({
+export const AgentConfig = Schema.Struct({
   version: Schema.Literal(1),
   server: Server,
   localBearerHash: Hash,
-  lines: Schema.Array(Line).check(Schema.isMaxLength(64)),
+  peers: Schema.Array(Peer).check(Schema.isMaxLength(64)),
 });
 
 export const RuntimeSession = Schema.Struct({
   id: Uuid,
-  clientId: NonEmptyString,
+  peerId: NonEmptyString,
   workspaceId: NonEmptyString,
   createdAt: Timestamp,
   updatedAt: Timestamp,
@@ -138,18 +143,18 @@ export const ReloadState = Schema.Struct({
   updatedAt: Timestamp,
 });
 
-export const ClientLineRetirement = Schema.Struct({
+export const PeerRetirement = Schema.Struct({
   version: Schema.Literal(1),
   id: Uuid,
-  lineId: NonEmptyString,
-  lineFingerprint: Hash,
+  peerId: NonEmptyString,
+  peerFingerprint: Hash,
   configFingerprint: Hash,
   requesterPid: PositiveInt,
   createdAt: Timestamp,
   cancelled: Schema.optionalKey(Schema.Boolean),
 });
 
-export const ClientLineRetirementAcknowledgement = Schema.Struct({
+export const PeerRetirementAcknowledgement = Schema.Struct({
   requestId: Uuid,
   updatedAt: Timestamp,
 });
@@ -180,41 +185,41 @@ export const PublicWorkspace = Schema.Struct({
   available: Schema.Boolean,
 });
 
-export const LineWorkspaces = Schema.Struct({
-  owner: Owner,
+export const PeerWorkspaces = Schema.Struct({
+  node: Node,
   workspaces: Schema.Array(PublicWorkspace),
 });
 
-export const LineAskResult = Schema.Struct({
+export const PeerAskResult = Schema.Struct({
   workspace: Identifier,
   answer: Schema.String,
 });
 
-export const ClientIdentity = Schema.Struct({
+export const PeerCredentialIdentity = Schema.Struct({
   id: Identifier,
   credentialVersion: Schema.String,
 });
 
 export const AskRequest = Schema.Struct({
-  client: ClientIdentity,
+  peer: PeerCredentialIdentity,
   workspace: Schema.String,
   question: Schema.String,
 });
 
-export const ClientLine = Schema.Struct({
+export const AgentPeer = Schema.Struct({
   id: Identifier,
   available: Schema.Boolean,
-  owner: Schema.optionalKey(Owner),
+  node: Schema.optionalKey(Node),
   workspaces: Schema.Array(PublicWorkspace),
 });
 
-export const ClientLinesResult = Schema.Struct({
-  lines: Schema.Array(ClientLine),
+export const AgentPeersResult = Schema.Struct({
+  peers: Schema.Array(AgentPeer),
 });
 
-export const ClientAskResult = Schema.Struct({
-  line: Identifier,
-  ...LineAskResult.fields,
+export const AgentAskResult = Schema.Struct({
+  peer: Identifier,
+  ...PeerAskResult.fields,
 });
 
 export const ErrorCodePayload = Schema.Struct({ code: Schema.String });
@@ -224,30 +229,31 @@ export const Question = Schema.String.check(
   Schema.makeFilter((value) => (value.trim().length > 0 ? undefined : "Question is empty")),
 );
 
-export type GatewayConfig = typeof GatewayConfig.Type;
+export type HostConfig = typeof HostConfig.Type;
 export type RuntimeConfig = typeof RuntimeConfig.Type;
 export type TanStackAcpRuntime = typeof TanStackAcpRuntime.Type;
+export type PiRpcRuntime = typeof PiRpcRuntime.Type;
 export type Workspace = typeof Workspace.Type;
 export type Tombstones = typeof Tombstones.Type;
-export type ClientConfig = typeof ClientConfig.Type;
-export type Line = typeof Line.Type;
-export type LineInput = typeof LineInput.Type;
-export type LineCredentials = typeof LineCredentials.Type;
-export type LinePairing = typeof LinePairing.Type;
+export type AgentConfig = typeof AgentConfig.Type;
+export type Peer = typeof Peer.Type;
+export type PeerInput = typeof PeerInput.Type;
+export type PeerCredentials = typeof PeerCredentials.Type;
+export type PeerInvite = typeof PeerInvite.Type;
 export type RuntimeSession = typeof RuntimeSession.Type;
 export type ReloadState = typeof ReloadState.Type;
-export type ClientLineRetirement = typeof ClientLineRetirement.Type;
+export type PeerRetirement = typeof PeerRetirement.Type;
 export type TailcatState = typeof TailcatState.Type;
 export type LockOwner = typeof LockOwner.Type;
 export type TransportReady = typeof TransportReady.Type;
-export type Owner = typeof Owner.Type;
+export type Node = typeof Node.Type;
 export type PublicWorkspace = typeof PublicWorkspace.Type;
-export type LineWorkspaces = typeof LineWorkspaces.Type;
-export type LineAskResult = typeof LineAskResult.Type;
-export type ClientIdentity = typeof ClientIdentity.Type;
+export type PeerWorkspaces = typeof PeerWorkspaces.Type;
+export type PeerAskResult = typeof PeerAskResult.Type;
+export type PeerCredentialIdentity = typeof PeerCredentialIdentity.Type;
 export type AskRequest = typeof AskRequest.Type;
-export type ClientLine = typeof ClientLine.Type;
-export type ClientLinesResult = typeof ClientLinesResult.Type;
-export type ClientAskResult = typeof ClientAskResult.Type;
+export type AgentPeer = typeof AgentPeer.Type;
+export type AgentPeersResult = typeof AgentPeersResult.Type;
+export type AgentAskResult = typeof AgentAskResult.Type;
 
 export const decode = Schema.decodeUnknownSync;

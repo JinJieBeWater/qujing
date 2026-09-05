@@ -1,17 +1,13 @@
 import { expect, test } from "bun:test";
 import { Effect } from "effect";
-import {
-  ClientApplication,
-  lineFingerprint,
-  type LineRuntimeClient,
-} from "../src/client-application";
-import type { ClientConfig, LineConfig } from "../src/client-config";
+import { AgentApplication, peerFingerprint, type PeerRuntimeAgent } from "../src/agent-application";
+import type { AgentConfig, PeerConfig } from "../src/agent-config";
 
 const now = new Date().toISOString();
-const line = (id: string): LineConfig => ({
+const peer = (id: string): PeerConfig => ({
   id,
-  expectedOwnerId: `owner-${id}`,
-  remoteClientId: id,
+  expectedNodeId: `node-${id}`,
+  remoteAgentId: id,
   serverAddress: id,
   remotePort: 1,
   keyPath: `/${id}`,
@@ -21,86 +17,86 @@ const line = (id: string): LineConfig => ({
 });
 
 function runtime(
-  listWorkspacesEffect: LineRuntimeClient["listWorkspacesEffect"],
-  askEffect: LineRuntimeClient["askEffect"] = (workspace, question) =>
+  listWorkspacesEffect: PeerRuntimeAgent["listWorkspacesEffect"],
+  askEffect: PeerRuntimeAgent["askEffect"] = (workspace, question) =>
     Effect.succeed({ workspace, answer: question }),
 ) {
   return { listWorkspacesEffect, askEffect, closeEffect: () => Effect.void };
 }
 
-test("aggregates Lines in config order and isolates unavailable Line", async () => {
-  const config: ClientConfig = {
+test("aggregates Peers in config order and isolates unavailable Peer", async () => {
+  const config: AgentConfig = {
     version: 1,
     server: { host: "127.0.0.1", port: 1 },
     localBearerHash: "a".repeat(64),
-    lines: [line("one"), line("two")],
+    peers: [peer("one"), peer("two")],
   };
-  const app = new ClientApplication({
+  const app = new AgentApplication({
     config: { readEffect: () => Effect.succeed(config) },
     createRuntime: (entry) =>
       runtime(() =>
         entry.id === "one"
-          ? Effect.succeed({ owner: { id: "owner-one", name: "One" }, workspaces: [] })
+          ? Effect.succeed({ node: { id: "node-one", name: "One" }, workspaces: [] })
           : Effect.fail(new Error("private")),
       ),
   });
-  expect(await Effect.runPromise(app.listLinesEffect())).toEqual([
-    { id: "one", available: true, owner: { id: "owner-one", name: "One" }, workspaces: [] },
+  expect(await Effect.runPromise(app.listPeersEffect())).toEqual([
+    { id: "one", available: true, node: { id: "node-one", name: "One" }, workspaces: [] },
     { id: "two", available: false, workspaces: [] },
   ]);
 });
 
-test("routes ask to exact Line and closes only changed runtime", async () => {
-  const first = line("one");
-  const second = line("two");
-  let config: ClientConfig = {
+test("routes ask to exact Peer and closes only changed runtime", async () => {
+  const first = peer("one");
+  const second = peer("two");
+  let config: AgentConfig = {
     version: 1,
     server: { host: "127.0.0.1", port: 1 },
     localBearerHash: "a".repeat(64),
-    lines: [first, second],
+    peers: [first, second],
   };
   const calls: string[] = [];
   const closed: string[] = [];
-  const app = new ClientApplication({
+  const app = new AgentApplication({
     config: { readEffect: () => Effect.succeed(config) },
     createRuntime: (entry) =>
       ({
         listWorkspacesEffect: () =>
-          Effect.succeed({ owner: { id: entry.expectedOwnerId, name: entry.id }, workspaces: [] }),
+          Effect.succeed({ node: { id: entry.expectedNodeId, name: entry.id }, workspaces: [] }),
         askEffect: (workspace, question) =>
           Effect.sync(() => {
             calls.push(entry.id);
             return { workspace, answer: question };
           }),
         closeEffect: () => Effect.sync(() => closed.push(entry.id)),
-      }) as LineRuntimeClient,
+      }) as PeerRuntimeAgent,
   });
   expect(
-    await Effect.runPromise(app.askEffect({ line: "two", workspace: "w", question: "q" })),
+    await Effect.runPromise(app.askEffect({ peer: "two", workspace: "w", question: "q" })),
   ).toEqual({
-    line: "two",
+    peer: "two",
     workspace: "w",
     answer: "q",
   });
   expect(calls).toEqual(["two"]);
-  config = { ...config, lines: [{ ...first, remoteBearer: "new" }, second] };
+  config = { ...config, peers: [{ ...first, remoteBearer: "new" }, second] };
   await Effect.runPromise(app.reconcileEffect());
   expect(closed).toEqual([]);
-  await Effect.runPromise(app.listLinesEffect());
-  config = { ...config, lines: [{ ...config.lines[0]!, remoteBearer: "newer" }, second] };
+  await Effect.runPromise(app.listPeersEffect());
+  config = { ...config, peers: [{ ...config.peers[0]!, remoteBearer: "newer" }, second] };
   await Effect.runPromise(app.reconcileEffect());
   expect(closed).toEqual(["one"]);
 });
 
-test("cancellation reaches every Line", async () => {
-  const config: ClientConfig = {
+test("cancellation reaches every Peer", async () => {
+  const config: AgentConfig = {
     version: 1,
     server: { host: "127.0.0.1", port: 1 },
     localBearerHash: "a".repeat(64),
-    lines: [line("one"), line("two")],
+    peers: [peer("one"), peer("two")],
   };
   let aborted = 0;
-  const app = new ClientApplication({
+  const app = new AgentApplication({
     config: { readEffect: () => Effect.succeed(config) },
     createRuntime: () =>
       runtime((signal) =>
@@ -121,7 +117,7 @@ test("cancellation reaches every Line", async () => {
       ),
   });
   const controller = new AbortController();
-  const pending = Effect.runPromise(app.listLinesEffect(controller.signal));
+  const pending = Effect.runPromise(app.listPeersEffect(controller.signal));
   await Bun.sleep(1);
   controller.abort();
   await expect(pending).rejects.toMatchObject({ name: "AbortError" });
@@ -129,12 +125,12 @@ test("cancellation reaches every Line", async () => {
 });
 
 test("serializes config snapshots so stale runtimes cannot survive reconciliation", async () => {
-  const oldLine = line("one");
-  const newLine = { ...oldLine, remoteBearer: "new" };
+  const oldPeer = peer("one");
+  const newPeer = { ...oldPeer, remoteBearer: "new" };
   let releaseFirst!: () => void;
   let reads = 0;
   const closed: string[] = [];
-  const app = new ClientApplication({
+  const app = new AgentApplication({
     config: {
       readEffect: () =>
         Effect.tryPromise({
@@ -148,7 +144,7 @@ test("serializes config snapshots so stale runtimes cannot survive reconciliatio
               version: 1,
               server: { host: "127.0.0.1", port: 1 },
               localBearerHash: "a".repeat(64),
-              lines: [reads === 1 ? oldLine : newLine],
+              peers: [reads === 1 ? oldPeer : newPeer],
             };
           },
           catch: (error) => error,
@@ -158,70 +154,70 @@ test("serializes config snapshots so stale runtimes cannot survive reconciliatio
       ({
         listWorkspacesEffect: () =>
           Effect.succeed({
-            owner: { id: entry.expectedOwnerId, name: entry.remoteBearer },
+            node: { id: entry.expectedNodeId, name: entry.remoteBearer },
             workspaces: [],
           }),
         askEffect: (workspace, question) => Effect.succeed({ workspace, answer: question }),
         closeEffect: () => Effect.sync(() => closed.push(entry.remoteBearer)),
-      }) satisfies LineRuntimeClient,
+      }) satisfies PeerRuntimeAgent,
   });
 
-  const oldRequest = Effect.runPromise(app.listLinesEffect());
+  const oldRequest = Effect.runPromise(app.listPeersEffect());
   while (!releaseFirst) await Bun.sleep(1);
   const reconcile = Effect.runPromise(app.reconcileEffect());
   releaseFirst();
   await oldRequest;
   await reconcile;
   expect(closed).toEqual(["one"]);
-  expect((await Effect.runPromise(app.listLinesEffect()))[0]?.owner?.name).toBe("new");
+  expect((await Effect.runPromise(app.listPeersEffect()))[0]?.node?.name).toBe("new");
   await Effect.runPromise(app.closeEffect());
 });
 
 test("close is terminal and catches a concurrent runtime acquisition", async () => {
-  const config: ClientConfig = {
+  const config: AgentConfig = {
     version: 1,
     server: { host: "127.0.0.1", port: 1 },
     localBearerHash: "a".repeat(64),
-    lines: [line("one")],
+    peers: [peer("one")],
   };
   let closed = 0;
-  const app = new ClientApplication({
+  const app = new AgentApplication({
     config: { readEffect: () => Effect.succeed(config) },
     createRuntime: () =>
       ({
         listWorkspacesEffect: () =>
-          Effect.succeed({ owner: { id: "owner-one", name: "One" }, workspaces: [] }),
+          Effect.succeed({ node: { id: "node-one", name: "One" }, workspaces: [] }),
         askEffect: (workspace, question) => Effect.succeed({ workspace, answer: question }),
         closeEffect: () => Effect.sync(() => closed++),
-      }) satisfies LineRuntimeClient,
+      }) satisfies PeerRuntimeAgent,
   });
 
-  await Effect.runPromise(app.listLinesEffect());
+  await Effect.runPromise(app.listPeersEffect());
   await Effect.runPromise(app.closeEffect());
   expect(closed).toBe(1);
-  await expect(Effect.runPromise(app.listLinesEffect())).rejects.toMatchObject({
-    code: "LINE_UNAVAILABLE",
+  await expect(Effect.runPromise(app.listPeersEffect())).rejects.toMatchObject({
+    code: "PEER_UNAVAILABLE",
   });
 });
 
-test("retires one Line only after active work settles and blocks old credentials", async () => {
-  const oldLine = line("one");
-  let config: ClientConfig = {
+test("retires one Peer only after active work settles and blocks old credentials", async () => {
+  const oldPeer = peer("one");
+  let config: AgentConfig = {
     version: 1,
     server: { host: "127.0.0.1", port: 1 },
     localBearerHash: "a".repeat(64),
-    lines: [oldLine],
+    peers: [oldPeer],
   };
   let started!: () => void;
   const active = new Promise<void>((resolve) => {
     started = resolve;
   });
   const retirementEvents: string[] = [];
-  const app = new ClientApplication({
+  const app = new AgentApplication({
     config: { readEffect: () => Effect.succeed(config) },
     createRuntime: () => ({
       listWorkspacesEffect: () =>
-        Effect.succeed({ owner: { id: "owner-one", name: "One" }, workspaces: [] }),
+        Effect.succeed({ node: { id: "node-one", name: "One" }, workspaces: [] }),
       askEffect: (_workspace, _question, signal) =>
         Effect.tryPromise({
           try: () => {
@@ -244,44 +240,44 @@ test("retires one Line only after active work settles and blocks old credentials
     }),
   });
   const pending = Effect.runPromise(
-    app.askEffect({ line: "one", workspace: "docs", question: "wait" }),
+    app.askEffect({ peer: "one", workspace: "docs", question: "wait" }),
   );
   await active;
-  await Effect.runPromise(app.retireLineEffect(oldLine.id, lineFingerprint(oldLine)));
+  await Effect.runPromise(app.retirePeerEffect(oldPeer.id, peerFingerprint(oldPeer)));
   expect(retirementEvents).toEqual(["settled", "closed"]);
-  await expect(pending).rejects.toMatchObject({ code: "LINE_UNAVAILABLE" });
+  await expect(pending).rejects.toMatchObject({ code: "PEER_UNAVAILABLE" });
   await expect(
-    Effect.runPromise(app.askEffect({ line: "one", workspace: "docs", question: "blocked" })),
-  ).rejects.toMatchObject({ code: "LINE_UNAVAILABLE" });
+    Effect.runPromise(app.askEffect({ peer: "one", workspace: "docs", question: "blocked" })),
+  ).rejects.toMatchObject({ code: "PEER_UNAVAILABLE" });
 
-  config = { ...config, lines: [{ ...oldLine, remoteBearer: "new" }] };
+  config = { ...config, peers: [{ ...oldPeer, remoteBearer: "new" }] };
   await Effect.runPromise(app.reconcileEffect());
-  expect((await Effect.runPromise(app.listLinesEffect()))[0]?.available).toBe(true);
+  expect((await Effect.runPromise(app.listPeersEffect()))[0]?.available).toBe(true);
   await Effect.runPromise(app.closeEffect());
 });
 
-test("does not complete Line retirement when runtime close fails", async () => {
-  const current = line("one");
-  const config: ClientConfig = {
+test("does not complete Peer retirement when runtime close fails", async () => {
+  const current = peer("one");
+  const config: AgentConfig = {
     version: 1,
     server: { host: "127.0.0.1", port: 1 },
     localBearerHash: "a".repeat(64),
-    lines: [current],
+    peers: [current],
   };
-  const app = new ClientApplication({
+  const app = new AgentApplication({
     config: { readEffect: () => Effect.succeed(config) },
     createRuntime: () => ({
       listWorkspacesEffect: () =>
-        Effect.succeed({ owner: { id: "owner-one", name: "One" }, workspaces: [] }),
+        Effect.succeed({ node: { id: "node-one", name: "One" }, workspaces: [] }),
       askEffect: (workspace, question) => Effect.succeed({ workspace, answer: question }),
       closeEffect: () => Effect.fail(new Error("close failed")),
     }),
   });
-  await Effect.runPromise(app.listLinesEffect());
+  await Effect.runPromise(app.listPeersEffect());
   await expect(
-    Effect.runPromise(app.retireLineEffect(current.id, lineFingerprint(current))),
-  ).rejects.toThrow("Line retirement failed");
+    Effect.runPromise(app.retirePeerEffect(current.id, peerFingerprint(current))),
+  ).rejects.toThrow("Peer retirement failed");
   await expect(
-    Effect.runPromise(app.askEffect({ line: "one", workspace: "docs", question: "blocked" })),
-  ).rejects.toMatchObject({ code: "LINE_UNAVAILABLE" });
+    Effect.runPromise(app.askEffect({ peer: "one", workspace: "docs", question: "blocked" })),
+  ).rejects.toMatchObject({ code: "PEER_UNAVAILABLE" });
 });

@@ -11,7 +11,7 @@ import type { WorkspaceConfig } from "../config";
 import type { TanStackAcpRuntime } from "../schemas";
 import { QUJING_PROMPT } from "./prompt";
 import type { RuntimeSession } from "./sessions";
-import type { RuntimeAgentSession } from "./session";
+import type { RuntimeNodeSession } from "./session";
 import {
   createTanStackInstanceStore,
   createTanStackPersistence,
@@ -75,7 +75,7 @@ export function startManagedTanStackAcpSessionEffect(options: TanStackAcpSession
   });
 }
 
-class TanStackAcpSession implements RuntimeAgentSession {
+class TanStackAcpSession implements RuntimeNodeSession {
   readonly self = this;
 
   private lastAssistantText: string | undefined;

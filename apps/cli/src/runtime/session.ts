@@ -1,6 +1,6 @@
 import type { Effect } from "effect";
 
-export interface RuntimeAgentSession {
+export interface RuntimeNodeSession {
   getLastAssistantText(): string | undefined;
   isAlive(): boolean;
   promptEffect(question: string): Effect.Effect<void, Error>;

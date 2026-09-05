@@ -16,7 +16,7 @@ import (
 )
 
 func TestKeyCreate(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "keys", "client.json")
+	path := filepath.Join(t.TempDir(), "keys", "peer.json")
 	if err := keyCreate([]string{"--output", path}); err != nil {
 		t.Fatal(err)
 	}
@@ -41,7 +41,7 @@ func TestKeyCreate(t *testing.T) {
 }
 
 func TestWriteNewPrivateJSONDoesNotOverwriteConcurrently(t *testing.T) {
-	path := filepath.Join(t.TempDir(), "client.json")
+	path := filepath.Join(t.TempDir(), "peer.json")
 	start := make(chan struct{})
 	results := make(chan error, 2)
 	for _, value := range []string{"first", "second"} {
@@ -142,42 +142,42 @@ func TestBootstrapRetriesBeforeReadingLocalRequest(t *testing.T) {
 	}
 }
 
-func TestClientManagerSharesConcurrentBridgesAndResetsAfterIdle(t *testing.T) {
-	manager := &clientManager{server: "tc-invalid", privateKey: tailcat.NewPrivateKey().Private, idleDelay: 20 * time.Millisecond}
+func TestPeerManagerSharesConcurrentBridgesAndResetsAfterIdle(t *testing.T) {
+	manager := &peerManager{server: "tc-invalid", privateKey: tailcat.NewPrivateKey().Private, idleDelay: 20 * time.Millisecond}
 	defer manager.close()
 	first, releaseFirst := manager.acquire()
 	second, releaseSecond := manager.acquire()
 	if first != second {
-		t.Fatal("concurrent bridges did not share one Tailcat Client")
+		t.Fatal("concurrent bridges did not share one Tailcat peer session")
 	}
 	releaseFirst()
-	if manager.client == nil {
-		t.Fatal("client reset while another bridge was active")
+	if manager.peer == nil {
+		t.Fatal("peer reset while another bridge was active")
 	}
 	releaseSecond()
 	third, releaseThird := manager.acquire()
 	if third != first {
-		t.Fatal("sequential bridge did not reuse the client during the idle grace period")
+		t.Fatal("sequential bridge did not reuse the peer session during the idle grace period")
 	}
 	releaseThird()
 	time.Sleep(50 * time.Millisecond)
-	if manager.client != nil {
-		t.Fatal("client was not reset after the idle grace period")
+	if manager.peer != nil {
+		t.Fatal("peer session was not reset after the idle grace period")
 	}
 	fourth, releaseFourth := manager.acquire()
 	defer releaseFourth()
 	if fourth == first {
-		t.Fatal("next bridge batch reused stale Tailcat Client")
+		t.Fatal("next bridge batch reused stale Tailcat peer session")
 	}
 }
 
-func TestClientManagerPingsEveryReusedBridge(t *testing.T) {
+func TestPeerManagerPingsEveryReusedBridge(t *testing.T) {
 	pingCount := 0
-	manager := &clientManager{
+	manager := &peerManager{
 		server:     "tc-invalid",
 		privateKey: tailcat.NewPrivateKey().Private,
 		idleDelay:  time.Second,
-		pingClient: func(context.Context, *tailcat.Client) error {
+		pingPeer: func(context.Context, *tailcat.Client) error {
 			pingCount++
 			return nil
 		},
@@ -191,7 +191,7 @@ func TestClientManagerPingsEveryReusedBridge(t *testing.T) {
 	second, releaseSecond := manager.acquire()
 	defer releaseSecond()
 	if first != second {
-		t.Fatal("bridge did not reuse the client during the idle grace period")
+		t.Fatal("bridge did not reuse the peer session during the idle grace period")
 	}
 	if err := manager.ensureReady(context.Background(), second); err != nil {
 		t.Fatal(err)

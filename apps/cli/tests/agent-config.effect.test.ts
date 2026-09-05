@@ -3,16 +3,16 @@ import { Effect } from "effect";
 import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ClientConfigStore } from "../src/client-config";
+import { AgentConfigStore } from "../src/agent-config";
 
-it.live("runs ClientConfigStore Effect API", () =>
+it.live("runs AgentConfigStore Effect API", () =>
   Effect.gen(function* () {
     const root = yield* Effect.tryPromise({
-      try: () => mkdtemp(join(tmpdir(), "qujing-client-effect-test-")),
+      try: () => mkdtemp(join(tmpdir(), "qujing-agent-effect-test-")),
       catch: (error) => error,
     });
     const key = join(root, "key");
-    const store = new ClientConfigStore({ configPath: join(root, "config", "client.json") });
+    const store = new AgentConfigStore({ configPath: join(root, "config", "agent.json") });
     yield* Effect.ensuring(
       Effect.gen(function* () {
         yield* Effect.tryPromise({ try: () => writeFile(key, "key"), catch: (error) => error });
@@ -20,16 +20,16 @@ it.live("runs ClientConfigStore Effect API", () =>
         const initialized = yield* store.initEffect();
         expect(initialized.initialized).toBe(true);
         yield* store.addEffect({
-          id: "line",
-          expectedOwnerId: "owner",
-          remoteClientId: "client",
+          id: "peer",
+          expectedNodeId: "node",
+          remoteAgentId: "agent",
           serverAddress: "tailcat",
           remotePort: 43110,
           keyPath: key,
           remoteBearer: "remote-secret",
         });
         expect(yield* store.listEffect()).toHaveLength(1);
-        expect(yield* store.removeEffect("line")).toBe(true);
+        expect(yield* store.removeEffect("peer")).toBe(true);
       }),
       Effect.tryPromise({
         try: () => rm(root, { recursive: true, force: true }),

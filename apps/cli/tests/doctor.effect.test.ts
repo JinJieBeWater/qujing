@@ -19,15 +19,21 @@ it.effect("runs doctor Effect", () =>
       yield* promise(() => Bun.write(paths.transportBinary, "binary"));
       yield* promise(() => chmod(paths.transportBinary, 0o700));
       const config = new ConfigStore(paths);
-      yield* config.initEffect({ owner: { id: "owner", name: "Owner" }, port: 43_199 });
+      yield* config.initEffect({ node: { id: "node", name: "Node" }, port: 43_199 });
       yield* config.addWorkspaceEffect({
         id: "docs",
         name: "Docs",
         summary: "Docs",
         root: join(root, "workspace"),
       });
+      yield* config.setRuntimeEffect({
+        kind: "tanstack-acp",
+        name: "codex",
+        model: "test-model",
+        command: "agent --acp --model {model} --cwd {cwd}",
+      });
       const report = yield* runDoctorEffect(paths, {
-        checkPi: () => Effect.succeed(true),
+        checkExecutable: () => Effect.succeed(true),
         checkPort: () => Effect.succeed(true),
       });
       expect(report.ok).toBe(true);
@@ -37,7 +43,7 @@ it.effect("runs doctor Effect", () =>
         "workspace:docs",
         "port",
         "transport",
-        "pi",
+        "runtime",
         "tailcat-state",
       ]);
     } finally {

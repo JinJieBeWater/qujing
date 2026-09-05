@@ -3,7 +3,7 @@ import type { WorkspaceConfig } from "../config";
 import { ABORT_SETTLE_TIMEOUT_MS, ASK_TIMEOUT_MS } from "../constants";
 import { QujingError } from "../errors";
 import type { RuntimeSession } from "./sessions";
-import type { RuntimeAgentSession } from "./session";
+import type { RuntimeNodeSession } from "./session";
 
 export interface RuntimePoolAnswerInput {
   workspace: WorkspaceConfig;
@@ -13,8 +13,8 @@ export interface RuntimePoolAnswerInput {
 }
 
 interface RuntimeEntry {
-  session: RuntimeAgentSession;
-  clientId: string;
+  session: RuntimeNodeSession;
+  peerId: string;
   workspaceId: string;
   turnGate: Semaphore.Semaphore;
   busy: boolean;
@@ -23,7 +23,7 @@ interface RuntimeEntry {
 }
 
 interface RuntimeCreation {
-  clientId: string;
+  peerId: string;
   workspaceId: string;
   retired: boolean;
   fiber: Fiber.Fiber<RuntimeEntry, unknown>;
@@ -33,7 +33,7 @@ export interface RuntimePoolOptions {
   createSessionEffect(
     workspace: WorkspaceConfig,
     session: RuntimeSession,
-  ): Effect.Effect<RuntimeAgentSession, unknown>;
+  ): Effect.Effect<RuntimeNodeSession, unknown>;
   maxRuntimes?: number;
   queueCapacity?: number;
   idleTimeoutMs?: number;
@@ -165,7 +165,7 @@ export class RuntimePool {
   }
 
   private runTurnEffect(entry: RuntimeEntry, question: string): Effect.Effect<string, unknown> {
-    return this.promptSessionEffect(entry.session, question).pipe(
+    return entry.session.promptEffect(question).pipe(
       Effect.onInterrupt(() => this.abortSessionEffect(entry.session).pipe(Effect.orDie)),
       Effect.flatMap(() => {
         const answer = entry.session.getLastAssistantText();
@@ -185,10 +185,10 @@ export class RuntimePool {
     );
   }
 
-  private abortSessionEffect(session: RuntimeAgentSession): Effect.Effect<void, unknown> {
-    return this.clearQueueSessionEffect(session).pipe(
-      Effect.andThen(this.abortRuntimeSessionEffect(session)),
-      Effect.andThen(this.waitForIdleSessionEffect(session)),
+  private abortSessionEffect(session: RuntimeNodeSession): Effect.Effect<void, unknown> {
+    return session.clearQueueEffect().pipe(
+      Effect.andThen(session.abortEffect()),
+      Effect.andThen(session.waitForIdleEffect()),
       Effect.catch((cause) =>
         this.fatalFailureEffect(new Error("Runtime abort failed", { cause })),
       ),
@@ -218,9 +218,12 @@ export class RuntimePool {
 
             let evicted: RuntimeEntry | undefined;
             if (this.occupied >= (this.options.maxRuntimes ?? 4)) {
-              const idle = [...this.entries.entries()]
-                .filter(([, entry]) => !entry.busy && entry.waiting === 0)
-                .sort((a, b) => a[1].lastUsed - b[1].lastUsed)[0];
+              let idle: [string, RuntimeEntry] | undefined;
+              for (const candidate of this.entries.entries()) {
+                const entry = candidate[1];
+                if (entry.busy || entry.waiting > 0) continue;
+                if (!idle || entry.lastUsed < idle[1].lastUsed) idle = candidate;
+              }
               if (!idle)
                 return yield* Effect.fail(new QujingError("BUSY", "All Runtime slots are active"));
               this.entries.delete(idle[0]);
@@ -230,7 +233,7 @@ export class RuntimePool {
             }
 
             const creation = {
-              clientId: session.clientId,
+              peerId: session.peerId,
               workspaceId: session.workspaceId,
               retired: false,
               fiber: undefined as unknown as Fiber.Fiber<RuntimeEntry, unknown>,
@@ -258,15 +261,15 @@ export class RuntimePool {
     creation: RuntimeCreation,
     evicted?: RuntimeEntry,
   ): Effect.Effect<RuntimeEntry, unknown> {
-    let managed: RuntimeAgentSession | undefined;
+    let managed: RuntimeNodeSession | undefined;
     let committed = false;
     return Effect.gen(this, function* () {
-      if (evicted) yield* this.disposeSessionEffect(evicted.session);
+      if (evicted) yield* evicted.session.disposeEffect();
       managed = yield* this.options.createSessionEffect(workspace, session);
       const started = managed;
       const entry: RuntimeEntry = {
         session: started,
-        clientId: session.clientId,
+        peerId: session.peerId,
         workspaceId: session.workspaceId,
         turnGate: Semaphore.makeUnsafe(1),
         busy: false,
@@ -286,7 +289,7 @@ export class RuntimePool {
       if (!accepted) {
         const late = managed;
         managed = undefined;
-        yield* this.disposeSessionEffect(late!).pipe(Effect.ignore);
+        yield* late!.disposeEffect().pipe(Effect.ignore);
         return yield* Effect.fail(
           new DOMException("Runtime Session creation retired", "AbortError"),
         );
@@ -299,7 +302,7 @@ export class RuntimePool {
           if (managed) {
             const current = managed;
             managed = undefined;
-            yield* this.disposeSessionEffect(current).pipe(Effect.ignore);
+            yield* current.disposeEffect().pipe(Effect.ignore);
           }
           if (creation.retired || this.disposed) return yield* Effect.fail(error);
           return yield* Effect.fail(
@@ -364,7 +367,7 @@ export class RuntimePool {
     return Effect.uninterruptibleMask((restore) =>
       Effect.gen(this, function* () {
         const retirement = (abort ? this.abortSessionEffect(entry.session) : Effect.void).pipe(
-          Effect.andThen(this.disposeSessionEffect(entry.session)),
+          Effect.andThen(entry.session.disposeEffect()),
           Effect.ensuring(
             this.gate.withPermit(
               Effect.sync(() => {
@@ -389,11 +392,11 @@ export class RuntimePool {
     );
   }
 
-  disposeClientEffect(clientId: string): Effect.Effect<void, unknown> {
+  disposePeerEffect(peerId: string): Effect.Effect<void, unknown> {
     return Effect.gen(this, function* () {
-      yield* this.retireCreationsEffect((creation) => creation.clientId === clientId);
+      yield* this.retireCreationsEffect((creation) => creation.peerId === peerId);
       const entries = yield* this.gate.withPermit(
-        Effect.sync(() => [...this.entries].filter(([, entry]) => entry.clientId === clientId)),
+        Effect.sync(() => [...this.entries].filter(([, entry]) => entry.peerId === peerId)),
       );
       yield* Effect.all(
         entries.map(([id, entry]) =>
@@ -503,26 +506,6 @@ export class RuntimePool {
         yield* this.retireEntryEffect(idle[0], idle[1], false);
       }
     });
-  }
-
-  private promptSessionEffect(session: RuntimeAgentSession, question: string) {
-    return session.promptEffect(question);
-  }
-
-  private clearQueueSessionEffect(session: RuntimeAgentSession) {
-    return session.clearQueueEffect();
-  }
-
-  private abortRuntimeSessionEffect(session: RuntimeAgentSession) {
-    return session.abortEffect();
-  }
-
-  private waitForIdleSessionEffect(session: RuntimeAgentSession) {
-    return session.waitForIdleEffect();
-  }
-
-  private disposeSessionEffect(session: RuntimeAgentSession) {
-    return session.disposeEffect();
   }
 
   private fatalFailureEffect(error: Error): Effect.Effect<never, Error> {

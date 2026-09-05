@@ -10,12 +10,12 @@ import { TailcatSupervisor } from "../src/transport/supervisor";
 it.effect("runs service removal through Effect", () =>
   Effect.gen(function* () {
     const events: string[] = [];
-    yield* removeUserServiceEffect("client", "linux", {
+    yield* removeUserServiceEffect("agent", "linux", {
       run: (command) => Effect.sync(() => void events.push(command.join(" "))),
       remove: () => Effect.sync(() => void events.push("remove")),
     });
     expect(events).toEqual([
-      "systemctl --user disable --now qujing-client.service",
+      "systemctl --user disable --now qujing-agent.service",
       "remove",
       "systemctl --user daemon-reload",
     ]);

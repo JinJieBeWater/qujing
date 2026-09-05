@@ -3,16 +3,16 @@ import { Duration, Effect, Exit, Fiber, Ref, Scope } from "effect";
 import { pollEvery } from "./effect-runtime";
 import { createQujing } from "./qujing";
 import { ConfigStore, type Config } from "./config";
-import { acknowledgeGatewayReloadEffect, configFingerprint } from "./gateway-reload";
-import { createMcpGateway } from "./mcp";
+import { acknowledgeNodeReloadEffect, configFingerprint } from "./reload";
+import { createMcpNode } from "./mcp";
 import { assertPrivatePathEffect, assertPrivateTreeEffect } from "./private-files";
-import { acquireGatewayLockEffect } from "./process-lock";
-import { RuntimeCoordinator } from "./runtime/coordinator";
-import { RuntimePool } from "./runtime/runtime-pool";
+import { acquireNodeLockEffect } from "./process-lock";
+import { changedOrRemovedPeerCredentialIds, RuntimeCoordinator } from "./runtime/coordinator";
 import { startManagedPiRpcSessionEffect } from "./runtime/pi-rpc";
+import { RuntimePool } from "./runtime/runtime-pool";
 import { RuntimeSessionStore } from "./runtime/sessions";
-import type { RuntimeAgentSession } from "./runtime/session";
 import { createTanStackAcpSessionFactory } from "./runtime/tanstack-acp";
+import type { RuntimeNodeSession } from "./runtime/session";
 import { TailcatSupervisor } from "./transport/supervisor";
 
 interface ServerOptions {
@@ -29,14 +29,14 @@ interface StartedServer {
   server: ReturnType<typeof Bun.serve>;
 }
 
-/** Root gateway program. Acquisition order makes close: poll, transport, Bun, MCP, runtime, lock. */
+/** Root node program. Acquisition order makes close: poll, transport, Bun, MCP, runtime, lock. */
 export function startServerEffect(paths: ServerOptions, scope: Scope.Scope) {
   return Effect.gen(function* () {
     yield* assertPrivateTreeEffect(dirname(paths.configPath));
     yield* assertPrivatePathEffect(paths.configPath, false);
     yield* assertPrivateTreeEffect(paths.stateRoot);
     yield* assertPrivatePathEffect(join(paths.stateRoot, "tombstones.json"), false);
-    yield* Effect.acquireRelease(acquireGatewayLockEffect(paths.stateRoot), (release) =>
+    yield* Effect.acquireRelease(acquireNodeLockEffect(paths.stateRoot), (release) =>
       release.pipe(Effect.orDie),
     );
 
@@ -52,12 +52,21 @@ export function startServerEffect(paths: ServerOptions, scope: Scope.Scope) {
     const tanStackSession = createTanStackAcpSessionFactory({ stateRoot: paths.stateRoot });
     const runtime = yield* RuntimePool.createEffect({
       fatal,
-      createSessionEffect: (workspace, session) =>
+      createSessionEffect: (workspace, session): Effect.Effect<RuntimeNodeSession, unknown> =>
         Ref.get(current).pipe(
-          Effect.flatMap((effective): Effect.Effect<RuntimeAgentSession, unknown> => {
-            if (effective.runtime?.kind === "tanstack-acp")
-              return tanStackSession(workspace, session, effective.runtime);
-            return startManagedPiRpcSessionEffect({ cwd: workspace.root, sessionId: session.id });
+          Effect.flatMap((effective) => {
+            const runtime = effective.runtime;
+            if (runtime?.kind === "pi-rpc") {
+              return startManagedPiRpcSessionEffect({
+                cwd: workspace.root,
+                sessionId: session.id,
+                model: runtime.model,
+                ...(runtime.binary === undefined ? {} : { binary: runtime.binary }),
+              });
+            }
+            if (runtime?.kind === "tanstack-acp")
+              return tanStackSession(workspace, session, runtime);
+            return Effect.fail(new Error("Runtime is not configured"));
           }),
         ),
     });
@@ -70,7 +79,7 @@ export function startServerEffect(paths: ServerOptions, scope: Scope.Scope) {
       }).pipe(
         Effect.map((coordinator) => ({
           coordinator,
-          gateway: createMcpGateway({
+          node: createMcpNode({
             app: createQujing({ config, coordinator }),
             authenticateEffect: (bearer) => config.authenticateEffect(bearer),
             allowedHosts: [effective.server.host, "localhost"],
@@ -79,20 +88,20 @@ export function startServerEffect(paths: ServerOptions, scope: Scope.Scope) {
           }),
         })),
       ),
-      ({ coordinator, gateway }) =>
-        gateway.closeEffect.pipe(
+      ({ coordinator, node }) =>
+        node.closeEffect.pipe(
           Effect.ensuring(coordinator.closeEffect().pipe(Effect.orDie)),
           Effect.orDie,
         ),
     );
-    const { coordinator, gateway } = resources;
+    const { coordinator, node } = resources;
     const server = yield* Effect.acquireRelease(
       Effect.sync(() => {
         return Bun.serve({
           hostname: effective.server.host,
           port: effective.server.port,
           idleTimeout: 255,
-          fetch: (request) => gateway.fetch(request),
+          fetch: (request) => node.fetch(request),
         });
       }),
       (resource) => Effect.sync(() => resource.stop(true)),
@@ -111,17 +120,9 @@ export function startServerEffect(paths: ServerOptions, scope: Scope.Scope) {
     );
 
     const initial = yield* Ref.get(current);
-    yield* transport.reloadEffect(initial.clients.map((client) => client.tailcatKey));
-    yield* acknowledgeGatewayReloadEffect(paths.stateRoot, initial);
-    yield* startReloadFiber(
-      config,
-      current,
-      coordinator,
-      gateway,
-      transport,
-      paths.stateRoot,
-      fatal,
-    );
+    yield* transport.reloadEffect(initial.peers.map((agent) => agent.tailcatKey));
+    yield* acknowledgeNodeReloadEffect(paths.stateRoot, initial);
+    yield* startReloadFiber(config, current, coordinator, node, transport, paths.stateRoot, fatal);
 
     return {
       url: `http://${server.hostname}:${server.port}`,
@@ -135,7 +136,7 @@ function startReloadFiber(
   config: ConfigStore,
   current: Ref.Ref<Config>,
   coordinator: RuntimeCoordinator,
-  gateway: ReturnType<typeof createMcpGateway>,
+  node: ReturnType<typeof createMcpNode>,
   transport: TailcatSupervisor,
   stateRoot: string,
   fatal: (error: Error) => void,
@@ -147,13 +148,15 @@ function startReloadFiber(
     yield* Effect.all(
       [
         coordinator.reconcileEffect(next),
-        ...changedClientIds(previous, next).map((clientId) => gateway.closeClientEffect(clientId)),
+        ...changedOrRemovedPeerCredentialIds(previous, next).map((peerId) =>
+          node.closeCredentialEffect(peerId),
+        ),
       ],
       { concurrency: "unbounded" },
     );
-    yield* transport.reloadEffect(next.clients.map((client) => client.tailcatKey));
+    yield* transport.reloadEffect(next.peers.map((agent) => agent.tailcatKey));
     yield* Ref.set(current, next);
-    yield* acknowledgeGatewayReloadEffect(stateRoot, next);
+    yield* acknowledgeNodeReloadEffect(stateRoot, next);
   }).pipe(
     Effect.catchEager((error) =>
       Effect.sync(() => fatal(error instanceof Error ? error : new Error("Config reload failed"))),
@@ -187,13 +190,4 @@ export function createScopedFatalHandler(
       ),
     );
   };
-}
-
-function changedClientIds(previous: Config, next: Config): string[] {
-  const current = new Map(
-    next.clients.map((client) => [client.id, `${client.tailcatKey}\0${client.bearerHash}`]),
-  );
-  return previous.clients
-    .filter((client) => current.get(client.id) !== `${client.tailcatKey}\0${client.bearerHash}`)
-    .map((client) => client.id);
 }

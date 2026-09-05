@@ -11,17 +11,17 @@ afterEach(async () => {
 });
 
 describe("RuntimeSessionStore", () => {
-  test("persists one Pi session ID per Client and Workspace", async () => {
+  test("persists one Runtime Session ID per Peer and Workspace", async () => {
     const root = await mkdtemp(join(tmpdir(), "qujing-sessions-"));
     roots.push(root);
     const firstStore = new RuntimeSessionStore(root);
 
     const [first, concurrent] = await Promise.all([
-      Effect.runPromise(firstStore.getOrCreateEffect("client", "workspace")),
-      Effect.runPromise(firstStore.getOrCreateEffect("client", "workspace")),
+      Effect.runPromise(firstStore.getOrCreateEffect("agent", "workspace")),
+      Effect.runPromise(firstStore.getOrCreateEffect("agent", "workspace")),
     ]);
     const restored = await Effect.runPromise(
-      new RuntimeSessionStore(root).getOrCreateEffect("client", "workspace"),
+      new RuntimeSessionStore(root).getOrCreateEffect("agent", "workspace"),
     );
 
     expect(concurrent.id).toBe(first.id);
@@ -37,13 +37,13 @@ describe("RuntimeSessionStore", () => {
     await Effect.runPromise(store.getOrCreateEffect("two", "docs"));
 
     const removed = await Effect.runPromise(
-      store.matchingEffect((session) => session.clientId === "one"),
+      store.matchingEffect((session) => session.peerId === "one"),
     );
     await Promise.all(removed.map((session) => Effect.runPromise(store.removeEffect(session))));
 
     expect(removed).toHaveLength(2);
     expect(await Effect.runPromise(store.listEffect())).toMatchObject([
-      { clientId: "two", workspaceId: "docs" },
+      { peerId: "two", workspaceId: "docs" },
     ]);
   });
 });

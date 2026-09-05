@@ -23,9 +23,9 @@ try {
   New-Item -ItemType Directory -Force $tmp | Out-Null
   Invoke-WebRequest "$base/$asset" -OutFile "$tmp\$asset"
   Invoke-WebRequest "$base/SHA256SUMS" -OutFile "$tmp\SHA256SUMS"
-  $line = Get-Content "$tmp\SHA256SUMS" | Where-Object { $_ -match "\s+$([regex]::Escape($asset))$" }
-  if (-not $line) { throw "Missing checksum for $asset" }
-  $expected = ($line -split "\s+")[0]
+  $entry = Get-Content "$tmp\SHA256SUMS" | Where-Object { $_ -match "\s+$([regex]::Escape($asset))$" }
+  if (-not $entry) { throw "Missing checksum for $asset" }
+  $expected = ($entry -split "\s+")[0]
   $actual = (Get-FileHash "$tmp\$asset" -Algorithm SHA256).Hash
   if ($actual -ne $expected) { throw "Checksum mismatch for $asset" }
 

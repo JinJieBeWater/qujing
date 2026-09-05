@@ -1,8 +1,9 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { Context, Deferred, Duration, Effect, Exit, Queue, Scope } from "effect";
+import { PI_MODEL_PATTERN } from "../schemas";
 import { QUJING_PROMPT } from "./prompt";
-import type { RuntimeAgentSession } from "./session";
+import type { RuntimeNodeSession } from "./session";
 
 interface RpcResponse {
   type: "response";
@@ -17,11 +18,12 @@ const MAX_RPC_LINE_BYTES = 16 * 1024 * 1024;
 const MAX_RPC_STDOUT_BYTES = 32 * 1024 * 1024;
 const MAX_UI_RESPONSE_BYTES = 4 * 1024;
 
-export type PiRpcSessionEffect = RuntimeAgentSession;
+export type PiRpcSessionEffect = RuntimeNodeSession;
 
 export interface PiRpcOptions {
   cwd: string;
   sessionId: string;
+  model?: string;
   binary?: string;
   startupTimeoutMs?: number;
 }
@@ -47,17 +49,17 @@ export const startPiRpcSessionEffect = (
             ],
             { cwd: options.cwd, stdio: ["pipe", "pipe", "pipe"] },
           ),
-        catch: (error) => new Error("Could not start global Pi", { cause: error }),
+        catch: (error) => new Error("Could not start Pi Runtime", { cause: error }),
       }),
       (child) => stopChildEffect(child),
     );
-    const session = yield* GlobalPiRpcSession.make(child);
+    const session = yield* PiRpcSession.make(child);
     yield* Effect.addFinalizer(() => session.disposeEffect());
     yield* session.readerEffect.pipe(Effect.forkScoped);
     yield* session.commandEffect("get_state").pipe(
       Effect.timeoutOrElse({
         duration: Duration.millis(options.startupTimeoutMs ?? 30_000),
-        orElse: () => Effect.fail(new Error("Global Pi startup timed out")),
+        orElse: () => Effect.fail(new Error("Pi Runtime startup timed out")),
       }),
       Effect.flatMap((response) => {
         const state = response.data as { sessionId?: unknown } | undefined;
@@ -66,11 +68,14 @@ export const startPiRpcSessionEffect = (
           : Effect.fail(new Error("Pi opened wrong Runtime Session"));
       }),
     );
+    if (options.model) yield* session.setModelEffect(options.model);
     return session;
   });
 
 /** Owned session Effect. Returned facade keeps its child Scope alive until dispose. */
-export const startManagedPiRpcSessionEffect = (options: PiRpcOptions) =>
+export const startManagedPiRpcSessionEffect = (
+  options: PiRpcOptions,
+): Effect.Effect<PiRpcSessionEffect, Error> =>
   Effect.gen(function* () {
     const scope = yield* Scope.make();
     return yield* Effect.provide(
@@ -110,7 +115,7 @@ class ManagedPiRpcSession implements PiRpcSessionEffect {
   }
 }
 
-class GlobalPiRpcSession implements PiRpcSessionEffect {
+class PiRpcSession implements PiRpcSessionEffect {
   private readonly pending = new Map<string, PendingRequest>();
   private readonly stdoutQueue = Effect.runSync(Queue.unbounded<Effect.Effect<void, Error>>());
   private readonly stdoutFragments: Buffer[] = [];
@@ -129,9 +134,9 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
     private readonly failure: Deferred.Deferred<void, Error>,
   ) {}
 
-  static make(child: ChildProcessWithoutNullStreams): Effect.Effect<GlobalPiRpcSession> {
+  static make(child: ChildProcessWithoutNullStreams): Effect.Effect<PiRpcSession> {
     return Deferred.make<void, Error>().pipe(
-      Effect.map((failure) => new GlobalPiRpcSession(child, failure)),
+      Effect.map((failure) => new PiRpcSession(child, failure)),
     );
   }
 
@@ -146,7 +151,7 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
             chunk.byteLength >
           MAX_RPC_STDOUT_BYTES
         ) {
-          this.rejectStdout(new Error("Global Pi RPC stdout exceeded buffer limit"));
+          this.rejectStdout(new Error("Pi Runtime RPC stdout exceeded buffer limit"));
           return;
         }
         this.stdoutQueuedBytes += chunk.byteLength;
@@ -178,14 +183,14 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
       const onError = (error: Error) => {
         Queue.offerUnsafe(
           this.stdoutQueue,
-          Effect.fail(new Error("Could not start global Pi", { cause: error })),
+          Effect.fail(new Error("Could not start Pi Runtime", { cause: error })),
         );
       };
       const onClose = (code: number | null, signal: NodeJS.Signals | null) => {
         if (!this.stopped)
           Queue.offerUnsafe(
             this.stdoutQueue,
-            Effect.fail(new Error(`Global Pi exited (${code ?? signal ?? "unknown"})`)),
+            Effect.fail(new Error(`Pi Runtime exited (${code ?? signal ?? "unknown"})`)),
           );
       };
       this.child.stdout.on("data", onData);
@@ -258,7 +263,7 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
       this.child.stdout.pause();
     }).pipe(
       Effect.andThen(stopChildEffect(this.child)),
-      Effect.andThen(this.failEffect(new Error("Global Pi stopped"))),
+      Effect.andThen(this.failEffect(new Error("Pi Runtime stopped"))),
     );
   }
 
@@ -267,15 +272,36 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
     fields: Record<string, unknown> = {},
   ): Effect.Effect<RpcResponse, Error> {
     return Effect.gen({ self: this }, function* () {
-      if (this.stopped) return yield* Effect.fail(new Error("Global Pi is stopped"));
+      if (this.stopped) return yield* Effect.fail(new Error("Pi Runtime is stopped"));
       const id = randomUUID();
       const pending = yield* Deferred.make<RpcResponse, Error>();
       this.pending.set(id, pending);
-      yield* this.writeEffect({ type, id, ...fields });
-      const response = yield* Deferred.await(pending);
-      if (!response.success) return yield* Effect.fail(new Error(`Pi RPC command failed: ${type}`));
-      return response;
+      return yield* this.writeEffect({ type, id, ...fields }).pipe(
+        Effect.andThen(Deferred.await(pending)),
+        Effect.flatMap((response) =>
+          response.success
+            ? Effect.succeed(response)
+            : Effect.fail(new Error(`Pi RPC command failed: ${type}`)),
+        ),
+        Effect.ensuring(
+          Effect.sync(() => {
+            if (this.pending.get(id) === pending) this.pending.delete(id);
+          }),
+        ),
+      );
     });
+  }
+
+  setModelEffect(model: string): Effect.Effect<void, Error> {
+    return Effect.sync(() => parsePiModel(model)).pipe(
+      Effect.flatMap((parsed) =>
+        this.commandEffect("set_model", {
+          provider: parsed.provider,
+          modelId: parsed.modelId,
+        }),
+      ),
+      Effect.asVoid,
+    );
   }
 
   private readEffect(chunk: Buffer): Effect.Effect<void, Error> {
@@ -285,10 +311,10 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
       while (newline !== -1) {
         const fragment = chunk.subarray(offset, newline);
         if (fragment.includes(0x0d))
-          return yield* Effect.fail(new Error("Global Pi emitted non-LF JSONL"));
+          return yield* Effect.fail(new Error("Pi Runtime emitted non-LF JSONL"));
         const lineBytes = this.stdoutPartialBytes + fragment.byteLength;
         if (lineBytes > MAX_RPC_LINE_BYTES)
-          return yield* Effect.fail(new Error("Global Pi RPC JSONL line exceeded byte limit"));
+          return yield* Effect.fail(new Error("Pi Runtime RPC JSONL line exceeded byte limit"));
         const line =
           this.stdoutFragments.length === 0
             ? fragment
@@ -301,9 +327,9 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
       }
       const remainder = chunk.subarray(offset);
       if (remainder.includes(0x0d))
-        return yield* Effect.fail(new Error("Global Pi emitted non-LF JSONL"));
+        return yield* Effect.fail(new Error("Pi Runtime emitted non-LF JSONL"));
       if (this.stdoutPartialBytes + remainder.byteLength > MAX_RPC_LINE_BYTES)
-        return yield* Effect.fail(new Error("Global Pi RPC JSONL line exceeded byte limit"));
+        return yield* Effect.fail(new Error("Pi Runtime RPC JSONL line exceeded byte limit"));
       if (remainder.byteLength > 0) {
         this.stdoutFragments.push(offset === 0 ? remainder : Buffer.from(remainder));
         this.stdoutPartialBytes += remainder.byteLength;
@@ -317,7 +343,7 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
       try {
         message = JSON.parse(line) as Record<string, unknown>;
       } catch (error) {
-        return yield* Effect.fail(new Error("Global Pi emitted invalid JSONL", { cause: error }));
+        return yield* Effect.fail(new Error("Pi Runtime emitted invalid JSONL", { cause: error }));
       }
       if (message.type === "response" && typeof message.id === "string") {
         const pending = this.pending.get(message.id);
@@ -382,7 +408,7 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
 
   private writeEffect(message: Record<string, unknown>): Effect.Effect<void, Error> {
     if (this.stopped || !this.child.stdin.writable)
-      return Effect.fail(this.stdoutFailure ?? new Error("Global Pi is stopped"));
+      return Effect.fail(this.stdoutFailure ?? new Error("Pi Runtime is stopped"));
     return Effect.callback<void, Error>((resume) => {
       this.child.stdin.write(`${JSON.stringify(message)}\n`, (error) =>
         resume(error ? Effect.fail(this.stdoutFailure ?? error) : Effect.void),
@@ -422,6 +448,12 @@ class GlobalPiRpcSession implements PiRpcSessionEffect {
     this.currentTurn = undefined;
     Deferred.doneUnsafe(this.failure, Effect.fail(error));
   }
+}
+
+export function parsePiModel(model: string): { provider: string; modelId: string } {
+  if (!PI_MODEL_PATTERN.test(model)) throw new Error("Pi Runtime model must be provider/model");
+  const slash = model.indexOf("/");
+  return { provider: model.slice(0, slash), modelId: model.slice(slash + 1) };
 }
 
 function stopChildEffect(child: ChildProcessWithoutNullStreams): Effect.Effect<void> {

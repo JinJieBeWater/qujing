@@ -21,7 +21,7 @@ async function fixture() {
     configPath: join(root, "config.json"),
     stateRoot: join(root, "state"),
   });
-  await Effect.runPromise(config.initEffect({ owner: { id: "owner", name: "Owner" } }));
+  await Effect.runPromise(config.initEffect({ node: { id: "node", name: "Node" } }));
   await Effect.runPromise(
     config.addWorkspaceEffect({
       id: "docs",
@@ -31,25 +31,25 @@ async function fixture() {
     }),
   );
   const first = await Effect.runPromise(
-    config.addClientEffect({
+    config.addAgentEffect({
       id: "first",
       tailcatKey: "first-key",
     }),
   );
   const second = await Effect.runPromise(
-    config.addClientEffect({
+    config.addAgentEffect({
       id: "second",
       tailcatKey: "second-key",
     }),
   );
-  const calls: Array<{ client: string; workspace: string; question: string }> = [];
+  const calls: Array<{ peer: string; workspace: string; question: string }> = [];
   const signals: AbortSignal[] = [];
   const app = createQujing({
     config,
     coordinator: {
-      answerEffect: ({ client, workspaceId, question, signal }) =>
+      answerEffect: ({ peer, workspaceId, question, signal }) =>
         Effect.sync(() => {
-          calls.push({ client: client.id, workspace: workspaceId, question });
+          calls.push({ peer: peer.id, workspace: workspaceId, question });
           signals.push(signal);
           return `answer:${question}`;
         }),
@@ -65,11 +65,11 @@ async function fixture() {
 }
 
 describe("Qujing core", () => {
-  test("lists only public owner and workspace metadata for active clients", async () => {
+  test("lists only public node and workspace metadata for active peers", async () => {
     const { app, first } = await fixture();
 
     expect(await Effect.runPromise(app.listWorkspacesEffect(first))).toEqual({
-      owner: { id: "owner", name: "Owner" },
+      node: { id: "node", name: "Node" },
       workspaces: [{ id: "docs", name: "Docs", summary: "Product docs", available: true }],
     });
     await expect(
@@ -77,36 +77,36 @@ describe("Qujing core", () => {
     ).rejects.toMatchObject({ code: "UNAUTHORIZED" });
   });
 
-  test("passes authenticated Client and selected Workspace to runtime coordination", async () => {
+  test("passes authenticated Agent and selected Workspace to runtime coordination", async () => {
     const { app, calls, signals, first, second } = await fixture();
     const firstSignal = new AbortController().signal;
 
     await Effect.runPromise(
-      app.askEffect({ client: first, workspace: "docs", question: "one" }, firstSignal),
+      app.askEffect({ peer: first, workspace: "docs", question: "one" }, firstSignal),
     );
     await Effect.runPromise(
       app.askEffect(
-        { client: first, workspace: "docs", question: "two" },
+        { peer: first, workspace: "docs", question: "two" },
         new AbortController().signal,
       ),
     );
     await Effect.runPromise(
       app.askEffect(
-        { client: second, workspace: "docs", question: "three" },
+        { peer: second, workspace: "docs", question: "three" },
         new AbortController().signal,
       ),
     );
 
     expect(calls).toEqual([
-      { client: "first", workspace: "docs", question: "one" },
-      { client: "first", workspace: "docs", question: "two" },
-      { client: "second", workspace: "docs", question: "three" },
+      { peer: "first", workspace: "docs", question: "one" },
+      { peer: "first", workspace: "docs", question: "two" },
+      { peer: "second", workspace: "docs", question: "three" },
     ]);
     expect(signals[0]).toBe(firstSignal);
     expect(signals).toHaveLength(3);
   });
 
-  test("linearizes Client authorization with the Workspace metadata snapshot", async () => {
+  test("linearizes Agent authorization with the Workspace metadata snapshot", async () => {
     let releaseSnapshot!: () => void;
     let snapshotReached!: () => void;
     let revokeLockAttempted!: () => void;
@@ -151,7 +151,7 @@ describe("Qujing core", () => {
       configPath: join(root, "config.json"),
       stateRoot: join(root, "state"),
     });
-    await Effect.runPromise(config.initEffect({ owner: { id: "owner", name: "Owner" } }));
+    await Effect.runPromise(config.initEffect({ node: { id: "node", name: "Node" } }));
     await Effect.runPromise(
       config.addWorkspaceEffect({
         id: "docs",
@@ -161,20 +161,20 @@ describe("Qujing core", () => {
       }),
     );
     const { bearer } = await Effect.runPromise(
-      config.addClientEffect({ id: "client", tailcatKey: "nodekey:test" }),
+      config.addAgentEffect({ id: "agent", tailcatKey: "nodekey:test" }),
     );
-    const client = (await Effect.runPromise(config.authenticateEffect(bearer)))!;
+    const agent = (await Effect.runPromise(config.authenticateEffect(bearer)))!;
     const app = createQujing({
       config,
       coordinator: { answerEffect: () => Effect.succeed("unused") },
     });
 
     config.pause = true;
-    const listing = Effect.runPromise(app.listWorkspacesEffect(client));
+    const listing = Effect.runPromise(app.listWorkspacesEffect(agent));
     await reached;
     config.onLockAttempt = revokeLockAttempted;
     let revoked = false;
-    const revoking = Effect.runPromise(config.revokeClientEffect("client")).then((result) => {
+    const revoking = Effect.runPromise(config.revokeAgentEffect("agent")).then((result) => {
       revoked = true;
       return result;
     });

@@ -11,7 +11,7 @@ afterEach(async () =>
   Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true }))),
 );
 
-describe("Gateway private-state boundary", () => {
+describe("Node private-state boundary", () => {
   test("fails closed before Runtime startup when private state is permissive", async () => {
     if (process.platform === "win32") return;
     const root = await mkdtemp(join(tmpdir(), "qujing-server-security-"));
@@ -22,7 +22,7 @@ describe("Gateway private-state boundary", () => {
     };
     await mkdir(join(root, "workspace"));
     await Effect.runPromise(
-      new ConfigStore(paths).initEffect({ owner: { id: "owner", name: "Owner" } }),
+      new ConfigStore(paths).initEffect({ node: { id: "node", name: "Node" } }),
     );
     await chmod(paths.configPath, 0o644);
 
@@ -33,6 +33,6 @@ describe("Gateway private-state boundary", () => {
       ),
     ).rejects.toThrow("Private state permissions");
     await Effect.runPromise(Scope.close(scope, Exit.void));
-    expect(await Bun.file(join(paths.stateRoot, "gateway.lock")).exists()).toBe(false);
+    expect(await Bun.file(join(paths.stateRoot, "node.lock")).exists()).toBe(false);
   });
 });

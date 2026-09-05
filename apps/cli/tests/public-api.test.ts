@@ -5,9 +5,9 @@ describe("public API", () => {
   test("exposes stable external error codes", () => {
     expect(errorCodes).toEqual([
       "UNAUTHORIZED",
-      "LINE_NOT_FOUND",
-      "LINE_UNAVAILABLE",
-      "OWNER_ID_MISMATCH",
+      "PEER_NOT_FOUND",
+      "PEER_UNAVAILABLE",
+      "NODE_ID_MISMATCH",
       "CANCELLED",
       "WORKSPACE_NOT_FOUND",
       "WORKSPACE_UNAVAILABLE",

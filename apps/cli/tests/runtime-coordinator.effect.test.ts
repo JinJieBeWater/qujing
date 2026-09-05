@@ -4,7 +4,7 @@ import { mkdir, mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { ConfigStore } from "../src/config";
-import type { RuntimeAgentSession } from "../src/runtime/session";
+import type { RuntimeNodeSession } from "../src/runtime/session";
 import { RuntimeCoordinator } from "../src/runtime/coordinator";
 import { RuntimeSessionStore } from "../src/runtime/sessions";
 import { makeRuntimePool } from "./helpers/runtime-pool";
@@ -22,28 +22,28 @@ it.live("runs RuntimeCoordinator Effect API", () =>
     yield* Effect.ensuring(
       Effect.gen(function* () {
         yield* node(() => mkdir(workspace));
-        yield* config.initEffect({ owner: { id: "owner", name: "Owner" } });
+        yield* config.initEffect({ node: { id: "node", name: "Node" } });
         yield* config.addWorkspaceEffect({
           id: "docs",
           name: "Docs",
           summary: "Docs",
           root: workspace,
         });
-        const { bearer } = yield* config.addClientEffect({
-          id: "client",
+        const { bearer } = yield* config.addAgentEffect({
+          id: "agent",
           tailcatKey: "nodekey:test",
         });
-        const client = yield* config.authenticateEffect(bearer);
+        const agent = yield* config.authenticateEffect(bearer);
         const coordinator = yield* RuntimeCoordinator.createEffect({
           config,
           sessions,
           runtime,
           desired: yield* config.readEffectiveEffect(),
         });
-        expect(client).toBeDefined();
+        expect(agent).toBeDefined();
         expect(
           yield* coordinator.answerEffect({
-            client: client!,
+            peer: agent!,
             workspaceId: "docs",
             question: "hello",
             signal: new AbortController().signal,
@@ -78,10 +78,10 @@ it.live("disposes RuntimePool when coordinator acquisition fails", () =>
         runtime,
         desired: {
           version: 1,
-          owner: { id: "owner", name: "Owner" },
+          node: { id: "node", name: "Node" },
           server: { host: "127.0.0.1", port: 43110 },
           workspaces: [],
-          clients: [],
+          peers: [],
         },
       }),
     );
@@ -95,7 +95,7 @@ function node<A>(try_: () => Promise<A>) {
   return Effect.tryPromise({ try: try_, catch: (error) => error });
 }
 
-function fakeSession(): RuntimeAgentSession {
+function fakeSession(): RuntimeNodeSession {
   return {
     promptEffect: () => Effect.void,
     isAlive: () => true,

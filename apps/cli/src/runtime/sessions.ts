@@ -22,21 +22,21 @@ export class RuntimeSessionStore {
     this.directory = join(stateRoot, "runtime-sessions");
   }
 
-  getOrCreateEffect(clientId: string, workspaceId: string) {
-    const key = runtimeBindingKey(clientId, workspaceId);
+  getOrCreateEffect(peerId: string, workspaceId: string) {
+    const key = runtimeBindingKey(peerId, workspaceId);
     return Effect.gen({ self: this }, function* () {
       const decision = yield* this.gate.withPermit(
         Effect.sync(() => {
           const active = this.pending.get(key);
-          if (active) return { deferred: active, owner: false } as const;
+          if (active) return { deferred: active, isCreator: false } as const;
           const deferred = Deferred.makeUnsafe<RuntimeSession, unknown>();
           this.pending.set(key, deferred);
-          return { deferred, owner: true } as const;
+          return { deferred, isCreator: true } as const;
         }),
       );
-      if (!decision.owner) return yield* Deferred.await(decision.deferred);
+      if (!decision.isCreator) return yield* Deferred.await(decision.deferred);
       return yield* Effect.uninterruptible(
-        this.loadOrCreateEffect(key, clientId, workspaceId).pipe(
+        this.loadOrCreateEffect(key, peerId, workspaceId).pipe(
           Effect.exit,
           Effect.tap((exit) => Deferred.done(decision.deferred, exit)),
           Effect.ensuring(
@@ -54,7 +54,7 @@ export class RuntimeSessionStore {
 
   touchEffect(session: RuntimeSession) {
     return Effect.gen({ self: this }, function* () {
-      const path = this.path(runtimeBindingKey(session.clientId, session.workspaceId));
+      const path = this.path(runtimeBindingKey(session.peerId, session.workspaceId));
       const current = yield* this.readSessionEffect(path);
       if (current.id !== session.id)
         throw new Error("Runtime Session binding changed before touch");
@@ -68,7 +68,7 @@ export class RuntimeSessionStore {
 
   removeEffect(session: RuntimeSession) {
     return this.operation(() =>
-      rm(this.path(runtimeBindingKey(session.clientId, session.workspaceId)), { force: true }),
+      rm(this.path(runtimeBindingKey(session.peerId, session.workspaceId)), { force: true }),
     );
   }
 
@@ -92,7 +92,7 @@ export class RuntimeSessionStore {
     });
   }
 
-  private loadOrCreateEffect(key: string, clientId: string, workspaceId: string) {
+  private loadOrCreateEffect(key: string, peerId: string, workspaceId: string) {
     return Effect.gen({ self: this }, function* () {
       const path = this.path(key);
       const existing = yield* this.readSessionEffect(path).pipe(
@@ -109,7 +109,7 @@ export class RuntimeSessionStore {
       const session = yield* Effect.sync(() =>
         parseRuntimeSession({
           id: randomUUID(),
-          clientId,
+          peerId,
           workspaceId,
           createdAt: now,
           updatedAt: now,
@@ -143,6 +143,6 @@ export class RuntimeSessionStore {
   }
 }
 
-function runtimeBindingKey(clientId: string, workspaceId: string): string {
-  return createHash("sha256").update(clientId).update("\0").update(workspaceId).digest("hex");
+function runtimeBindingKey(peerId: string, workspaceId: string): string {
+  return createHash("sha256").update(peerId).update("\0").update(workspaceId).digest("hex");
 }

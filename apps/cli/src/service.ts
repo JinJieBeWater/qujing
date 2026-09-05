@@ -6,7 +6,7 @@ import * as ChildProcess from "effect/unstable/process/ChildProcess";
 import { PlatformLayer } from "./effect-runtime";
 
 const ServiceLayer = Layer.provideMerge(BunChildProcessSpawner.layer, PlatformLayer);
-export type ServiceRole = "gateway" | "client";
+export type ServiceRole = "node" | "agent";
 export interface ServiceDefinition {
   path: string;
   content: string;
@@ -42,7 +42,7 @@ export function serviceDefinition(
         `qujing-${role}.service`,
       ),
       content: `[Unit]
-Description=Qujing ${role === "gateway" ? "Owner Gateway" : "Agent Client"}
+Description=Qujing ${role === "node" ? "Node" : "Agent"}
 After=network-online.target
 
 [Service]

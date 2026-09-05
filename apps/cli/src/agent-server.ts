@@ -1,18 +1,18 @@
 import { stat } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { Duration, Effect, Fiber, Ref, Scope } from "effect";
-import { ClientApplication, type LineRuntimeClient } from "./client-application";
+import { AgentApplication, type PeerRuntimeAgent } from "./agent-application";
 import {
-  ClientConfigStore,
-  type ClientConfig,
-  type LineConfig,
-  LOCAL_CLIENT_ID,
-} from "./client-config";
-import { processClientLineRetirementEffect } from "./client-control";
-import { createClientMcp } from "./client-mcp";
+  AgentConfigStore,
+  type AgentConfig,
+  type PeerConfig,
+  LOCAL_AGENT_ID,
+} from "./agent-config";
+import { processPeerRetirementEffect } from "./agent-control";
+import { createAgentMcp } from "./agent-mcp";
 import { pollEvery } from "./effect-runtime";
-import { acknowledgeClientReloadEffect, configFingerprint } from "./gateway-reload";
-import { LineRuntime } from "./line-runtime";
+import { acknowledgeAgentReloadEffect, configFingerprint } from "./reload";
+import { PeerRuntime } from "./peer-runtime";
 import {
   assertPrivatePathEffect,
   assertPrivateTreeEffect,
@@ -22,58 +22,60 @@ import { acquireProcessLockEffect } from "./process-lock";
 import { createScopedFatalHandler } from "./server";
 import { startConnectorEffect } from "./transport/process";
 
-export interface ClientServerOptions {
+export interface AgentServerOptions {
   configPath: string;
   stateRoot: string;
   fatal?: (error: Error) => void;
   fatalShutdownTimeoutMs?: number;
   port?: number;
   transportBinary?: string;
-  createRuntime?: (line: LineConfig) => LineRuntimeClient;
+  createRuntime?: (peer: PeerConfig) => PeerRuntimeAgent;
 }
 
-interface StartedClientServer {
+interface StartedAgentServer {
   url: string;
   server: ReturnType<typeof Bun.serve>;
 }
 
-/** Root Client program. Acquisition order makes close: poll, Bun, MCP, app, lock. */
-export function startClientServerEffect(options: ClientServerOptions, scope: Scope.Scope) {
+/** Root Agent program. Acquisition order makes close: poll, Bun, MCP, app, lock. */
+export function startAgentServerEffect(options: AgentServerOptions, scope: Scope.Scope) {
   return Effect.gen(function* () {
     yield* assertPrivatePathEffect(dirname(options.configPath), true);
     yield* assertPrivatePathEffect(options.configPath, false);
-    const stateExists = yield* promise(() =>
-      stat(options.stateRoot).then(
-        () => true,
-        (error) => {
-          if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
-          throw error;
-        },
-      ),
-    );
+    const stateExists = yield* Effect.tryPromise({
+      try: () =>
+        stat(options.stateRoot).then(
+          () => true,
+          (error) => {
+            if ((error as NodeJS.ErrnoException).code === "ENOENT") return false;
+            throw error;
+          },
+        ),
+      catch: (error) => error,
+    });
     if (stateExists) yield* assertPrivateTreeEffect(options.stateRoot);
     else yield* ensurePrivateDirectoryEffect(options.stateRoot);
     yield* Effect.acquireRelease(
       acquireProcessLockEffect(
-        join(options.stateRoot, "client.lock"),
-        "Qujing Client is already running",
+        join(options.stateRoot, "agent.lock"),
+        "Qujing Agent is already running",
       ),
       (release) => release.pipe(Effect.orDie),
     );
 
-    const config = new ClientConfigStore({ configPath: options.configPath });
+    const config = new AgentConfigStore({ configPath: options.configPath });
     const initial = yield* config.readEffect();
-    const current = yield* Ref.make<ClientConfig>(initial);
+    const current = yield* Ref.make<AgentConfig>(initial);
     const app = yield* Effect.acquireRelease(
       Effect.sync(
         () =>
-          new ClientApplication({
+          new AgentApplication({
             config,
             createRuntime:
               options.createRuntime ??
-              ((line) =>
-                new LineRuntime({
-                  line,
+              ((peer) =>
+                new PeerRuntime({
+                  peer,
                   startConnectorEffect: (connector, signal) =>
                     startConnectorEffect(connector, options.transportBinary, signal),
                 })),
@@ -81,7 +83,7 @@ export function startClientServerEffect(options: ClientServerOptions, scope: Sco
       ),
       (resource) => resource.closeEffect().pipe(Effect.orDie),
     );
-    yield* processClientLineRetirementEffect(options.stateRoot, initial, app);
+    yield* processPeerRetirementEffect(options.stateRoot, initial, app);
 
     const fatal = createScopedFatalHandler(
       scope,
@@ -91,7 +93,7 @@ export function startClientServerEffect(options: ClientServerOptions, scope: Sco
     const effective = initial;
     const mcp = yield* Effect.acquireRelease(
       Effect.sync(() =>
-        createClientMcp({
+        createAgentMcp({
           app,
           config,
           allowedHosts: [effective.server.host, "localhost"],
@@ -113,37 +115,37 @@ export function startClientServerEffect(options: ClientServerOptions, scope: Sco
       (resource) => Effect.sync(() => resource.stop(true)),
     );
 
-    yield* acknowledgeClientReloadEffect(options.stateRoot, effective);
+    yield* acknowledgeAgentReloadEffect(options.stateRoot, effective);
     yield* startReloadFiber(config, current, app, mcp, options.stateRoot, fatal);
 
     return {
       url: `http://${server.hostname}:${server.port}`,
       server,
-    } satisfies StartedClientServer;
+    } satisfies StartedAgentServer;
   });
 }
 
 function startReloadFiber(
-  config: ClientConfigStore,
-  current: Ref.Ref<ClientConfig>,
-  app: ClientApplication,
-  mcp: ReturnType<typeof createClientMcp>,
+  config: AgentConfigStore,
+  current: Ref.Ref<AgentConfig>,
+  app: AgentApplication,
+  mcp: ReturnType<typeof createAgentMcp>,
   stateRoot: string,
   fatal: (error: Error) => void,
 ) {
   const reload = Effect.gen(function* () {
     const previous = yield* Ref.get(current);
     const next = yield* config.readEffect();
-    yield* processClientLineRetirementEffect(stateRoot, next, app);
+    yield* processPeerRetirementEffect(stateRoot, next, app);
     if (configFingerprint(next) === configFingerprint(previous)) return;
     const reconciled = yield* app.reconcileEffect();
     if (reconciled.localBearerHash !== previous.localBearerHash)
-      yield* mcp.closeClientEffect(LOCAL_CLIENT_ID);
+      yield* mcp.closeCredentialEffect(LOCAL_AGENT_ID);
     yield* Ref.set(current, reconciled);
-    yield* acknowledgeClientReloadEffect(stateRoot, reconciled);
+    yield* acknowledgeAgentReloadEffect(stateRoot, reconciled);
   }).pipe(
     Effect.catchEager((error) =>
-      Effect.sync(() => fatal(error instanceof Error ? error : new Error("Client reload failed"))),
+      Effect.sync(() => fatal(error instanceof Error ? error : new Error("Agent reload failed"))),
     ),
   );
   return Effect.acquireRelease(
@@ -154,8 +156,4 @@ function startReloadFiber(
     ),
     (fiber) => Fiber.interrupt(fiber),
   );
-}
-
-function promise<A>(try_: () => Promise<A>) {
-  return Effect.tryPromise({ try: try_, catch: (error) => error });
 }

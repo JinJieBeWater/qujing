@@ -138,10 +138,10 @@ describe("private state", () => {
       Bun.spawn([process.execPath, worker, path, log], { stdout: "ignore", stderr: "inherit" }),
     );
     expect(await Promise.all(children.map((child) => child.exited))).toEqual([0, 0, 0, 0, 0]);
-    const lines = (await Bun.file(log).text()).trim().split("\n");
-    expect(lines).toHaveLength(10);
-    for (let index = 0; index < lines.length; index += 2) {
-      expect(lines[index]!.replace("start", "end")).toBe(lines[index + 1]!);
+    const peers = (await Bun.file(log).text()).trim().split("\n");
+    expect(peers).toHaveLength(10);
+    for (let index = 0; index < peers.length; index += 2) {
+      expect(peers[index]!.replace("start", "end")).toBe(peers[index + 1]!);
     }
   });
 });

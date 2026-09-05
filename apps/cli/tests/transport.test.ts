@@ -44,7 +44,7 @@ describe("Tailcat transport command boundary", () => {
       connectorArgs({
         serverAddress: "tc-token",
         remotePort: 43_110,
-        keyPath: "/state/client.key",
+        keyPath: "/state/agent.key",
         localHost: "127.0.0.1",
         localPort: 0,
       }),
@@ -55,7 +55,7 @@ describe("Tailcat transport command boundary", () => {
       "--port",
       "43110",
       "--key",
-      "/state/client.key",
+      "/state/agent.key",
       "--listen",
       "127.0.0.1:0",
     ]);

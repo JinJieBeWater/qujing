@@ -2,8 +2,8 @@
 - Effect lifecycle or resource ownership changes: also read `docs/effect-migration.md`; keep business flow Effect-native and Promise only at external adapters.
 - Setup, pairing, service, upgrade, or recovery work: use `skills/qujing-setup/SKILL.md`; load linked references only for matching branch.
 - Treat schemas, implementation, `qj --help`, and package scripts as operational truth. README and skills explain workflows; update them when public behavior changes.
-- Preserve exact Agent-facing tools `list_lines` and `ask`; preserve explicit Line and Workspace selection, per-Line isolation, and no accepted-request retry.
-- Preserve Owner global Pi defaults and session archive. Qujing prompt requests read-only consultation but is not a security boundary.
+- Preserve exact Agent-facing tools `list_peers` and `ask`; preserve explicit Peer and Workspace selection, per-Peer isolation, and no accepted-request retry.
+- Preserve Node global Pi defaults and session archive. Qujing prompt requests read-only consultation but is not a security boundary.
 - Release/install changes must stay aligned across `scripts/build-release.ts`, installers, release workflow, README files, and external `JinJieBeWater/homebrew-tap` Formula.
-- Public examples use Owner ID `jinjiebewater` and name `JinJieBeWater`.
+- Public examples use Node ID `jinjiebewater` and name `JinJieBeWater`.
 - Run focused checks while editing. Before release, run `bun run verify`, `bun run test:transport:e2e`, and `bun run build:release all`.

@@ -1,12 +1,12 @@
 import { describe, expect, test } from "bun:test";
 import { Effect } from "effect";
-import type { RuntimeAgentSession } from "../src/runtime/session";
+import type { RuntimeNodeSession } from "../src/runtime/session";
 import { makeRuntimePool } from "./helpers/runtime-pool";
 
 const workspace = { id: "docs", name: "Docs", summary: "Docs", root: "/tmp/docs" };
 const runtimeSession = {
   id: "00000000-0000-4000-8000-000000000001",
-  clientId: "client",
+  peerId: "agent",
   workspaceId: "docs",
   createdAt: "2026-01-01T00:00:00.000Z",
   updatedAt: "2026-01-01T00:00:00.000Z",
@@ -23,7 +23,7 @@ describe("RuntimePool", () => {
     let active = 0;
     let maximum = 0;
     let answer = "";
-    const session: RuntimeAgentSession = {
+    const session: RuntimeNodeSession = {
       promptEffect: (question) =>
         Effect.promise(async () => {
           active++;
@@ -51,7 +51,7 @@ describe("RuntimePool", () => {
     await Effect.runPromise(runtime.disposeEffect());
   });
 
-  test("clears queues and aborts Pi when caller cancels", async () => {
+  test("clears queues and aborts Runtime when caller cancels", async () => {
     const controller = new AbortController();
     let clearCount = 0;
     let abortCount = 0;
@@ -110,7 +110,7 @@ describe("RuntimePool", () => {
     await expect(pending).rejects.toMatchObject({ name: "AbortError" });
   });
 
-  test("fails fatally when Pi does not become idle after abort", async () => {
+  test("fails fatally when Runtime does not become idle after abort", async () => {
     const controller = new AbortController();
     let fatal: Error | undefined;
     const session = fakeSession();
@@ -179,7 +179,7 @@ describe("RuntimePool", () => {
     await Effect.runPromise(runtime.disposeEffect());
   });
 
-  test("rebinds a queued ask after the cached Pi process dies", async () => {
+  test("rebinds a queued ask after the cached Runtime process dies", async () => {
     let attempts = 0;
     let alive = true;
     let failFirst!: () => void;
@@ -197,7 +197,7 @@ describe("RuntimePool", () => {
           firstStarted();
           await failureGate;
           alive = false;
-          throw new Error("Pi exited");
+          throw new Error("Runtime exited");
         },
         catch: (error) => error as Error,
       });
@@ -319,7 +319,7 @@ describe("RuntimePool", () => {
     expect(disposals).toBe(1);
   });
 
-  test("disposes active sessions by Client or Workspace", async () => {
+  test("disposes active sessions by Agent or Workspace", async () => {
     let aborts = 0;
     let disposals = 0;
     const session = fakeSession();
@@ -334,7 +334,7 @@ describe("RuntimePool", () => {
     const runtime = makeRuntimePool({ createSessionEffect: () => Effect.succeed(session) });
     await Effect.runPromise(runtime.answerEffect(input("hello")));
 
-    await Effect.runPromise(runtime.disposeClientEffect("client"));
+    await Effect.runPromise(runtime.disposePeerEffect("agent"));
     expect(aborts).toBe(0);
     expect(disposals).toBe(1);
     await Effect.runPromise(runtime.answerEffect(input("again")));
@@ -360,7 +360,7 @@ describe("RuntimePool", () => {
     const secondSession = {
       ...runtimeSession,
       id: "00000000-0000-4000-8000-000000000002",
-      clientId: "other",
+      peerId: "other",
     };
     const first = Effect.runPromise(runtime.answerEffect(input("one")));
     const second = Effect.runPromise(
@@ -407,12 +407,12 @@ describe("RuntimePool", () => {
     const replacementSession = {
       ...runtimeSession,
       id: "00000000-0000-4000-8000-000000000002",
-      clientId: "replacement",
+      peerId: "replacement",
     };
     const blockedSession = {
       ...runtimeSession,
       id: "00000000-0000-4000-8000-000000000003",
-      clientId: "blocked",
+      peerId: "blocked",
     };
 
     const replacement = Effect.runPromise(
@@ -464,7 +464,7 @@ describe("RuntimePool", () => {
   });
 });
 
-function fakeSession(): RuntimeAgentSession {
+function fakeSession(): RuntimeNodeSession {
   return {
     promptEffect: () => Effect.void,
     isAlive: () => true,

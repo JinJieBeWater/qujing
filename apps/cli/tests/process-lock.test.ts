@@ -4,7 +4,7 @@ import { mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  acquireGatewayLockEffect,
+  acquireNodeLockEffect,
   acquireMaintenanceLockEffect,
   acquireProcessLockEffect,
   processLockActiveEffect,
@@ -16,10 +16,10 @@ afterEach(async () =>
 );
 
 describe("process lock", () => {
-  test("excludes another Gateway until released", async () => {
+  test("excludes another Node until released", async () => {
     const root = await mkdtemp(join(tmpdir(), "qujing-lock-"));
     roots.push(root);
-    const path = join(root, "gateway.lock");
+    const path = join(root, "node.lock");
     const release = await Effect.runPromise(acquireProcessLockEffect(path));
     await expect(Effect.runPromise(acquireProcessLockEffect(path))).rejects.toThrow(
       "already running",
@@ -32,7 +32,7 @@ describe("process lock", () => {
   test("recovers a lock owned by a dead process", async () => {
     const root = await mkdtemp(join(tmpdir(), "qujing-lock-"));
     roots.push(root);
-    const path = join(root, "gateway.lock");
+    const path = join(root, "node.lock");
     await writeFile(path, JSON.stringify({ pid: 999_999_999, nonce: "dead" }));
     const release = await Effect.runPromise(acquireProcessLockEffect(path));
     await Effect.runPromise(release);
@@ -41,7 +41,7 @@ describe("process lock", () => {
   test("recovers an interrupted stale-lock quarantine on the first restart", async () => {
     const root = await mkdtemp(join(tmpdir(), "qujing-lock-"));
     roots.push(root);
-    const path = join(root, "gateway.lock");
+    const path = join(root, "node.lock");
     await writeFile(`${path}.recovering`, JSON.stringify({ pid: 999_999_999, nonce: "dead" }));
     const old = new Date(Date.now() - 120_000);
     await utimes(`${path}.recovering`, old, old);
@@ -50,10 +50,10 @@ describe("process lock", () => {
     await Effect.runPromise(release);
   });
 
-  test("does not delete a fresh lock whose owner write is incomplete", async () => {
+  test("does not delete a fresh lock whose node write is incomplete", async () => {
     const root = await mkdtemp(join(tmpdir(), "qujing-lock-"));
     roots.push(root);
-    const path = join(root, "gateway.lock");
+    const path = join(root, "node.lock");
     await writeFile(path, "");
     const pending = Effect.runPromise(acquireProcessLockEffect(path));
     await Bun.sleep(25);
@@ -62,33 +62,31 @@ describe("process lock", () => {
     await expect(pending).rejects.toThrow("already running");
   });
 
-  test("active check waits for a fresh owner write", async () => {
+  test("active check waits for a fresh node write", async () => {
     const root = await mkdtemp(join(tmpdir(), "qujing-lock-"));
     roots.push(root);
-    const path = join(root, "gateway.lock");
+    const path = join(root, "node.lock");
     await writeFile(path, "");
     const pending = Effect.runPromise(processLockActiveEffect(path));
     await Bun.sleep(25);
     await writeFile(path, JSON.stringify({ pid: process.pid, nonce: "live" }));
     expect(await pending).toBe(true);
   });
-  test("keeps Gateway and offline maintenance mutually exclusive", async () => {
+  test("keeps Node and offline maintenance mutually exclusive", async () => {
     const root = await mkdtemp(join(tmpdir(), "qujing-lock-"));
     roots.push(root);
 
     const releaseMaintenance = await Effect.runPromise(acquireMaintenanceLockEffect(root));
-    await expect(Effect.runPromise(acquireGatewayLockEffect(root))).rejects.toThrow(
+    await expect(Effect.runPromise(acquireNodeLockEffect(root))).rejects.toThrow(
       "maintenance is in progress",
     );
-    expect(await Effect.runPromise(processLockActiveEffect(join(root, "gateway.lock")))).toBe(
-      false,
-    );
+    expect(await Effect.runPromise(processLockActiveEffect(join(root, "node.lock")))).toBe(false);
     await Effect.runPromise(releaseMaintenance);
 
-    const releaseGateway = await Effect.runPromise(acquireGatewayLockEffect(root));
+    const releaseNode = await Effect.runPromise(acquireNodeLockEffect(root));
     await expect(Effect.runPromise(acquireMaintenanceLockEffect(root))).rejects.toThrow(
-      "Gateway is already running",
+      "Node is already running",
     );
-    await Effect.runPromise(releaseGateway);
+    await Effect.runPromise(releaseNode);
   });
 });

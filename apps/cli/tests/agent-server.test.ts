@@ -1,14 +1,14 @@
-import { afterEach, expect, test } from "bun:test";
-import { Context, Effect, Exit, Scope } from "effect";
 import { Client } from "@modelcontextprotocol/sdk/client/index.js";
 import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { afterEach, expect, test } from "bun:test";
+import { Context, Effect, Exit, Scope } from "effect";
 import { chmod, mkdir, mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { LineRuntimeClient } from "../src/client-application";
-import { ClientConfigStore } from "../src/client-config";
+import type { PeerRuntimeAgent } from "../src/agent-application";
+import { AgentConfigStore } from "../src/agent-config";
 import { runCliEffect } from "../src/cli";
-import { startClientServerEffect } from "../src/client-server";
+import { startAgentServerEffect } from "../src/agent-server";
 
 const roots: string[] = [];
 const running: Array<Awaited<ReturnType<typeof start>>> = [];
@@ -17,10 +17,10 @@ afterEach(async () => {
   await Promise.all(roots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
-async function start(options: Parameters<typeof startClientServerEffect>[0]) {
+async function start(options: Parameters<typeof startAgentServerEffect>[0]) {
   const scope = await Effect.runPromise(Scope.make("sequential"));
   const started = await Effect.runPromise(
-    Effect.provide(startClientServerEffect(options, scope), Context.make(Scope.Scope, scope)),
+    Effect.provide(startAgentServerEffect(options, scope), Context.make(Scope.Scope, scope)),
   );
   return {
     ...started,
@@ -29,13 +29,13 @@ async function start(options: Parameters<typeof startClientServerEffect>[0]) {
 }
 
 async function fixture() {
-  const root = await mkdtemp(join(tmpdir(), "qujing-client-server-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-agent-server-"));
   roots.push(root);
-  const configPath = join(root, "config", "client.json");
+  const configPath = join(root, "config", "agent.json");
   const stateRoot = join(root, "state");
-  const store = new ClientConfigStore({ configPath });
+  const store = new AgentConfigStore({ configPath });
   const initialized = await Effect.runPromise(store.initEffect());
-  if (!initialized.initialized) throw new Error("Client did not initialize");
+  if (!initialized.initialized) throw new Error("Agent did not initialize");
   const server = await start({ configPath, stateRoot, port: 0 });
   running.push(server);
   return { store, server, configPath, stateRoot, bearer: initialized.bearer };
@@ -45,15 +45,15 @@ async function connect(url: string, bearer: string) {
   const transport = new StreamableHTTPClientTransport(new URL(`${url}/mcp`), {
     requestInit: { headers: { Authorization: `Bearer ${bearer}` } },
   });
-  const client = new Client({ name: "test", version: "1" });
-  await client.connect(transport as Parameters<Client["connect"]>[0]);
-  return client;
+  const agent = new Client({ name: "test", version: "1" });
+  await agent.connect(transport as Parameters<Client["connect"]>[0]);
+  return agent;
 }
 
 test("runs one local MCP endpoint and applies local token rotation", async () => {
   const { store, server, bearer } = await fixture();
   const first = await connect(server.url, bearer);
-  expect((await first.listTools()).tools.map(({ name }) => name)).toEqual(["list_lines", "ask"]);
+  expect((await first.listTools()).tools.map(({ name }) => name)).toEqual(["list_peers", "ask"]);
 
   const rotated = await Effect.runPromise(store.rotateLocalBearerEffect());
   await Bun.sleep(350);
@@ -61,13 +61,13 @@ test("runs one local MCP endpoint and applies local token rotation", async () =>
   await first.close().catch(() => {});
 
   const second = await connect(server.url, rotated.bearer);
-  expect((await second.listTools()).tools.map(({ name }) => name)).toEqual(["list_lines", "ask"]);
+  expect((await second.listTools()).tools.map(({ name }) => name)).toEqual(["list_peers", "ask"]);
   await second.close();
 });
 
 test("does not rewrite reload acknowledgement while config is unchanged", async () => {
   const { stateRoot } = await fixture();
-  const path = join(stateRoot, "client-reload.json");
+  const path = join(stateRoot, "agent-reload.json");
   const initial = await stat(path);
 
   await Bun.sleep(550);
@@ -75,16 +75,16 @@ test("does not rewrite reload acknowledgement while config is unchanged", async 
   expect((await stat(path)).mtimeMs).toBe(initial.mtimeMs);
 });
 
-test("releases Client resources when root Scope closes", async () => {
-  const root = await mkdtemp(join(tmpdir(), "qujing-client-server-scope-"));
+test("releases Agent resources when root Scope closes", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qujing-agent-server-scope-"));
   roots.push(root);
-  const configPath = join(root, "config", "client.json");
+  const configPath = join(root, "config", "agent.json");
   const stateRoot = join(root, "state");
-  await Effect.runPromise(new ClientConfigStore({ configPath }).initEffect());
+  await Effect.runPromise(new AgentConfigStore({ configPath }).initEffect());
   const scope = await Effect.runPromise(Scope.make("sequential"));
   await Effect.runPromise(
     Effect.provide(
-      startClientServerEffect({ configPath, stateRoot, port: 0 }, scope),
+      startAgentServerEffect({ configPath, stateRoot, port: 0 }, scope),
       Context.make(Scope.Scope, scope),
     ),
   );
@@ -97,7 +97,7 @@ test("releases Client resources when root Scope closes", async () => {
   });
 });
 
-test("holds one Client process lock and releases it on close", async () => {
+test("holds one Agent process lock and releases it on close", async () => {
   const { server, configPath, stateRoot } = await fixture();
   await expect(start({ configPath, stateRoot, port: 0 })).rejects.toThrow("already running");
   await server.close();
@@ -110,40 +110,40 @@ test("holds one Client process lock and releases it on close", async () => {
   });
 });
 
-test("rejects unsafe Client state before acquiring process lock", async () => {
+test("rejects unsafe Agent state before acquiring process lock", async () => {
   if (process.platform === "win32") return;
-  const root = await mkdtemp(join(tmpdir(), "qujing-client-server-unsafe-"));
+  const root = await mkdtemp(join(tmpdir(), "qujing-agent-server-unsafe-"));
   roots.push(root);
-  const configPath = join(root, "config", "client.json");
+  const configPath = join(root, "config", "agent.json");
   const stateRoot = join(root, "state");
-  await Effect.runPromise(new ClientConfigStore({ configPath }).initEffect());
+  await Effect.runPromise(new AgentConfigStore({ configPath }).initEffect());
   await Bun.write(join(stateRoot, "entry"), "state");
   await chmod(stateRoot, 0o755);
 
   await expect(start({ configPath, stateRoot, port: 0 })).rejects.toThrow(
     "Private state permissions",
   );
-  expect(await Bun.file(join(stateRoot, "client.lock", "owner.json")).exists()).toBe(false);
+  expect(await Bun.file(join(stateRoot, "agent.lock", "owner.json")).exists()).toBe(false);
 });
 
-test("retires active Line before CLI credential update commits", async () => {
-  const root = await mkdtemp(join(tmpdir(), "qujing-client-rotation-"));
+test("retires active Peer before CLI credential update commits", async () => {
+  const root = await mkdtemp(join(tmpdir(), "qujing-agent-rotation-"));
   roots.push(root);
-  const configPath = join(root, "config", "client.json");
+  const configPath = join(root, "config", "agent.json");
   const stateRoot = join(root, "state");
   const oldKey = join(root, "keys", "old.json");
   const newKey = join(root, "keys", "new.json");
   await mkdir(join(root, "keys"), { recursive: true });
   await Promise.all([Bun.write(oldKey, "old-key"), Bun.write(newKey, "new-key")]);
   await Promise.all([chmod(oldKey, 0o600), chmod(newKey, 0o600)]);
-  const store = new ClientConfigStore({ configPath });
+  const store = new AgentConfigStore({ configPath });
   const initialized = await Effect.runPromise(store.initEffect());
-  if (!initialized.initialized) throw new Error("Client did not initialize");
+  if (!initialized.initialized) throw new Error("Agent did not initialize");
   await Effect.runPromise(
     store.addEffect({
-      id: "owner",
-      expectedOwnerId: "owner",
-      remoteClientId: "remote",
+      id: "node",
+      expectedNodeId: "node",
+      remoteAgentId: "remote",
       serverAddress: "private",
       remotePort: 1,
       keyPath: oldKey,
@@ -165,7 +165,7 @@ test("retires active Line before CLI credential update commits", async () => {
       ({
         listWorkspacesEffect: () =>
           Effect.succeed({
-            owner: { id: "owner", name: "Owner" },
+            node: { id: "node", name: "Node" },
             workspaces: [{ id: "docs", name: "Docs", summary: "Docs", available: true }],
           }),
         askEffect: (_workspace, _question, signal) =>
@@ -190,34 +190,34 @@ test("retires active Line before CLI credential update commits", async () => {
           Effect.sync(() => {
             closed = true;
           }),
-      }) satisfies LineRuntimeClient,
+      }) satisfies PeerRuntimeAgent,
   });
   running.push(server);
-  const client = await connect(server.url, initialized.bearer);
-  const pending = client.callTool({
+  const agent = await connect(server.url, initialized.bearer);
+  const pending = agent.callTool({
     name: "ask",
-    arguments: { line: "owner", workspace: "docs", question: "wait" },
+    arguments: { peer: "node", workspace: "docs", question: "wait" },
   });
   await active;
 
   const result = Effect.runPromise(
-    runCliEffect(["line", "update", "owner", "--key", newKey, "--bearer", "-", "--yes"], {
-      configPath: join(root, "unused-gateway.json"),
-      stateRoot: join(root, "unused-gateway-state"),
-      clientConfigPath: configPath,
-      clientStateRoot: stateRoot,
+    runCliEffect(["peer", "update", "node", "--key", newKey, "--bearer", "-", "--yes"], {
+      configPath: join(root, "unused-node.json"),
+      stateRoot: join(root, "unused-node-state"),
+      agentConfigPath: configPath,
+      agentStateRoot: stateRoot,
       writeOut: () => {},
       writeError: () => {},
       readStdinEffect: () => Effect.succeed("new-bearer"),
-      verifyLineEffect: () => Effect.void,
+      verifyPeerEffect: () => Effect.void,
       validateTailcatKeyEffect: () => Effect.void,
-      clientDoctorEffect: () => Effect.succeed({ ok: true, checks: [] }),
-      gatewayReloadTimeoutMs: 2_000,
+      agentDoctorEffect: () => Effect.succeed({ ok: true, checks: [] }),
+      nodeReloadTimeoutMs: 2_000,
     }),
   );
   for (
     let attempt = 0;
-    (await Effect.runPromise(store.getEffect("owner")))?.remoteBearer === "old-bearer";
+    (await Effect.runPromise(store.getEffect("node")))?.remoteBearer === "old-bearer";
     attempt++
   ) {
     if (attempt > 100) throw new Error("credential update did not commit");
@@ -226,5 +226,5 @@ test("retires active Line before CLI credential update commits", async () => {
   expect({ settled, closed }).toEqual({ settled: true, closed: true });
   expect(await result).toBe(0);
   expect(await pending).toMatchObject({ isError: true });
-  await client.close();
+  await agent.close();
 });

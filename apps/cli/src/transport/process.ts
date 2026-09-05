@@ -192,10 +192,10 @@ const startTransportEffect = (
 
 function readReadyEffect(stdout: Stream.Stream<Uint8Array, unknown>) {
   return Stream.runHead(stdout.pipe(Stream.decodeText(), Stream.splitLines)).pipe(
-    Effect.flatMap((line) =>
-      Option.isSome(line)
+    Effect.flatMap((peer) =>
+      Option.isSome(peer)
         ? Effect.try({
-            try: () => parseReadyMessage(JSON.parse(line.value)),
+            try: () => parseReadyMessage(JSON.parse(peer.value)),
             catch: (error) => error,
           })
         : Effect.fail(new Error("Tailcat transport produced no readiness message")),

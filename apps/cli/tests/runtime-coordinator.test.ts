@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { ConfigStore, type WorkspaceConfig } from "../src/config";
 import { QujingError } from "../src/errors";
 import { RuntimeCoordinator } from "../src/runtime/coordinator";
-import type { RuntimeAgentSession } from "../src/runtime/session";
+import type { RuntimeNodeSession } from "../src/runtime/session";
 import { RuntimeSessionStore, type RuntimeSession } from "../src/runtime/sessions";
 import { makeRuntimePool } from "./helpers/runtime-pool";
 
@@ -19,7 +19,7 @@ async function fixture(
   createSessionEffect: (
     workspace: WorkspaceConfig,
     session: RuntimeSession,
-  ) => Effect.Effect<RuntimeAgentSession, unknown> = () => Effect.succeed(fakeSession()),
+  ) => Effect.Effect<RuntimeNodeSession, unknown> = () => Effect.succeed(fakeSession()),
 ) {
   const root = await mkdtemp(join(tmpdir(), "qujing-coordinator-"));
   roots.push(root);
@@ -30,7 +30,7 @@ async function fixture(
     configPath: join(root, "config.json"),
     stateRoot,
   });
-  await Effect.runPromise(config.initEffect({ owner: { id: "owner", name: "Owner" } }));
+  await Effect.runPromise(config.initEffect({ node: { id: "node", name: "Node" } }));
   await Effect.runPromise(
     config.addWorkspaceEffect({
       id: "docs",
@@ -40,12 +40,12 @@ async function fixture(
     }),
   );
   const added = await Effect.runPromise(
-    config.addClientEffect({
-      id: "client",
+    config.addAgentEffect({
+      id: "agent",
       tailcatKey: "nodekey:first",
     }),
   );
-  const client = (await Effect.runPromise(config.authenticateEffect(added.bearer)))!;
+  const agent = (await Effect.runPromise(config.authenticateEffect(added.bearer)))!;
   const sessions = new RuntimeSessionStore(stateRoot);
   const runtime = makeRuntimePool({
     createSessionEffect: (workspace, session) => createSessionEffect(workspace, session),
@@ -67,18 +67,18 @@ async function fixture(
     runtime,
     coordinator,
     desired,
-    client,
+    agent,
   };
 }
 
 describe("RuntimeCoordinator", () => {
-  test("keeps one durable Pi session ID for a Client and Workspace", async () => {
-    const { coordinator, sessions, client } = await fixture();
+  test("keeps one durable Runtime Session ID for a Peer and Workspace", async () => {
+    const { coordinator, sessions, agent } = await fixture();
     const signal = new AbortController().signal;
 
     await Effect.runPromise(
       coordinator.answerEffect({
-        client,
+        peer: agent,
         workspaceId: "docs",
         question: "one",
         signal,
@@ -87,7 +87,7 @@ describe("RuntimeCoordinator", () => {
     const first = (await Effect.runPromise(sessions.listEffect()))[0]!;
     await Effect.runPromise(
       coordinator.answerEffect({
-        client,
+        peer: agent,
         workspaceId: "docs",
         question: "two",
         signal,
@@ -98,14 +98,14 @@ describe("RuntimeCoordinator", () => {
     await Effect.runPromise(coordinator.closeEffect());
   });
 
-  test("validates questions after Client admission and before Workspace admission", async () => {
-    const { coordinator, client } = await fixture();
+  test("validates questions after Agent admission and before Workspace admission", async () => {
+    const { coordinator, agent } = await fixture();
     const signal = new AbortController().signal;
 
     await expect(
       Effect.runPromise(
         coordinator.answerEffect({
-          client: { id: "revoked", credentialVersion: "revoked" },
+          peer: { id: "revoked", credentialVersion: "revoked" },
           workspaceId: "missing",
           question: "",
           signal,
@@ -115,7 +115,7 @@ describe("RuntimeCoordinator", () => {
     await expect(
       Effect.runPromise(
         coordinator.answerEffect({
-          client,
+          peer: agent,
           workspaceId: "missing",
           question: "   ",
           signal,
@@ -125,7 +125,7 @@ describe("RuntimeCoordinator", () => {
     await expect(
       Effect.runPromise(
         coordinator.answerEffect({
-          client,
+          peer: agent,
           workspaceId: "docs",
           question: "x".repeat(20_001),
           signal,
@@ -137,7 +137,7 @@ describe("RuntimeCoordinator", () => {
     await expect(
       Effect.runPromise(
         coordinator.answerEffect({
-          client,
+          peer: agent,
           workspaceId: "missing",
           question: "hello",
           signal,
@@ -147,7 +147,7 @@ describe("RuntimeCoordinator", () => {
     await Effect.runPromise(coordinator.closeEffect());
   });
 
-  test("aborts revocation and removes binding without deleting Pi archive", async () => {
+  test("aborts revocation and removes binding without deleting backend state", async () => {
     let rejectPrompt: ((error: Error) => void) | undefined;
     let promptStarted!: () => void;
     const started = new Promise<void>((resolve) => {
@@ -168,22 +168,22 @@ describe("RuntimeCoordinator", () => {
       Effect.promise(async () => {
         rejectPrompt?.(new DOMException("Aborted", "AbortError"));
       });
-    const { root, coordinator, config, sessions, client } = await fixture(() =>
+    const { root, coordinator, config, sessions, agent } = await fixture(() =>
       Effect.succeed(managed),
     );
     const pending = Effect.runPromise(
       coordinator.answerEffect({
-        client,
+        peer: agent,
         workspaceId: "docs",
         question: "running",
         signal: new AbortController().signal,
       }),
     );
     await started;
-    const archive = join(root, "owner-global-pi-session.jsonl");
+    const archive = join(root, "runtime-backend-state.jsonl");
     await writeFile(archive, "history");
 
-    await Effect.runPromise(config.revokeClientEffect("client"));
+    await Effect.runPromise(config.revokeAgentEffect("agent"));
     const reconciliation = Effect.runPromise(
       coordinator.reconcileEffect(await Effect.runPromise(config.readEffectiveEffect())),
     );
@@ -195,7 +195,7 @@ describe("RuntimeCoordinator", () => {
     await expect(
       Effect.runPromise(
         coordinator.answerEffect({
-          client,
+          peer: agent,
           workspaceId: "docs",
           question: "late",
           signal: new AbortController().signal,
@@ -205,7 +205,7 @@ describe("RuntimeCoordinator", () => {
     await Effect.runPromise(coordinator.closeEffect());
   });
 
-  test("waits for in-flight Pi creation before removing a binding", async () => {
+  test("waits for in-flight Runtime creation before removing a binding", async () => {
     let releaseCreation!: () => void;
     const creationBarrier = new Promise<void>((resolve) => {
       releaseCreation = resolve;
@@ -229,14 +229,14 @@ describe("RuntimeCoordinator", () => {
     );
     const pending = Effect.runPromise(
       current.coordinator.answerEffect({
-        client: current.client,
+        peer: current.agent,
         workspaceId: "docs",
         question: "running",
         signal: new AbortController().signal,
       }),
     );
     await started;
-    await Effect.runPromise(current.config.revokeClientEffect("client"));
+    await Effect.runPromise(current.config.revokeAgentEffect("agent"));
     let reconciled = false;
     const reconciliation = Effect.runPromise(
       current.coordinator.reconcileEffect(
@@ -256,16 +256,16 @@ describe("RuntimeCoordinator", () => {
     await Effect.runPromise(current.coordinator.closeEffect());
   });
 
-  test("credential rotation restarts memory but preserves the Pi session ID", async () => {
+  test("credential rotation restarts memory but preserves the Runtime Session ID", async () => {
     let creations = 0;
-    const { coordinator, config, sessions, client } = await fixture(() =>
+    const { coordinator, config, sessions, agent } = await fixture(() =>
       Effect.sync(() => {
         creations++;
         return fakeSession();
       }),
     );
     const input = {
-      client,
+      peer: agent,
       workspaceId: "docs",
       question: "one",
       signal: new AbortController().signal,
@@ -273,7 +273,7 @@ describe("RuntimeCoordinator", () => {
     await Effect.runPromise(coordinator.answerEffect(input));
     const before = (await Effect.runPromise(sessions.listEffect()))[0]!;
 
-    const rotated = await Effect.runPromise(config.rotateClientEffect("client", "nodekey:second"));
+    const rotated = await Effect.runPromise(config.rotateAgentEffect("agent", "nodekey:second"));
     await Effect.runPromise(
       coordinator.reconcileEffect(await Effect.runPromise(config.readEffectiveEffect())),
     );
@@ -285,7 +285,7 @@ describe("RuntimeCoordinator", () => {
     await Effect.runPromise(
       coordinator.answerEffect({
         ...input,
-        client: (await Effect.runPromise(config.authenticateEffect(rotated.bearer)))!,
+        peer: (await Effect.runPromise(config.authenticateEffect(rotated.bearer)))!,
         question: "two",
       }),
     );
@@ -296,7 +296,7 @@ describe("RuntimeCoordinator", () => {
   });
 
   test("linearizes admission before credential rotation", async () => {
-    const { coordinator, config, sessions, client } = await fixture();
+    const { coordinator, config, sessions, agent } = await fixture();
     const originalGetOrCreateEffect = sessions.getOrCreateEffect.bind(sessions);
     let entered!: () => void;
     const admissionEntered = new Promise<void>((resolve) => {
@@ -315,7 +315,7 @@ describe("RuntimeCoordinator", () => {
       });
     const admitted = Effect.runPromise(
       coordinator.answerEffect({
-        client,
+        peer: agent,
         workspaceId: "docs",
         question: "before rotation",
         signal: new AbortController().signal,
@@ -323,7 +323,7 @@ describe("RuntimeCoordinator", () => {
     );
     await admissionEntered;
     let rotated = false;
-    const rotation = Effect.runPromise(config.rotateClientEffect("client", "nodekey:second")).then(
+    const rotation = Effect.runPromise(config.rotateAgentEffect("agent", "nodekey:second")).then(
       () => {
         rotated = true;
       },
@@ -339,7 +339,7 @@ describe("RuntimeCoordinator", () => {
   });
 
   test("Workspace removal purges only that binding scope", async () => {
-    const { root, coordinator, config, sessions, client } = await fixture();
+    const { root, coordinator, config, sessions, agent } = await fixture();
     const codeRoot = join(root, "code");
     await mkdir(codeRoot);
     await Effect.runPromise(
@@ -356,7 +356,7 @@ describe("RuntimeCoordinator", () => {
     const signal = new AbortController().signal;
     await Effect.runPromise(
       coordinator.answerEffect({
-        client,
+        peer: agent,
         workspaceId: "docs",
         question: "docs",
         signal,
@@ -364,7 +364,7 @@ describe("RuntimeCoordinator", () => {
     );
     await Effect.runPromise(
       coordinator.answerEffect({
-        client,
+        peer: agent,
         workspaceId: "code",
         question: "code",
         signal,
@@ -383,11 +383,11 @@ describe("RuntimeCoordinator", () => {
     await Effect.runPromise(coordinator.closeEffect());
   });
 
-  test("startup removes bindings for absent Clients and Workspaces", async () => {
+  test("startup removes bindings for absent Peers and Workspaces", async () => {
     const initial = await fixture();
-    const keep = await Effect.runPromise(initial.sessions.getOrCreateEffect("client", "docs"));
+    const keep = await Effect.runPromise(initial.sessions.getOrCreateEffect("agent", "docs"));
     await Effect.runPromise(initial.sessions.getOrCreateEffect("revoked", "docs"));
-    await Effect.runPromise(initial.sessions.getOrCreateEffect("client", "removed"));
+    await Effect.runPromise(initial.sessions.getOrCreateEffect("agent", "removed"));
     await Effect.runPromise(initial.coordinator.closeEffect());
     const runtime = makeRuntimePool({ createSessionEffect: () => Effect.succeed(fakeSession()) });
 
@@ -413,19 +413,19 @@ describe("RuntimeCoordinator", () => {
       Effect.sync(() => {
         disposals++;
       });
-    const { coordinator, config, sessions, client } = await fixture(() => Effect.succeed(session));
+    const { coordinator, config, sessions, agent } = await fixture(() => Effect.succeed(session));
     const signal = new AbortController().signal;
 
     await Effect.runPromise(
-      coordinator.answerEffect({ client, workspaceId: "docs", question: "one", signal }),
+      coordinator.answerEffect({ peer: agent, workspaceId: "docs", question: "one", signal }),
     );
     const binding = (await Effect.runPromise(sessions.listEffect()))[0]!;
     await Effect.runPromise(
       config.setRuntimeEffect({
         kind: "tanstack-acp",
         name: "codex",
-        model: "gpt-5-codex",
-        command: "codex --acp --model {model} --cwd {cwd}",
+        model: "test-model",
+        command: "agent --acp --model {model} --cwd {cwd}",
       }),
     );
     await Effect.runPromise(
@@ -438,7 +438,7 @@ describe("RuntimeCoordinator", () => {
   });
 });
 
-function fakeSession(): RuntimeAgentSession {
+function fakeSession(): RuntimeNodeSession {
   return {
     promptEffect: () => Effect.void,
     isAlive: () => true,

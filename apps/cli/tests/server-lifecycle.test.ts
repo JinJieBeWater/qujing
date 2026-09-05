@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { Effect, Exit, Scope } from "effect";
 import { createScopedFatalHandler } from "../src/server";
 
-describe("Gateway fatal shutdown", () => {
+describe("Node fatal shutdown", () => {
   test("closes scoped resources once before terminating", async () => {
     const scope = await Effect.runPromise(Scope.make("sequential"));
     let releaseClose!: () => void;

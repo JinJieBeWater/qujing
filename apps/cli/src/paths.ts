@@ -9,14 +9,14 @@ export function defaultPaths(
   return { configPath: join(roots.config, "config.json"), stateRoot: roots.state };
 }
 
-export function defaultClientPaths(
+export function defaultAgentPaths(
   env: NodeJS.ProcessEnv = process.env,
   platform: NodeJS.Platform = process.platform,
 ) {
   const roots = defaultRoots(env, platform);
   return {
-    clientConfigPath: join(roots.config, "client.json"),
-    clientStateRoot: join(roots.state, "client"),
+    agentConfigPath: join(roots.config, "agent.json"),
+    agentStateRoot: join(roots.state, "agent"),
   };
 }
 

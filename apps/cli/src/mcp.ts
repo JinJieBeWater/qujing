@@ -14,11 +14,18 @@ import { McpProtocol, McpServer, Tool, Toolkit } from "effect/unstable/ai";
 import { HttpRouter } from "effect/unstable/http";
 import packageJson from "../package.json";
 import { QujingError } from "./errors";
-import { LineAskResult, LineWorkspaces, NonEmptyString, type ClientIdentity } from "./schemas";
+import {
+  PeerAskResult,
+  PeerWorkspaces,
+  NonEmptyString,
+  type PeerCredentialIdentity,
+} from "./schemas";
 import type { QujingEffectApi } from "./qujing";
 
+export type McpCredentialIdentity = PeerCredentialIdentity;
+
 interface SessionEntry {
-  clientId: string;
+  credentialId: string;
   credentialVersion: string;
   server: EffectMcpSession;
   requests: Map<string, AbortController>;
@@ -30,44 +37,44 @@ interface SessionState {
 }
 
 interface RequestLease {
-  clientId: string;
+  credentialId: string;
   settled: Deferred.Deferred<void>;
 }
 
 interface State {
   sessions: Map<string, SessionEntry>;
   entries: Map<SessionEntry, SessionState>;
-  sessionSlotsByClient: Map<string, number>;
-  activeByClient: Map<string, number>;
+  sessionSlotsByCredential: Map<string, number>;
+  activeByCredential: Map<string, number>;
   active: Set<RequestLease>;
   sessionSlots: number;
   closing: boolean;
 }
 
 export interface McpHttpOptions {
-  createServer(client: ClientIdentity): EffectMcpSession;
-  authenticateEffect(bearer: string): Effect.Effect<ClientIdentity | undefined, unknown>;
+  createServer(identity: McpCredentialIdentity): EffectMcpSession;
+  authenticateEffect(bearer: string): Effect.Effect<McpCredentialIdentity | undefined, unknown>;
   allowedHosts: string[];
   allowedOrigins: string[];
   maxBodyBytes?: number;
   bodyTimeoutMs?: number;
   maxSessions?: number;
-  maxClientSessions?: number;
+  maxCredentialSessions?: number;
   maxActiveRequests?: number;
-  maxClientActiveRequests?: number;
+  maxCredentialActiveRequests?: number;
   sessionIdleMs?: number;
   closeTimeoutMs?: number;
   shutdownTimeoutMs?: number;
   fatal?(error: Error): void;
 }
 
-export interface McpGatewayOptions extends Omit<McpHttpOptions, "createServer"> {
+export interface McpNodeOptions extends Omit<McpHttpOptions, "createServer"> {
   app: QujingEffectApi;
 }
 
-export interface McpGateway {
+export interface McpHttpServer {
   fetch(request: Request): Promise<Response>;
-  closeClientEffect(clientId: string): Effect.Effect<void, Error>;
+  closeCredentialEffect(credentialId: string): Effect.Effect<void, Error>;
   closeEffect: Effect.Effect<void, Error>;
 }
 
@@ -116,21 +123,21 @@ export function withAbortSignal<A, E, R>(
   );
 }
 
-export function createMcpGateway(options: McpGatewayOptions): McpGateway {
+export function createMcpNode(options: McpNodeOptions): McpHttpServer {
   return createMcpHttpServer({
     ...options,
-    createServer: (client) => createGatewayServer(options.app, client, options.allowedOrigins),
+    createServer: (peer) => createNodeServer(options.app, peer, options.allowedOrigins),
   });
 }
 
-export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
+export function createMcpHttpServer(options: McpHttpOptions): McpHttpServer {
   const gate = Effect.runSync(Semaphore.make(1));
   const state = Effect.runSync(
     Ref.make<State>({
       sessions: new Map(),
       entries: new Map(),
-      sessionSlotsByClient: new Map(),
-      activeByClient: new Map(),
+      sessionSlotsByCredential: new Map(),
+      activeByCredential: new Map(),
       active: new Set(),
       sessionSlots: 0,
       closing: false,
@@ -149,17 +156,17 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
         const sessions = new Map(
           [...current.sessions].filter(([, candidate]) => candidate !== entry),
         );
-        const sessionSlotsByClient = new Map(current.sessionSlotsByClient);
-        const remaining = (sessionSlotsByClient.get(entry.clientId) ?? 1) - 1;
-        if (remaining === 0) sessionSlotsByClient.delete(entry.clientId);
-        else sessionSlotsByClient.set(entry.clientId, remaining);
+        const sessionSlotsByCredential = new Map(current.sessionSlotsByCredential);
+        const remaining = (sessionSlotsByCredential.get(entry.credentialId) ?? 1) - 1;
+        if (remaining === 0) sessionSlotsByCredential.delete(entry.credentialId);
+        else sessionSlotsByCredential.set(entry.credentialId, remaining);
         return [
           true,
           {
             ...current,
             entries,
             sessions,
-            sessionSlotsByClient,
+            sessionSlotsByCredential,
             sessionSlots: current.sessionSlots - 1,
           },
         ] as const;
@@ -194,13 +201,13 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
         if (selected.length === 0) return [[], current];
         const entries = new Map(current.entries);
         const sessions = new Map(current.sessions);
-        const sessionSlotsByClient = new Map(current.sessionSlotsByClient);
+        const sessionSlotsByCredential = new Map(current.sessionSlotsByCredential);
         for (const [entry] of selected) {
           entries.delete(entry);
           for (const [id, candidate] of sessions) if (candidate === entry) sessions.delete(id);
-          const remaining = (sessionSlotsByClient.get(entry.clientId) ?? 1) - 1;
-          if (remaining === 0) sessionSlotsByClient.delete(entry.clientId);
-          else sessionSlotsByClient.set(entry.clientId, remaining);
+          const remaining = (sessionSlotsByCredential.get(entry.credentialId) ?? 1) - 1;
+          if (remaining === 0) sessionSlotsByCredential.delete(entry.credentialId);
+          else sessionSlotsByCredential.set(entry.credentialId, remaining);
         }
         return [
           selected.map(([entry]) => entry),
@@ -208,7 +215,7 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
             ...current,
             entries,
             sessions,
-            sessionSlotsByClient,
+            sessionSlotsByCredential,
             sessionSlots: current.sessionSlots - selected.length,
           },
         ];
@@ -245,7 +252,7 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
     ),
   );
 
-  const handleRouteEffect = (request: Request, bearer: string, client: ClientIdentity) =>
+  const handleRouteEffect = (request: Request, bearer: string, identity: McpCredentialIdentity) =>
     Effect.gen(function* () {
       const bounded =
         request.method === "POST"
@@ -256,12 +263,12 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
             )
           : request;
       if (bounded instanceof Response) return bounded;
-      if (yield* isClosing) return jsonRpcError(503, -32_000, "Gateway is stopping");
+      if (yield* isClosing) return jsonRpcError(503, -32_000, "MCP server is stopping");
       const refreshed = yield* options.authenticateEffect(bearer);
       if (
         !refreshed ||
-        refreshed.id !== client.id ||
-        refreshed.credentialVersion !== client.credentialVersion
+        refreshed.id !== identity.id ||
+        refreshed.credentialVersion !== identity.credentialVersion
       )
         return Response.json(
           {
@@ -279,11 +286,11 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
             const entry = current.sessions.get(sessionId);
             if (!entry) return [jsonRpcError(404, -32_001, "MCP session not found"), current];
             if (
-              entry.clientId !== client.id ||
-              entry.credentialVersion !== client.credentialVersion
+              entry.credentialId !== identity.id ||
+              entry.credentialVersion !== identity.credentialVersion
             )
               return [
-                jsonRpcError(403, -32_000, "MCP session belongs to another Client credential"),
+                jsonRpcError(403, -32_000, "MCP session belongs to another credential"),
                 current,
               ];
             const entries = new Map(current.entries);
@@ -319,9 +326,9 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
       }
       if (request.method !== "POST") return jsonRpcError(400, -32_000, "MCP session is required");
       const entry: SessionEntry = {
-        clientId: client.id,
-        credentialVersion: client.credentialVersion,
-        server: options.createServer(client),
+        credentialId: identity.id,
+        credentialVersion: identity.credentialVersion,
+        server: options.createServer(identity),
         requests: new Map(),
       };
       const reserved = yield* withGate(
@@ -329,7 +336,8 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
           if (
             current.closing ||
             current.sessionSlots >= (options.maxSessions ?? 32) ||
-            (current.sessionSlotsByClient.get(client.id) ?? 0) >= (options.maxClientSessions ?? 4)
+            (current.sessionSlotsByCredential.get(identity.id) ?? 0) >=
+              (options.maxCredentialSessions ?? 4)
           )
             return [false, current] as const;
           return [
@@ -340,9 +348,9 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
                 active: 1,
                 lastUsed: Date.now(),
               }),
-              sessionSlotsByClient: new Map(current.sessionSlotsByClient).set(
-                client.id,
-                (current.sessionSlotsByClient.get(client.id) ?? 0) + 1,
+              sessionSlotsByCredential: new Map(current.sessionSlotsByCredential).set(
+                identity.id,
+                (current.sessionSlotsByCredential.get(identity.id) ?? 0) + 1,
               ),
               sessionSlots: current.sessionSlots + 1,
             },
@@ -400,10 +408,10 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
         return Response.json({ status: "ok" });
       }
       if (path !== "/mcp") return new Response("Not Found", { status: 404 });
-      if (yield* isClosing) return jsonRpcError(503, -32_000, "Gateway is stopping");
+      if (yield* isClosing) return jsonRpcError(503, -32_000, "MCP server is stopping");
       const bearer = parseBearer(request.headers.get("authorization"));
-      const client = bearer ? yield* options.authenticateEffect(bearer) : undefined;
-      if (!client)
+      const identity = bearer ? yield* options.authenticateEffect(bearer) : undefined;
+      if (!identity)
         return Response.json(
           {
             error: {
@@ -419,19 +427,20 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
           if (
             current.closing ||
             current.active.size >= (options.maxActiveRequests ?? 64) ||
-            (current.activeByClient.get(client.id) ?? 0) >= (options.maxClientActiveRequests ?? 16)
+            (current.activeByCredential.get(identity.id) ?? 0) >=
+              (options.maxCredentialActiveRequests ?? 16)
           )
             return;
           const lease = {
-            clientId: client.id,
+            credentialId: identity.id,
             settled: yield* Deferred.make<void>(),
           };
           yield* Ref.set(state, {
             ...current,
             active: new Set(current.active).add(lease),
-            activeByClient: new Map(current.activeByClient).set(
-              client.id,
-              (current.activeByClient.get(client.id) ?? 0) + 1,
+            activeByCredential: new Map(current.activeByCredential).set(
+              identity.id,
+              (current.activeByCredential.get(identity.id) ?? 0) + 1,
             ),
           });
           return lease;
@@ -444,16 +453,18 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
             Ref.update(state, (current) => {
               const active = new Set(current.active);
               active.delete(lease);
-              const activeByClient = new Map(current.activeByClient);
-              const remaining = (activeByClient.get(client.id) ?? 1) - 1;
-              if (remaining === 0) activeByClient.delete(client.id);
-              else activeByClient.set(client.id, remaining);
-              return { ...current, active, activeByClient };
+              const activeByCredential = new Map(current.activeByCredential);
+              const remaining = (activeByCredential.get(identity.id) ?? 1) - 1;
+              if (remaining === 0) activeByCredential.delete(identity.id);
+              else activeByCredential.set(identity.id, remaining);
+              return { ...current, active, activeByCredential };
             }),
           ),
         ),
       );
-      return yield* handleRouteEffect(request, bearer!, client).pipe(Effect.ensuring(finishLease));
+      return yield* handleRouteEffect(request, bearer!, identity).pipe(
+        Effect.ensuring(finishLease),
+      );
     });
 
   const closeEffect = Effect.gen(function* () {
@@ -475,7 +486,7 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
   return {
     fetch: (request) => Effect.runPromise(routeEffect(request)),
 
-    closeClientEffect: (clientId) =>
+    closeCredentialEffect: (identityId) =>
       Effect.uninterruptible(
         Effect.gen(function* () {
           const [entries, active] = yield* withGate(
@@ -483,13 +494,15 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
               state,
               (current): readonly [readonly [SessionEntry[], RequestLease[]], State] => {
                 const entries = [...current.entries]
-                  .filter(([entry]) => entry.clientId === clientId)
+                  .filter(([entry]) => entry.credentialId === identityId)
                   .map(([entry]) => entry);
-                const active = [...current.active].filter((lease) => lease.clientId === clientId);
+                const active = [...current.active].filter(
+                  (lease) => lease.credentialId === identityId,
+                );
                 if (entries.length === 0) return [[entries, active], current];
                 const selected = new Set(entries);
-                const sessionSlotsByClient = new Map(current.sessionSlotsByClient);
-                sessionSlotsByClient.delete(clientId);
+                const sessionSlotsByCredential = new Map(current.sessionSlotsByCredential);
+                sessionSlotsByCredential.delete(identityId);
                 return [
                   [entries, active],
                   {
@@ -500,7 +513,7 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
                     sessions: new Map(
                       [...current.sessions].filter(([, entry]) => !selected.has(entry)),
                     ),
-                    sessionSlotsByClient,
+                    sessionSlotsByCredential,
                     sessionSlots: current.sessionSlots - entries.length,
                   },
                 ];
@@ -509,7 +522,7 @@ export function createMcpHttpServer(options: McpHttpOptions): McpGateway {
           );
           yield* closeEntriesEffect(entries, true);
           if (yield* drainLeasesEffect(active)) return;
-          const error = new Error("MCP requests did not settle during Client shutdown");
+          const error = new Error("MCP requests did not settle during credential shutdown");
           options.fatal?.(error);
           return yield* Effect.fail(error);
         }),
@@ -678,14 +691,14 @@ function boundedRequestEffect(
   });
 }
 
-function createGatewayServer(
+function createNodeServer(
   app: QujingEffectApi,
-  client: ClientIdentity,
+  peer: McpCredentialIdentity,
   allowedOrigins: readonly string[],
 ): EffectMcpSession {
   const listWorkspaces = Tool.make("list_workspaces", {
     description: "List this colleague's manually registered Workspaces and their public summaries.",
-    success: LineWorkspaces,
+    success: PeerWorkspaces,
     failure: McpToolFailure,
   })
     .annotate(Tool.Readonly, true)
@@ -694,12 +707,12 @@ function createGatewayServer(
     .annotate(Tool.OpenWorld, false);
   const ask = Tool.make("ask", {
     description:
-      "Ask this colleague a question in one exact Workspace. Later calls automatically continue the same Client and Workspace history.",
+      "Ask this colleague a question in one exact Workspace. Later calls automatically continue the same Agent and Workspace history.",
     parameters: Schema.Struct({
       workspace: NonEmptyString,
       question: Schema.String,
     }),
-    success: LineAskResult,
+    success: PeerAskResult,
     failure: McpToolFailure,
   })
     .annotate(Tool.Readonly, false)
@@ -708,13 +721,10 @@ function createGatewayServer(
     .annotate(Tool.OpenWorld, true);
   const toolkit = Toolkit.make(listWorkspaces, ask);
   const handlers = toolkit.toLayer({
-    list_workspaces: () =>
-      app.listWorkspacesEffect(client).pipe(Effect.mapError(gatewayToolFailure)),
+    list_workspaces: () => app.listWorkspacesEffect(peer).pipe(Effect.mapError(nodeToolFailure)),
     ask: ({ workspace, question }) =>
       withAbortSignal((signal) =>
-        app
-          .askEffect({ client, workspace, question }, signal)
-          .pipe(Effect.mapError(gatewayToolFailure)),
+        app.askEffect({ peer, workspace, question }, signal).pipe(Effect.mapError(nodeToolFailure)),
       ),
   });
   const registrations = Layer.effectDiscard(McpServer.registerToolkit(toolkit)).pipe(
@@ -723,7 +733,7 @@ function createGatewayServer(
   return createEffectMcpSession("qujing", registrations, allowedOrigins);
 }
 
-function gatewayToolFailure(error: unknown): McpToolFailure {
+function nodeToolFailure(error: unknown): McpToolFailure {
   return new McpToolFailure({
     message:
       error instanceof QujingError

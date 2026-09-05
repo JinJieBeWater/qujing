@@ -2,7 +2,7 @@ import { randomUUID } from "node:crypto";
 import { Deferred, Effect, Exit, Ref, Semaphore } from "effect";
 import type { Config, ConfigStore } from "../config";
 import { QujingError } from "../errors";
-import { Question, decode, type ClientIdentity } from "../schemas";
+import { Question, decode, type PeerCredentialIdentity as PeerIdentity } from "../schemas";
 import { purgeRemovedRuntimeSessionsEffect } from "./cleanup";
 import { RuntimePool } from "./runtime-pool";
 import { RuntimeSessionStore } from "./sessions";
@@ -11,7 +11,7 @@ const decodeQuestion = decode(Question);
 
 interface RuntimeLease {
   id: string;
-  clientId: string;
+  peerId: string;
   workspaceId: string;
   controller: AbortController;
   settled: Deferred.Deferred<void>;
@@ -20,7 +20,7 @@ interface RuntimeLease {
 interface CoordinatorState {
   desired: Config;
   leases: ReadonlyMap<string, RuntimeLease>;
-  blockedClients: ReadonlySet<string>;
+  blockedPeers: ReadonlySet<string>;
   blockedWorkspaces: ReadonlySet<string>;
   blockAll: boolean;
   stopped: boolean;
@@ -34,13 +34,13 @@ export interface RuntimeCoordinatorOptions {
 }
 
 export interface CoordinatedAnswerInput {
-  client: ClientIdentity;
+  peer: PeerIdentity;
   workspaceId: string;
   question: string;
   signal: AbortSignal;
 }
 
-/** Coordinates short admissions and reconciliations; Pi work runs outside gate. */
+/** Coordinates short admissions and reconciliations; Runtime work runs outside gate. */
 export class RuntimeCoordinator {
   private constructor(
     private readonly options: RuntimeCoordinatorOptions,
@@ -53,7 +53,7 @@ export class RuntimeCoordinator {
     return Effect.gen(function* () {
       yield* purgeRemovedRuntimeSessionsEffect(
         {
-          clientIds: options.desired.clients.map((client) => client.id),
+          peerIds: options.desired.peers.map((agent) => agent.id),
           workspaceIds: options.desired.workspaces.map((workspace) => workspace.id),
         },
         options.sessions,
@@ -65,7 +65,7 @@ export class RuntimeCoordinator {
         yield* Ref.make<CoordinatorState>({
           desired: options.desired,
           leases: new Map(),
-          blockedClients: new Set(),
+          blockedPeers: new Set(),
           blockedWorkspaces: new Set(),
           blockAll: false,
           stopped: false,
@@ -83,11 +83,12 @@ export class RuntimeCoordinator {
       const admitted = yield* this.withGateEffect(
         this.options.config.withLockEffect(
           Effect.gen({ self: this }, function* () {
+            const peer = input.peer;
             const state = yield* Ref.get(this.state);
             if (state.stopped) throw new QujingError("RUNTIME_UNAVAILABLE", "Runtime is stopped");
             if (
               state.blockAll ||
-              state.blockedClients.has(input.client.id) ||
+              state.blockedPeers.has(peer.id) ||
               state.blockedWorkspaces.has(input.workspaceId)
             ) {
               throw new QujingError("BUSY", "Runtime scope is being reconciled");
@@ -96,13 +97,11 @@ export class RuntimeCoordinator {
             const effective = yield* this.options.config.readEffectiveEffect();
             input.signal.throwIfAborted();
             if (
-              !effective.clients.some(
-                (client) =>
-                  client.id === input.client.id &&
-                  client.bearerHash === input.client.credentialVersion,
+              !effective.peers.some(
+                (agent) => agent.id === peer.id && agent.bearerHash === peer.credentialVersion,
               )
             ) {
-              throw new QujingError("UNAUTHORIZED", "Client is not authorized");
+              throw new QujingError("UNAUTHORIZED", "Agent is not authorized");
             }
             yield* Effect.try({
               try: () => decodeQuestion(input.question),
@@ -127,11 +126,8 @@ export class RuntimeCoordinator {
               );
             }
             input.signal.throwIfAborted();
-            const session = yield* this.options.sessions.getOrCreateEffect(
-              input.client.id,
-              workspace.id,
-            );
-            const lease = yield* createLeaseEffect(input.client.id, workspace.id);
+            const session = yield* this.options.sessions.getOrCreateEffect(peer.id, workspace.id);
+            const lease = yield* createLeaseEffect(peer.id, workspace.id);
             yield* Ref.update(this.state, (current) => ({
               ...current,
               leases: new Map(current.leases).set(lease.id, lease),
@@ -197,16 +193,13 @@ export class RuntimeCoordinator {
     return Effect.gen({ self: this }, function* () {
       const desired = (yield* Ref.get(this.state)).desired;
       const runtimeChanged = runtimeConfigChanged(desired, next);
-      const removedOrChangedClients = [
-        ...removedIds(desired.clients, next.clients),
-        ...changedClientIds(desired, next),
-      ];
+      const removedOrChangedPeers = changedOrRemovedPeerCredentialIds(desired, next);
       const removedOrChangedWorkspaces = [
         ...removedIds(desired.workspaces, next.workspaces),
         ...changedWorkspaceIds(desired, next),
       ];
-      const affectedClients = new Set(
-        runtimeChanged ? desired.clients.map((client) => client.id) : removedOrChangedClients,
+      const affectedPeers = new Set(
+        runtimeChanged ? desired.peers.map((agent) => agent.id) : removedOrChangedPeers,
       );
       const affectedWorkspaces = new Set(
         runtimeChanged
@@ -216,8 +209,7 @@ export class RuntimeCoordinator {
       const leases = yield* this.withGateEffect(
         Ref.modify(this.state, (state) => {
           const active = [...state.leases.values()].filter(
-            (lease) =>
-              affectedClients.has(lease.clientId) || affectedWorkspaces.has(lease.workspaceId),
+            (lease) => affectedPeers.has(lease.peerId) || affectedWorkspaces.has(lease.workspaceId),
           );
           for (const lease of active)
             lease.controller.abort(new DOMException("Runtime scope retired", "AbortError"));
@@ -225,7 +217,7 @@ export class RuntimeCoordinator {
             active,
             {
               ...state,
-              blockedClients: new Set([...state.blockedClients, ...affectedClients]),
+              blockedPeers: new Set([...state.blockedPeers, ...affectedPeers]),
               blockedWorkspaces: new Set([...state.blockedWorkspaces, ...affectedWorkspaces]),
             },
           ] as const;
@@ -238,8 +230,8 @@ export class RuntimeCoordinator {
         },
       );
       yield* Effect.forEach(
-        affectedClients,
-        (clientId) => this.options.runtime.disposeClientEffect(clientId),
+        affectedPeers,
+        (peerId) => this.options.runtime.disposePeerEffect(peerId),
         { concurrency: 1 },
       );
       yield* Effect.forEach(
@@ -249,7 +241,7 @@ export class RuntimeCoordinator {
       );
       yield* purgeRemovedRuntimeSessionsEffect(
         {
-          clientIds: next.clients.map(({ id }) => id),
+          peerIds: next.peers.map(({ id }) => id),
           workspaceIds: next.workspaces
             .filter(({ id }) => !removedOrChangedWorkspaces.includes(id))
             .map(({ id }) => id),
@@ -260,9 +252,7 @@ export class RuntimeCoordinator {
         Ref.update(this.state, (state) => ({
           ...state,
           desired: next,
-          blockedClients: new Set(
-            [...state.blockedClients].filter((id) => !affectedClients.has(id)),
-          ),
+          blockedPeers: new Set([...state.blockedPeers].filter((id) => !affectedPeers.has(id))),
           blockedWorkspaces: new Set(
             [...state.blockedWorkspaces].filter((id) => !affectedWorkspaces.has(id)),
           ),
@@ -276,11 +266,11 @@ export class RuntimeCoordinator {
   }
 }
 
-function createLeaseEffect(clientId: string, workspaceId: string) {
+function createLeaseEffect(peerId: string, workspaceId: string) {
   return Effect.gen(function* () {
     return {
       id: randomUUID(),
-      clientId,
+      peerId,
       workspaceId,
       controller: new AbortController(),
       settled: yield* Deferred.make<void>(),
@@ -296,17 +286,15 @@ function removedIds(
   return previous.filter(({ id }) => !active.has(id)).map(({ id }) => id);
 }
 
-function changedClientIds(previous: Config, next: Config): string[] {
-  const current = new Map(
-    next.clients.map((client) => [client.id, `${client.tailcatKey}\0${client.bearerHash}`]),
-  );
-  return previous.clients
-    .filter(
-      (client) =>
-        current.has(client.id) &&
-        current.get(client.id) !== `${client.tailcatKey}\0${client.bearerHash}`,
-    )
-    .map((client) => client.id);
+export function changedOrRemovedPeerCredentialIds(previous: Config, next: Config): string[] {
+  const current = new Map(next.peers.map((peer) => [peer.id, peerCredentialFingerprint(peer)]));
+  return previous.peers
+    .filter((peer) => current.get(peer.id) !== peerCredentialFingerprint(peer))
+    .map((peer) => peer.id);
+}
+
+function peerCredentialFingerprint(peer: { tailcatKey: string; bearerHash: string }): string {
+  return `${peer.tailcatKey}\0${peer.bearerHash}`;
 }
 
 function changedWorkspaceIds(previous: Config, next: Config): string[] {

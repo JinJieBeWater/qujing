@@ -2,7 +2,7 @@ import { constants } from "node:fs";
 import { access } from "node:fs/promises";
 import { createServer } from "node:net";
 import { dirname, join } from "node:path";
-import { Duration, Effect } from "effect";
+import { Effect } from "effect";
 import { ConfigStore, type Config } from "./config";
 import {
   assertPrivatePathEffect,
@@ -10,19 +10,16 @@ import {
   isPrivatePathEffect,
 } from "./private-files";
 import { processLockActiveEffect } from "./process-lock";
-import { requireTransportBinaryEffect, transportBinaryPath } from "./transport/process";
+import {
+  doctorCheck,
+  doctorMessage,
+  promiseEffect,
+  transportCheckEffect,
+  type DoctorReport,
+} from "./doctor-shared";
 import { readTailcatStateEffect } from "./transport/supervisor";
 
-export interface DoctorCheck {
-  name: string;
-  status: "ok" | "warning" | "error";
-  message: string;
-}
-
-export interface DoctorReport {
-  ok: boolean;
-  checks: DoctorCheck[];
-}
+export type { DoctorCheck, DoctorReport } from "./doctor-shared";
 
 interface DoctorPaths {
   configPath: string;
@@ -31,7 +28,6 @@ interface DoctorPaths {
 }
 
 interface DoctorDependencies {
-  checkPi?: (binary: string) => Effect.Effect<boolean, unknown>;
   checkExecutable?: (binary: string) => Effect.Effect<boolean, unknown>;
   checkPort?: (host: string, port: number) => Effect.Effect<boolean, unknown>;
 }
@@ -80,11 +76,11 @@ function configCheckEffect(store: ConfigStore) {
   return store.readEffectiveEffect().pipe(
     Effect.map((config): ConfigResult => ({
       config,
-      check: check("config", "ok", "Owner config is valid"),
+      check: doctorCheck("config", "ok", "Node config is valid"),
     })),
     Effect.catchEager((error) =>
       Effect.succeed<ConfigResult>({
-        check: check("config", "error", message(error, "Owner config is invalid")),
+        check: doctorCheck("config", "error", doctorMessage(error, "Node config is invalid")),
       }),
     ),
   );
@@ -100,10 +96,10 @@ function permissionsCheckEffect(paths: DoctorPaths, store: ConfigStore) {
     ],
     { concurrency: "unbounded" },
   ).pipe(
-    Effect.as(check("permissions", "ok", "Config and state permissions are private")),
+    Effect.as(doctorCheck("permissions", "ok", "Config and state permissions are private")),
     Effect.catchEager(() =>
       Effect.succeed(
-        check("permissions", "error", "Config and state permissions must be 0600/0700"),
+        doctorCheck("permissions", "error", "Config and state permissions must be 0600/0700"),
       ),
     ),
   );
@@ -115,7 +111,7 @@ function workspaceChecksEffect(store: ConfigStore, config: Config) {
       const publicWorkspaces = new Map(workspaces.map((workspace) => [workspace.id, workspace]));
       return config.workspaces.map((workspace) => {
         const available = publicWorkspaces.get(workspace.id)?.available === true;
-        return check(
+        return doctorCheck(
           `workspace:${workspace.id}`,
           available ? "ok" : "error",
           available
@@ -127,7 +123,7 @@ function workspaceChecksEffect(store: ConfigStore, config: Config) {
     Effect.catchEager(() =>
       Effect.succeed(
         config.workspaces.map((workspace) =>
-          check(
+          doctorCheck(
             `workspace:${workspace.id}`,
             "error",
             "Workspace root is unavailable or non-canonical",
@@ -143,27 +139,27 @@ function portCheckEffect(
   config: Config,
   checkPortOverride?: DoctorDependencies["checkPort"],
 ) {
-  return processLockActiveEffect(join(stateRoot, "gateway.lock")).pipe(
+  return processLockActiveEffect(join(stateRoot, "node.lock")).pipe(
     Effect.flatMap((running) =>
       (running
         ? Effect.succeed<boolean>(true)
         : portAvailableEffect(config.server.host, config.server.port, checkPortOverride)
       ).pipe(
         Effect.map((available) =>
-          check(
+          doctorCheck(
             "port",
             available ? "ok" : "error",
             running
-              ? "Gateway is running"
+              ? "Node is running"
               : available
-                ? "Gateway port is available"
-                : "Gateway port is already in use",
+                ? "Node port is available"
+                : "Node port is already in use",
           ),
         ),
       ),
     ),
     Effect.catchEager(() =>
-      Effect.succeed(check("port", "error", "Gateway port is already in use")),
+      Effect.succeed(doctorCheck("port", "error", "Node port is already in use")),
     ),
   );
 }
@@ -176,33 +172,31 @@ function portAvailableEffect(
   return checkPortOverride ? checkPortOverride(host, port) : checkPortEffect(host, port);
 }
 
-function transportCheckEffect(binaryPath?: string) {
-  return requireTransportBinaryEffect(binaryPath ?? transportBinaryPath()).pipe(
-    Effect.flatMap((binary) => promise(() => access(binary, constants.X_OK))),
-    Effect.as(check("transport", "ok", "Tailcat transport binary is executable")),
-    Effect.catchEager((error) =>
-      Effect.succeed(
-        check("transport", "error", message(error, "Tailcat transport binary is unavailable")),
-      ),
-    ),
-  );
-}
-
-function piCheckEffect(binary: string, checkPiOverride?: DoctorDependencies["checkPi"]) {
-  return (checkPiOverride ? checkPiOverride(binary) : checkPiEffect(binary)).pipe(
-    Effect.map((available) =>
-      check(
-        "pi",
-        available ? "ok" : "error",
-        available ? "Global Pi CLI is executable" : "Global Pi CLI is unavailable",
-      ),
-    ),
-    Effect.catchEager(() => Effect.succeed(check("pi", "error", "Global Pi CLI is unavailable"))),
-  );
-}
-
 function runtimeCheckEffect(config: Config, dependencies: DoctorDependencies) {
   const runtime = config.runtime;
+  if (runtime?.kind === "pi-rpc") {
+    const executable = runtime.binary ?? "pi";
+    return executableCheckEffect(executable, dependencies.checkExecutable).pipe(
+      Effect.map((available) =>
+        doctorCheck(
+          "runtime",
+          available ? "ok" : "error",
+          available
+            ? `Pi Runtime command is executable: ${executable} (${runtime.model})`
+            : `Pi Runtime command is unavailable: ${executable} (${runtime.model})`,
+        ),
+      ),
+      Effect.catchEager(() =>
+        Effect.succeed(
+          doctorCheck(
+            "runtime",
+            "error",
+            `Pi Runtime command is unavailable: ${executable} (${runtime.model})`,
+          ),
+        ),
+      ),
+    );
+  }
   if (runtime?.kind === "tanstack-acp") {
     const executable = firstExecutableToken(runtime.command);
     return (
@@ -211,7 +205,7 @@ function runtimeCheckEffect(config: Config, dependencies: DoctorDependencies) {
         : Effect.succeed(false)
     ).pipe(
       Effect.map((available) =>
-        check(
+        doctorCheck(
           "runtime",
           available ? "ok" : "error",
           available
@@ -221,12 +215,16 @@ function runtimeCheckEffect(config: Config, dependencies: DoctorDependencies) {
       ),
       Effect.catchEager(() =>
         Effect.succeed(
-          check("runtime", "error", `TanStack ACP Runtime command is unavailable: ${runtime.name}`),
+          doctorCheck(
+            "runtime",
+            "error",
+            `TanStack ACP Runtime command is unavailable: ${runtime.name}`,
+          ),
         ),
       ),
     );
   }
-  return piCheckEffect("pi", dependencies.checkPi);
+  return Effect.succeed(doctorCheck("runtime", "error", "Runtime is not configured"));
 }
 
 function executableCheckEffect(
@@ -234,7 +232,7 @@ function executableCheckEffect(
   checkExecutableOverride?: DoctorDependencies["checkExecutable"],
 ) {
   if (checkExecutableOverride) return checkExecutableOverride(binary);
-  return promise(async () => {
+  return promiseEffect(async () => {
     const resolved = Bun.which(binary);
     if (!resolved) return false;
     await access(resolved, constants.X_OK);
@@ -291,7 +289,7 @@ function tailcatCheckEffect(stateRoot: string) {
     Effect.flatMap((tailcat) => {
       if (!tailcat)
         return Effect.succeed(
-          check("tailcat-state", "warning", "Tailcat Server has not completed first startup"),
+          doctorCheck("tailcat-state", "warning", "Tailcat Server has not completed first startup"),
         );
       const keyPath = join(stateRoot, "transport", "server-key.json");
       const statePath = join(stateRoot, "transport", "server.json");
@@ -301,7 +299,7 @@ function tailcatCheckEffect(stateRoot: string) {
       ).pipe(
         Effect.map(([statePrivate, keyPrivate]) => statePrivate && keyPrivate),
         Effect.map((privateState) =>
-          check(
+          doctorCheck(
             "tailcat-state",
             privateState ? "ok" : "error",
             privateState
@@ -313,37 +311,13 @@ function tailcatCheckEffect(stateRoot: string) {
     }),
     Effect.catchEager((error) =>
       Effect.succeed(
-        check("tailcat-state", "error", message(error, "Tailcat Server state is invalid")),
+        doctorCheck(
+          "tailcat-state",
+          "error",
+          doctorMessage(error, "Tailcat Server state is invalid"),
+        ),
       ),
     ),
-  );
-}
-
-function checkPiEffect(binary: string) {
-  return Effect.scoped(
-    Effect.gen(function* () {
-      const child = yield* Effect.acquireRelease(
-        Effect.sync(() =>
-          Bun.spawn([binary, "--version"], {
-            stdin: "ignore",
-            stdout: "ignore",
-            stderr: "ignore",
-          }),
-        ),
-        (process) =>
-          promise(async () => {
-            if (process.exitCode === null) process.kill("SIGKILL");
-            await process.exited;
-          }).pipe(Effect.catchEager(() => Effect.void)),
-      );
-      return yield* promise(() => child.exited).pipe(
-        Effect.map((code) => code === 0),
-        Effect.timeoutOrElse({
-          duration: Duration.seconds(5),
-          orElse: () => Effect.succeed(false),
-        }),
-      );
-    }),
   );
 }
 
@@ -360,7 +334,7 @@ export function checkPortEffect(host: string, port: number) {
               ),
           ),
       );
-      return yield* promise(
+      return yield* promiseEffect(
         () =>
           new Promise<boolean>((resolve) => {
             server.once("error", () => resolve(false));
@@ -369,14 +343,4 @@ export function checkPortEffect(host: string, port: number) {
       );
     }),
   );
-}
-
-function promise<A>(try_: () => Promise<A>) {
-  return Effect.tryPromise({ try: try_, catch: (error) => error });
-}
-function check(name: string, status: Check["status"], message: string): Check {
-  return { name, status, message };
-}
-function message(error: unknown, fallback: string): string {
-  return error instanceof Error ? error.message : fallback;
 }
