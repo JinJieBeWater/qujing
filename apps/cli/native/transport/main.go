@@ -336,11 +336,15 @@ func transportDebugf(format string, args ...any) {
 
 func bootstrap(ctx context.Context, ping func(context.Context) error, dial func(context.Context) (net.Conn, error)) (net.Conn, error) {
 	for {
-		if err := ping(ctx); err == nil {
-			if remote, err := dial(ctx); err == nil {
+		// Leave time for another attempt before any local request bytes are forwarded.
+		attemptCtx, cancel := context.WithTimeout(ctx, 8*time.Second)
+		if err := ping(attemptCtx); err == nil {
+			if remote, err := dial(attemptCtx); err == nil {
+				cancel()
 				return remote, nil
 			}
 		}
+		cancel()
 		select {
 		case <-ctx.Done():
 			return nil, ctx.Err()

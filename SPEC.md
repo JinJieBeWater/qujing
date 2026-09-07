@@ -114,7 +114,7 @@ No central registry, broadcast discovery, DHT, LAN scan, public search, invite m
 
 Node HTTP listens only on loopback. Per-Peer Connector listens only on local loopback and is raw TCP; Tailcat encrypts off-host traffic, provides NAT traversal and DERP fallback, creates no host route or DNS, and exposes only Node port. Loopback HTTP does not use TLS.
 
-Tailcat Server uses persistent key, so server address remains stable across restart. Before a new bridge, Connector performs bounded `Agent.Ping` for Tailcat re-registration. Bootstrap may retry before HTTP request starts. Once local Node forwards Node request, it never retries it.
+Tailcat Server uses persistent key, so server address remains stable across restart. Before a new bridge, Connector calls `Client.Ping` to request Tailcat re-registration, then establishes TCP. A successful Ping alone is not proof of restored connectivity. Bootstrap bounds each attempt within its overall deadline and may retry before forwarding any HTTP request bytes. Once local Node forwards Node request, it never retries it.
 
 Each Peer Link owns connection, remote bearer, cancellation state, and failure accounting. Tailcat bootstrap failure, allowlist denial, remote authentication failure, Node-ID mismatch, Node failure, or Peer Link restart fails selected Peer only. Other Peers remain available. Local Node does not fall back to another Peer.
 
@@ -153,11 +153,10 @@ Agent-facing errors identify safe layer and Peer without leaking secrets: `UNAUT
 
 ## 8. CLI and services
 
-Product identity is Node and Peer. Current implementation process roles remain local Agent-facing MCP service and Node service; commands are task-first, with role arguments only where an operation exists for both processes. No role-prefixed command or direct per-Peer Agent MCP configuration exists. On macOS, service installation creates private `qujing-node` or `qujing-agent` launchers so Background Items identify process role instead of displaying `qj`; these are not user commands.
+Product identity is Node and Peer. One `qj serve` daemon hosts both the Agent-facing local MCP surface and the Peer-facing Node MCP surface. No role-prefixed command or direct per-Peer Agent MCP configuration exists. On macOS, service installation creates one private `qujing-daemon` launcher so Background Items do not display `qj`; this is not a user command.
 
 ```text
-qj init node --node-id ... --node-name ...
-qj init agent
+qj init --node-id ... --node-name ... [--node-summary ...] [--port ...]
 qj workspace add|list|update|remove ...
 qj peer invite <id> --key ... [--out <path|->]
 qj peer accept <peer-id> --from <path|-> [--key <private-key-path>]
@@ -166,12 +165,12 @@ qj runtime set-pi --model <provider/model> [--binary <pi>]
 qj runtime set-acp <name> --model ... --command ... [--auth <host|api-key>] [--auth-method-id ...] [--permission <default|acceptEdits|bypassPermissions>]
 qj peer key-create|list|update|remove ...
 qj token rotate
-qj doctor node|agent [--json]
-qj serve node|agent
-qj service install|remove node|agent --yes
+qj doctor [--json]
+qj serve
+qj service install|remove --yes
 ```
 
-`peer invite` requires live Node, creates one remote Peer credential and bearer for exactly one Peer Link, and waits until Node applies its distinct Tailcat key before publishing one private pairing bundle. Bundle carries remote Node ID, remote Peer credential ID, Tailcat coordinates, and remote bearer as one exact handoff. `peer accept` reads that bundle from private file or stdin, derives standard key path from Peer ID unless overridden, verifies remote Node, then persists Peer Link. Credential update replaces key path and bearer atomically after remote rotation. Removing Peer Link deletes only local routing and credentials; local Peer ID may be reused later because remote identity and history stay remote-Node controlled. `runtime set-pi` configures built-in Pi RPC with explicit model. `runtime set-acp` configures a custom TanStack ACP Runtime whose model and command are managed through Qujing runtime config. Both retire active Runtime entries without deleting bindings. `serve node` hosts local Node Workspaces and Runtime. `serve agent` hosts Agent-facing local MCP and Peer Links. `doctor` checks selected process-role configuration, configured Runtime, and transport readiness without starting model turn or reading Workspace content. Qujing always adds only fixed Runtime prompt.
+`qj init` creates Node config and local Agent MCP config together, printing the local bearer once. `peer invite` requires live daemon, creates one remote Peer credential and bearer for exactly one Peer Link, and waits until Node applies its distinct Tailcat key before publishing one private pairing bundle. Bundle carries remote Node ID, remote Peer credential ID, Tailcat coordinates, and remote bearer as one exact handoff. `peer accept` reads that bundle from private file or stdin, derives standard key path from Peer ID unless overridden, verifies remote Node, then persists Peer Link. Credential update replaces key path and bearer atomically after remote rotation. Removing Peer Link deletes only local routing and credentials; local Peer ID may be reused later because remote identity and history stay remote-Node controlled. `runtime set-pi` configures built-in Pi RPC with explicit model. `runtime set-acp` configures a custom TanStack ACP Runtime whose model and command are managed through Qujing runtime config. Both retire active Runtime entries without deleting bindings. `qj serve` hosts local Workspaces, Runtime, Agent-facing local MCP, Peer Links, and Tailcat transport. `doctor` checks full daemon configuration, configured Runtime, Peer Links, and transport readiness without starting model turn or reading Workspace content. Qujing always adds only fixed Runtime prompt.
 
 ## 9. Security
 
@@ -189,7 +188,7 @@ Stack remains TypeScript, Bun, Effect 4 RC, `@effect/platform-bun`, Effect Schem
 
 macOS Apple Silicon and Linux x64 are target platforms. Windows x64 cross-build remains **Preview**, pending native ACL, reparse/junction, path case/drive/UNC, Bun, MCP, Tailcat, Node, Runtime, and Agent-facing MCP smoke acceptance. Intel Mac and Linux arm64 unsupported.
 
-Delivery order: Node core and Runtime; Node MCP and cancellation; Agent-facing local Node MCP; Peer Link store; Peer Tailcat bridges and two-hop cancellation; PeerDirectory empty/manual seam; role services, diagnostics, platform acceptance.
+Delivery order: Node core and Runtime; Node MCP and cancellation; Agent-facing local Node MCP; Peer Link store; Peer Tailcat bridges and two-hop cancellation; PeerDirectory empty/manual seam; daemon service, diagnostics, platform acceptance.
 
 ## 11. Acceptance
 
@@ -206,6 +205,6 @@ New acceptance proves:
 - selected ask traverses Agent → local Node → Peer Link → Node → Runtime and cancellation returns over both hops;
 - Node retains internal `list_workspaces()` and `ask({ workspace, question })`, per-binding Runtime Session IDs, and restart recovery;
 - Runtime loads Qujing consultation prompt, keeps per-binding Runtime Session ID, and preserves backend state where supported;
-- Node and Agent-facing services restart and recover new connections; no accepted ask is retried;
+- Qujing daemon restarts and recovers new connections; no accepted ask is retried;
 - empty and manual PeerDirectory implementations exist, and no network discovery exists;
 - Windows artifacts and release notes remain Preview.

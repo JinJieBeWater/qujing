@@ -1,5 +1,9 @@
 import { expect, test } from "bun:test";
 import { Deferred, Duration, Effect, Exit, Fiber } from "effect";
+import { chmod, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { startConnectorEffect, type TransportProcess } from "../src/transport/process";
 
 const sleep = (milliseconds: number) =>
   new Promise<void>((resolve) => setTimeout(resolve, milliseconds));
@@ -21,7 +25,7 @@ function workspaceResult(name = "Node") {
   return { structuredContent: { node: { id: "node", name }, workspaces: [] } };
 }
 
-function fixture(callTool: UpstreamAgent["callTool"]) {
+function fixture(callTool: UpstreamAgent["callTool"], terminate?: () => Promise<void>) {
   let starts = 0;
   const events: string[] = [];
   const runtime = new PeerRuntime({
@@ -39,6 +43,7 @@ function fixture(callTool: UpstreamAgent["callTool"]) {
       transport: {
         terminateSession: async () => {
           events.push("terminate");
+          await terminate?.();
         },
       } satisfies UpstreamTransport,
       agent: {
@@ -351,3 +356,96 @@ test("runs session close as scoped finalizer", () =>
       expect(events).toEqual(["terminate", "agent-close", "connector-close"]);
     }),
   ));
+
+test("closes client and Connector even when MCP termination fails", async () => {
+  const { runtime, events } = fixture(
+    async () => workspaceResult(),
+    async () => {
+      throw new Error("remote is offline");
+    },
+  );
+  await Effect.runPromise(runtime.listWorkspacesEffect());
+  await Effect.runPromise(runtime.closeEffect());
+  expect(events).toEqual(["terminate", "agent-close", "connector-close"]);
+});
+
+test.each(["termination", "client close"])(
+  "closes a real Connector when upstream %s never settles",
+  async (stage) => {
+    const root = await mkdtemp(join(tmpdir(), "qujing-peer-close-"));
+    const binary = join(root, "connector");
+    const pidPath = join(root, "pid");
+    let releaseTerminate!: () => void;
+    const terminate = new Promise<void>((resolve) => {
+      releaseTerminate = resolve;
+    });
+    let connector: TransportProcess | undefined;
+    let clientClosed = false;
+    let closing: Promise<void> | undefined;
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const runtime = new PeerRuntime({
+      peer,
+      startConnectorEffect: (options, signal) =>
+        startConnectorEffect(options, binary, signal).pipe(
+          Effect.tap((started) =>
+            Effect.sync(() => {
+              connector = started;
+            }),
+          ),
+        ),
+      createUpstream: () => ({
+        transport: {
+          terminateSession: async () => {
+            if (stage === "termination") await terminate;
+          },
+        },
+        agent: {
+          connect: async () => {},
+          callTool: async () => workspaceResult(),
+          close: async () => {
+            clientClosed = true;
+            if (stage === "client close") await terminate;
+          },
+        },
+      }),
+    });
+    try {
+      await writeFile(
+        binary,
+        `#!${process.execPath}
+const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ready") });
+await Bun.write(${JSON.stringify(pidPath)}, String(process.pid));
+console.log(JSON.stringify({ ready: true, localAddress: "127.0.0.1:" + server.port }));
+`,
+      );
+      await chmod(binary, 0o700);
+      await Effect.runPromise(runtime.listWorkspacesEffect());
+      const pid = Number(await Bun.file(pidPath).text());
+      const url = `http://${connector!.ready.localAddress}`;
+      expect((await fetch(url)).status).toBe(200);
+      closing = Effect.runPromise(
+        Effect.scoped(
+          Effect.acquireRelease(Effect.succeed(runtime), (resource) =>
+            resource.closeEffect().pipe(Effect.orDie),
+          ),
+        ).pipe(Effect.asVoid),
+      );
+      await Promise.race([
+        closing,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Peer cleanup exceeded deadline")), 2_000);
+        }),
+      ]);
+      expect(clientClosed).toBe(true);
+      expect(() => process.kill(pid, 0)).toThrow();
+      await expect(fetch(url)).rejects.toBeDefined();
+    } finally {
+      clearTimeout(timer);
+      releaseTerminate();
+      await closing;
+      if (connector) await Effect.runPromise(connector.closeEffect());
+      await Effect.runPromise(runtime.closeEffect());
+      await rm(root, { recursive: true, force: true });
+    }
+  },
+);

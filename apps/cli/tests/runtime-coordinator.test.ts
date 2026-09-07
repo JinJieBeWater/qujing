@@ -9,6 +9,13 @@ import { RuntimeCoordinator } from "../src/runtime/coordinator";
 import type { RuntimeNodeSession } from "../src/runtime/session";
 import { RuntimeSessionStore, type RuntimeSession } from "../src/runtime/sessions";
 import { makeRuntimePool } from "./helpers/runtime-pool";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { AgentApplication } from "../src/agent-application";
+import { createAgentMcp } from "../src/agent-mcp";
+import { createMcpNode } from "../src/mcp";
+import { PeerRuntime } from "../src/peer-runtime";
+import { createQujing } from "../src/qujing";
 
 const roots: string[] = [];
 afterEach(async () => {
@@ -68,10 +75,100 @@ async function fixture(
     coordinator,
     desired,
     agent,
+    bearer: added.bearer,
   };
 }
 
 describe("RuntimeCoordinator", () => {
+  test("preserves admission errors across both MCP hops without starting Runtime", async () => {
+    let starts = 0;
+    const { config, coordinator, bearer } = await fixture(() => {
+      starts++;
+      return Effect.succeed(fakeSession());
+    });
+    const node = createMcpNode({
+      app: createQujing({ config, coordinator }),
+      authenticateEffect: (token) => config.authenticateEffect(token),
+      allowedHosts: ["127.0.0.1"],
+      allowedOrigins: [],
+    });
+    const remote = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: node.fetch });
+    const now = new Date().toISOString();
+    const app = new AgentApplication({
+      config: {
+        readEffect: () =>
+          Effect.succeed({
+            version: 1,
+            server: { host: "127.0.0.1", port: 43111 },
+            localBearerHash: "a".repeat(64),
+            peers: [
+              {
+                id: "peer",
+                expectedNodeId: "node",
+                remoteAgentId: "agent",
+                serverAddress: "test",
+                remotePort: remote.port!,
+                keyPath: "/unused",
+                remoteBearer: bearer,
+                createdAt: now,
+                updatedAt: now,
+              },
+            ],
+          }),
+      },
+      createRuntime: (peer) =>
+        new PeerRuntime({
+          peer,
+          startConnectorEffect: () =>
+            Effect.succeed({
+              ready: { ready: true, localAddress: `127.0.0.1:${remote.port}` },
+              exitedEffect: Effect.never,
+              closeEffect: () => Effect.void,
+            }),
+        }),
+    });
+    const mcp = createAgentMcp({
+      app,
+      config: {
+        authenticateLocalEffect: () => Effect.succeed({ id: "local", credentialVersion: "v1" }),
+      },
+      allowedHosts: ["127.0.0.1"],
+      allowedOrigins: [],
+    });
+    const local = Bun.serve({ port: 0, hostname: "127.0.0.1", fetch: mcp.fetch });
+    const transport = new StreamableHTTPClientTransport(
+      new URL(`http://127.0.0.1:${local.port}/mcp`),
+      {
+        requestInit: { headers: { Authorization: "Bearer local" } },
+      },
+    );
+    const client = new Client({ name: "test", version: "1" });
+    try {
+      await client.connect(transport as Parameters<Client["connect"]>[0]);
+      for (const [question, code] of [
+        ["hello", "WORKSPACE_NOT_FOUND"],
+        ["", "INVALID_QUESTION"],
+      ]) {
+        const result = await client.callTool({
+          name: "ask",
+          arguments: { peer: "peer", workspace: "missing", question },
+        });
+        expect(result.isError).toBe(true);
+        expect(result.content).toEqual([{ type: "text", text: `${code}: Remote request failed` }]);
+      }
+      expect(starts).toBe(0);
+    } finally {
+      await transport.terminateSession();
+      await client.close();
+      await Effect.runPromise(mcp.closeEffect);
+      await Effect.runPromise(app.closeEffect());
+      local.stop(true);
+      await Effect.runPromise(node.closeEffect);
+      remote.stop(true);
+      await Effect.runPromise(coordinator.closeEffect());
+    }
+  });
+
   test("keeps one durable Runtime Session ID for a Peer and Workspace", async () => {
     const { coordinator, sessions, agent } = await fixture();
     const signal = new AbortController().signal;

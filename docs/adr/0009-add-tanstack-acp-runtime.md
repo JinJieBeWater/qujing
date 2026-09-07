@@ -13,7 +13,7 @@ Pi uses `runtime set-pi --model <provider/model>` and sends Pi RPC `set_model` a
 }
 ```
 
-`qj runtime set-pi` writes built-in Pi RPC config. `qj runtime set-acp` writes custom ACP config. 未配置 Runtime 时，`doctor node` 与真实 `ask` 失败并提示先配置 Runtime。
+`qj runtime set-pi` writes built-in Pi RPC config. `qj runtime set-acp` writes custom ACP config. 未配置 Runtime 时，`qj doctor` 与真实 `ask` 失败并提示先配置 Runtime。
 
 TanStack Runtime 使用：
 

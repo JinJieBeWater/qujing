@@ -132,7 +132,7 @@ export class JsonStore<T> {
           names
             .filter((name) => name.endsWith(".json"))
             .map((name) => this.getEffect(decodeURIComponent(name.slice(0, -5)))),
-          { concurrency: "unbounded" },
+          { concurrency: 16 },
         ),
       ),
       Effect.map((values) => values.filter((value): value is T => value !== null)),

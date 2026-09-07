@@ -85,13 +85,18 @@ export class RuntimeCoordinator {
           Effect.gen({ self: this }, function* () {
             const peer = input.peer;
             const state = yield* Ref.get(this.state);
-            if (state.stopped) throw new QujingError("RUNTIME_UNAVAILABLE", "Runtime is stopped");
+            if (state.stopped)
+              return yield* Effect.fail(
+                new QujingError("RUNTIME_UNAVAILABLE", "Runtime is stopped"),
+              );
             if (
               state.blockAll ||
               state.blockedPeers.has(peer.id) ||
               state.blockedWorkspaces.has(input.workspaceId)
             ) {
-              throw new QujingError("BUSY", "Runtime scope is being reconciled");
+              return yield* Effect.fail(
+                new QujingError("BUSY", "Runtime scope is being reconciled"),
+              );
             }
             input.signal.throwIfAborted();
             const effective = yield* this.options.config.readEffectiveEffect();
@@ -101,7 +106,7 @@ export class RuntimeCoordinator {
                 (agent) => agent.id === peer.id && agent.bearerHash === peer.credentialVersion,
               )
             ) {
-              throw new QujingError("UNAUTHORIZED", "Agent is not authorized");
+              return yield* Effect.fail(new QujingError("UNAUTHORIZED", "Agent is not authorized"));
             }
             yield* Effect.try({
               try: () => decodeQuestion(input.question),
@@ -115,14 +120,15 @@ export class RuntimeCoordinator {
             });
             const workspace = effective.workspaces.find((entry) => entry.id === input.workspaceId);
             if (!workspace)
-              throw new QujingError(
-                "WORKSPACE_NOT_FOUND",
-                `Workspace not found: ${input.workspaceId}`,
+              return yield* Effect.fail(
+                new QujingError("WORKSPACE_NOT_FOUND", `Workspace not found: ${input.workspaceId}`),
               );
             if (!(yield* this.options.config.isWorkspaceAvailableEffect(workspace.root))) {
-              throw new QujingError(
-                "WORKSPACE_UNAVAILABLE",
-                `Workspace unavailable: ${input.workspaceId}`,
+              return yield* Effect.fail(
+                new QujingError(
+                  "WORKSPACE_UNAVAILABLE",
+                  `Workspace unavailable: ${input.workspaceId}`,
+                ),
               );
             }
             input.signal.throwIfAborted();

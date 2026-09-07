@@ -98,10 +98,10 @@ export class RuntimePool {
       while (true) {
         const entry = yield* this.getEntryEffect(input.workspace, input.session);
         const reserved = yield* this.gate.withPermit(
-          Effect.sync(() => {
+          Effect.gen(this, function* () {
             if (this.entries.get(input.session.id) !== entry) return false;
             if (entry.waiting >= (this.options.queueCapacity ?? 20))
-              throw new QujingError("BUSY", "Runtime Session queue is full");
+              return yield* Effect.fail(new QujingError("BUSY", "Runtime Session queue is full"));
             entry.waiting++;
             return true;
           }),

@@ -36,12 +36,20 @@ const targets = {
 const requested = process.argv.slice(2);
 const selected =
   requested.length === 0 || requested.includes("all") ? Object.keys(targets) : requested;
+for (const name of selected) {
+  if (!(name in targets)) throw new Error(`Unknown release target: ${name}`);
+}
+const required = ["bun", "go"];
+if (selected.some((name) => name !== "windows-x64")) required.push("tar");
+if (selected.includes("windows-x64")) required.push("zip");
+const missing = required.filter((name) => !Bun.which(name));
+if (missing.length)
+  throw new Error(`Missing release tools: ${missing.join(", ")}. Install them and retry.`);
 await mkdir(destination, { recursive: true });
 const tags = (await readFile(join(nativeRoot, "transport", "build-tags.txt"), "utf8")).trim();
 const archives: string[] = [];
 
 for (const name of selected) {
-  if (!(name in targets)) throw new Error(`Unknown release target: ${name}`);
   const target = targets[name as keyof typeof targets];
   const directory = join(destination, `qujing-${packageJson.version}-${name}`);
   await rm(directory, { recursive: true, force: true });

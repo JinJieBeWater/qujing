@@ -6,15 +6,14 @@ import { AgentConfigStore, type AgentConfig } from "./agent-config";
 import {
   doctorCheck,
   doctorMessage,
+  portCheckEffect,
   promiseEffect,
   transportCheckEffect,
   type DoctorCheck,
   type DoctorReport,
 } from "./doctor-shared";
-import { checkPortEffect } from "./doctor";
 import { PeerRuntime } from "./peer-runtime";
 import { assertPrivateTreeEffect, isPrivatePathEffect } from "./private-files";
-import { processLockActiveEffect } from "./process-lock";
 import { startConnectorEffect } from "./transport/process";
 
 interface AgentDoctorPaths {
@@ -55,7 +54,12 @@ export function runAgentDoctorEffect(
     const [peerKeys, port, peers] = yield* Effect.all(
       [
         peerKeyChecksEffect(config),
-        portCheckEffect(paths.agentStateRoot, config, dependencies.checkPort),
+        portCheckEffect(
+          join(paths.agentStateRoot, "agent.lock"),
+          "Agent",
+          config.server,
+          dependencies.checkPort,
+        ),
         peersCheckEffect(store, config, paths.transportBinary, dependencies.inspectPeers),
       ],
       { concurrency: "unbounded" },
@@ -123,37 +127,6 @@ function peerKeyChecksEffect(config: AgentConfig) {
       ),
     ),
     { concurrency: "unbounded" },
-  );
-}
-
-function portCheckEffect(
-  stateRoot: string,
-  config: AgentConfig,
-  checkPortOverride?: AgentDoctorDependencies["checkPort"],
-) {
-  return processLockActiveEffect(join(stateRoot, "agent.lock")).pipe(
-    Effect.flatMap((running) =>
-      (running
-        ? Effect.succeed<boolean>(true)
-        : checkPortOverride
-          ? checkPortOverride(config.server.host, config.server.port)
-          : checkPortEffect(config.server.host, config.server.port)
-      ).pipe(Effect.map((available) => ({ available, running }))),
-    ),
-    Effect.map(({ available, running }) =>
-      doctorCheck(
-        "port",
-        available ? "ok" : "error",
-        running
-          ? "Agent is running"
-          : available
-            ? "Agent port is available"
-            : "Agent port is already in use",
-      ),
-    ),
-    Effect.catchEager(() =>
-      Effect.succeed(doctorCheck("port", "error", "Agent port is already in use")),
-    ),
   );
 }
 

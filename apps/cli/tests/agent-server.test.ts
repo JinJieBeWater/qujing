@@ -211,7 +211,6 @@ test("retires active Peer before CLI credential update commits", async () => {
       readStdinEffect: () => Effect.succeed("new-bearer"),
       verifyPeerEffect: () => Effect.void,
       validateTailcatKeyEffect: () => Effect.void,
-      agentDoctorEffect: () => Effect.succeed({ ok: true, checks: [] }),
       nodeReloadTimeoutMs: 2_000,
     }),
   );

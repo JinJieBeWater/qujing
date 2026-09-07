@@ -10,6 +10,7 @@ import (
 	"runtime"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/tailscale/tailcat"
@@ -142,6 +143,28 @@ func TestBootstrapRetriesBeforeReadingLocalRequest(t *testing.T) {
 	}
 }
 
+func TestBootstrapRetriesStalledDialWithinTotalBudget(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		defer cancel()
+		left, right := net.Pipe()
+		defer left.Close()
+		defer right.Close()
+		calls := 0
+		conn, err := bootstrap(ctx, func(context.Context) error { return nil }, func(attempt context.Context) (net.Conn, error) {
+			calls++
+			if calls == 1 {
+				<-attempt.Done()
+				return nil, attempt.Err()
+			}
+			return left, nil
+		})
+		if err != nil || conn != left || calls != 2 {
+			t.Fatalf("calls=%d conn=%v error=%v; stalled first dial consumed retry budget", calls, conn, err)
+		}
+	})
+}
+
 func TestPeerManagerSharesConcurrentBridgesAndResetsAfterIdle(t *testing.T) {
 	manager := &peerManager{server: "tc-invalid", privateKey: tailcat.NewPrivateKey().Private, idleDelay: 20 * time.Millisecond}
 	defer manager.close()
@@ -161,7 +184,10 @@ func TestPeerManagerSharesConcurrentBridgesAndResetsAfterIdle(t *testing.T) {
 	}
 	releaseThird()
 	time.Sleep(50 * time.Millisecond)
-	if manager.peer != nil {
+	manager.mu.Lock()
+	reset := manager.peer == nil
+	manager.mu.Unlock()
+	if !reset {
 		t.Fatal("peer session was not reset after the idle grace period")
 	}
 	fourth, releaseFourth := manager.acquire()

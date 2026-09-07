@@ -2,7 +2,7 @@
 
 **Agent**: External MCP consumer. It connects to one local Qujing MCP endpoint and is not a Peer in the Qujing mesh.
 
-**Node**: One Qujing identity controlled by one person. A Node can publish Workspaces, authenticate paired Peers, run a local Runtime, and ask other Peers. Each installation has one Node identity; implementation roles such as local MCP service, private Node, and transport Connector are process boundaries, not separate product identities.
+**Node**: One Qujing identity controlled by one person. A Node can publish Workspaces, authenticate paired Peers, run a local Runtime, and ask other Peers. Each installation has one Node identity; local MCP, Peer-facing MCP, Runtime, and Connector are process resources, not separate product identities.
 
 **Peer**: Another Qujing Node visible to the local Node as a candidate. Visibility is discovery only; `ask` still requires an authenticated peer link and explicit Workspace selection.
 

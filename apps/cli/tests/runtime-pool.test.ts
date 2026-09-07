@@ -288,6 +288,13 @@ describe("RuntimePool", () => {
     const controller = new AbortController();
     const cancelled = Effect.runPromise(runtime.answerEffect(input("two", controller.signal)));
     await sleep(0);
+    await expect(
+      Effect.runPromise(
+        runtime
+          .answerEffect(input("overflow"))
+          .pipe(Effect.catch((error) => Effect.succeed(error))),
+      ),
+    ).resolves.toMatchObject({ code: "BUSY" });
     controller.abort();
     await expect(cancelled).rejects.toMatchObject({ name: "AbortError" });
 

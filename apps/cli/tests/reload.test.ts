@@ -79,3 +79,45 @@ test("waits until running Agent acknowledges exact config", async () => {
     await Effect.runPromise(release);
   }
 });
+
+for (const role of ["node", "agent"] as const) {
+  test(`${role} reload preserves timeout, acknowledgement and config-check precedence`, async () => {
+    const root = await mkdtemp(join(tmpdir(), "qujing-reload-branches-"));
+    roots.push(root);
+    const stateRoot = join(root, "state");
+    const node = new ConfigStore({ configPath: join(root, "config.json"), stateRoot });
+    const agent = new AgentConfigStore({ configPath: join(root, "agent.json") });
+    await Effect.runPromise(node.initEffect({ node: { id: "node", name: "Node" } }));
+    await Effect.runPromise(agent.initEffect());
+    const expected = await Effect.runPromise(agent.readEffect());
+    const wait = (matches: boolean) =>
+      role === "node"
+        ? waitForNodeReloadEffect(node, stateRoot, () => matches, 0)
+        : waitForAgentReloadEffect(
+            agent,
+            stateRoot,
+            matches ? expected : { ...expected, localBearerHash: "changed" },
+            0,
+          );
+    const release = await Effect.runPromise(
+      acquireProcessLockEffect(join(stateRoot, `${role}.lock`)),
+    );
+    try {
+      await expect(Effect.runPromise(wait(true))).rejects.toThrow("Timed out waiting");
+      await Effect.runPromise(
+        role === "node"
+          ? acknowledgeNodeReloadEffect(
+              stateRoot,
+              await Effect.runPromise(node.readEffectiveEffect()),
+            )
+          : acknowledgeAgentReloadEffect(stateRoot, expected),
+      );
+      expect(await Effect.runPromise(wait(true))).toBe(true);
+      await expect(Effect.runPromise(wait(false))).rejects.toThrow("Configuration changed");
+    } finally {
+      await Effect.runPromise(release);
+    }
+    await rm(join(stateRoot, `${role}-reload.json`));
+    expect(await Effect.runPromise(wait(true))).toBe(false);
+  });
+}

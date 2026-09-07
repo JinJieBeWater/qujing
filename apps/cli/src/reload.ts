@@ -22,29 +22,18 @@ export function waitForNodeReloadEffect(
   predicate: (config: Config) => boolean,
   timeoutMs = 45_000,
 ): Effect.Effect<boolean, unknown> {
-  const deadline = Date.now() + timeoutMs;
-  return Effect.gen(function* () {
-    for (;;) {
+  return waitForReloadEffect(
+    Effect.gen(function* () {
       const config = yield* store.readEffectiveEffect();
       if (!predicate(config))
         return yield* Effect.fail(new Error("Configuration changed before Node reload completed"));
-      const state = yield* Effect.tryPromise({
-        try: () => readReloadState(stateRoot),
-        catch: (error) => error,
-      });
-      if (state?.configFingerprint === configFingerprint(config)) return true;
-      if (!(yield* processLockActiveEffect(join(stateRoot, "node.lock")))) return false;
-      if (Date.now() >= deadline)
-        return yield* Effect.fail(
-          new Error("Timed out waiting for Node cancellation and transport reload"),
-        );
-      yield* sleep(50);
-    }
-  });
-}
-
-async function readReloadState(stateRoot: string): Promise<ReloadStateData | undefined> {
-  return readReloadStateFile(join(stateRoot, "node-reload.json"));
+      return configFingerprint(config);
+    }),
+    stateRoot,
+    "node",
+    timeoutMs,
+    "Timed out waiting for Node cancellation and transport reload",
+  );
 }
 
 export function configFingerprint(config: unknown): string {
@@ -66,22 +55,38 @@ export function waitForAgentReloadEffect(
   expected: import("./agent-config").AgentConfig,
   timeoutMs = 45_000,
 ): Effect.Effect<boolean, unknown> {
-  const deadline = Date.now() + timeoutMs;
-  return Effect.gen(function* () {
-    for (;;) {
+  return waitForReloadEffect(
+    Effect.gen(function* () {
       const config = yield* store.readEffect();
       if (configFingerprint(config) !== configFingerprint(expected))
         return yield* Effect.fail(new Error("Configuration changed before Agent reload completed"));
+      return configFingerprint(config);
+    }),
+    stateRoot,
+    "agent",
+    timeoutMs,
+    "Timed out waiting for Agent Peer and credential reload",
+  );
+}
+
+function waitForReloadEffect(
+  fingerprintEffect: Effect.Effect<string, unknown>,
+  stateRoot: string,
+  role: "node" | "agent",
+  timeoutMs: number,
+  timeoutMessage: string,
+): Effect.Effect<boolean, unknown> {
+  const deadline = Date.now() + timeoutMs;
+  return Effect.gen(function* () {
+    for (;;) {
+      const fingerprint = yield* fingerprintEffect;
       const state = yield* Effect.tryPromise({
-        try: () => readReloadStateFile(join(stateRoot, "agent-reload.json")),
+        try: () => readReloadStateFile(join(stateRoot, `${role}-reload.json`)),
         catch: (error) => error,
       });
-      if (state?.configFingerprint === configFingerprint(config)) return true;
-      if (!(yield* processLockActiveEffect(join(stateRoot, "agent.lock")))) return false;
-      if (Date.now() >= deadline)
-        return yield* Effect.fail(
-          new Error("Timed out waiting for Agent Peer and credential reload"),
-        );
+      if (state?.configFingerprint === fingerprint) return true;
+      if (!(yield* processLockActiveEffect(join(stateRoot, `${role}.lock`)))) return false;
+      if (Date.now() >= deadline) return yield* Effect.fail(new Error(timeoutMessage));
       yield* sleep(50);
     }
   });

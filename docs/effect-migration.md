@@ -28,7 +28,7 @@ flowchart TD
 
 Promise 只保留在 Bun fetch、Node fs/child_process、上游 MCP SDK、Effect HttpRouter web handler 和 CLI stdin 等真实外部 IO 边缘。业务 API 不保留 Promise 兼容入口、fallback 或双轨；调用方直接运行 Effect。
 
-Node 与 Agent server 各持有一个根 `Scope`。关闭根 Scope 会停止 reload Fiber、关闭 MCP、停止 Runtime/Peer、释放 process lock 和 server。模块内部状态使用 `Ref`，互斥和容量使用 `Semaphore`，请求 settlement 使用 `Deferred`，后台工作使用 scoped `Fiber`。
+`qj serve` 持有一个根 `Scope`，内部启动 Node 与 Agent MCP surface。关闭根 Scope 会停止 reload Fiber、关闭 MCP、停止 Runtime/Peer、释放 process lock 和 server。模块内部状态使用 `Ref`，互斥和容量使用 `Semaphore`，请求 settlement 使用 `Deferred`，后台工作使用 scoped `Fiber`。
 
 ## 模块职责
 
