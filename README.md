@@ -31,6 +31,8 @@ One `qj serve` daemon hosts local MCP, Peer-facing MCP, Runtime, and Connector r
 
 ## Install
 
+Upgrading from v0.1.x requires a stopped-service configuration migration, not only a binary upgrade. Read the [v0.2.0 upgrade notes](docs/releases/v0.2.0.md) before replacing the installed version.
+
 macOS Apple Silicon or Linux x64:
 
 ```bash
@@ -51,7 +53,7 @@ qj --version
 The installer downloads and verifies the matching GitHub Release, then installs both executables to `~/.local/bin`. Set `QUJING_INSTALL_DIR` to choose another directory. Pin a release with:
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.sh | QUJING_VERSION=v0.1.2 sh
+curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.sh | QUJING_VERSION=v0.2.0 sh
 ```
 
 Windows x64 Preview:

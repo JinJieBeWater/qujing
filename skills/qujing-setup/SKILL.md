@@ -3,7 +3,7 @@ name: qujing-setup
 description: "Qujing deployment and operations. Use for installing, pairing, verifying, operating, upgrading, or recovering Node, Agent, private Peers, services, or MCP Agent access. Not product development."
 compatibility: "Qujing release bundle; macOS arm64 or Linux x64 supported, Windows x64 Preview; Pi CLI or an ACP-compatible CLI required for the selected Runtime."
 metadata:
-  version: 0.1.2
+  version: 0.2.0
   category: setup
   tags: [qujing, mcp, tailcat, pi]
 ---
