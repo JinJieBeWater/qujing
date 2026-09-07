@@ -57,6 +57,8 @@ Completion: old bearer fails; new bearer lists Peers through same Agent URL.
 
 ## Upgrade
 
+For v0.1.x gateway/client installations, stop before the generic upgrade steps below. The old binary uses `qj service remove gateway --yes` and `qj service remove client --yes`; remove only installed services. Back up private config/state and old service definitions first. Migrate `owner`/`clients`, client routing, tombstones, and Runtime binding fields before starting v0.2.0; its schemas do not auto-migrate old JSON. Preserve identities, keys, bearer hashes, binding IDs, and Pi archives. See the [v0.2.0 upgrade notes](https://github.com/JinJieBeWater/qujing/blob/v0.2.0/docs/releases/v0.2.0.md) for field mappings and rollback. Do not initialize over an existing legacy config.
+
 Record whether Qujing runs as foreground process or service. Stop foreground process or remove installed service before replacing binaries. On macOS/Linux, remove service before upgrade:
 
 ```bash

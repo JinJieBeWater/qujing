@@ -31,6 +31,8 @@ Agent 使用一个本机 bearer 认证。Agent 不是 Peer。Discovery 只表示
 
 ## 安装
 
+从 v0.1.x 升级需要停服迁移配置，不能只替换二进制。升级前先读 [v0.2.0 升级说明](docs/releases/v0.2.0.md)。
+
 macOS Apple Silicon 或 Linux x64：
 
 ```bash
@@ -51,7 +53,7 @@ qj --version
 安装脚本会下载并校验匹配平台的 GitHub Release，然后把两个可执行文件安装到 `~/.local/bin`。可用 `QUJING_INSTALL_DIR` 更改目录。固定版本：
 
 ```bash
-curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.sh | QUJING_VERSION=v0.1.2 sh
+curl -fsSL https://raw.githubusercontent.com/JinJieBeWater/qujing/main/install.sh | QUJING_VERSION=v0.2.0 sh
 ```
 
 Windows x64 Preview：
