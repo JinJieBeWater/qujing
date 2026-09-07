@@ -1,6 +1,5 @@
 import { constants } from "node:fs";
 import { access } from "node:fs/promises";
-import { createServer } from "node:net";
 import { dirname, join } from "node:path";
 import { Effect } from "effect";
 import { ConfigStore, type Config } from "./config";
@@ -9,10 +8,10 @@ import {
   assertPrivateTreeEffect,
   isPrivatePathEffect,
 } from "./private-files";
-import { processLockActiveEffect } from "./process-lock";
 import {
   doctorCheck,
   doctorMessage,
+  portCheckEffect,
   promiseEffect,
   transportCheckEffect,
   type DoctorReport,
@@ -20,6 +19,7 @@ import {
 import { readTailcatStateEffect } from "./transport/supervisor";
 
 export type { DoctorCheck, DoctorReport } from "./doctor-shared";
+export { checkPortEffect } from "./doctor-shared";
 
 interface DoctorPaths {
   configPath: string;
@@ -52,7 +52,12 @@ export function runDoctorEffect(paths: DoctorPaths, dependencies: DoctorDependen
           [
             runtimeCheckEffect(configResult.config, dependencies),
             workspaceChecksEffect(store, configResult.config),
-            portCheckEffect(paths.stateRoot, configResult.config, dependencies.checkPort),
+            portCheckEffect(
+              join(paths.stateRoot, "node.lock"),
+              "Node",
+              configResult.config.server,
+              dependencies.checkPort,
+            ),
           ],
           { concurrency: "unbounded" },
         )
@@ -132,44 +137,6 @@ function workspaceChecksEffect(store: ConfigStore, config: Config) {
       ),
     ),
   );
-}
-
-function portCheckEffect(
-  stateRoot: string,
-  config: Config,
-  checkPortOverride?: DoctorDependencies["checkPort"],
-) {
-  return processLockActiveEffect(join(stateRoot, "node.lock")).pipe(
-    Effect.flatMap((running) =>
-      (running
-        ? Effect.succeed<boolean>(true)
-        : portAvailableEffect(config.server.host, config.server.port, checkPortOverride)
-      ).pipe(
-        Effect.map((available) =>
-          doctorCheck(
-            "port",
-            available ? "ok" : "error",
-            running
-              ? "Node is running"
-              : available
-                ? "Node port is available"
-                : "Node port is already in use",
-          ),
-        ),
-      ),
-    ),
-    Effect.catchEager(() =>
-      Effect.succeed(doctorCheck("port", "error", "Node port is already in use")),
-    ),
-  );
-}
-
-function portAvailableEffect(
-  host: string,
-  port: number,
-  checkPortOverride?: DoctorDependencies["checkPort"],
-) {
-  return checkPortOverride ? checkPortOverride(host, port) : checkPortEffect(host, port);
 }
 
 function runtimeCheckEffect(config: Config, dependencies: DoctorDependencies) {
@@ -318,29 +285,5 @@ function tailcatCheckEffect(stateRoot: string) {
         ),
       ),
     ),
-  );
-}
-
-export function checkPortEffect(host: string, port: number) {
-  return Effect.scoped(
-    Effect.gen(function* () {
-      const server = yield* Effect.acquireRelease(
-        Effect.sync(() => createServer()),
-        (resource) =>
-          Effect.promise(
-            () =>
-              new Promise<void>((resolve) =>
-                resource.listening ? resource.close(() => resolve()) : resolve(),
-              ),
-          ),
-      );
-      return yield* promiseEffect(
-        () =>
-          new Promise<boolean>((resolve) => {
-            server.once("error", () => resolve(false));
-            server.listen(port, host, () => resolve(true));
-          }),
-      );
-    }),
   );
 }

@@ -120,4 +120,60 @@ describe("Tailcat transport command boundary", () => {
     }
     expect(alive).toBe(false);
   });
+
+  test("forces and waits for Connector exit when SIGTERM is ignored", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qujing-transport-force-"));
+    roots.push(root);
+    const binary = join(root, "connector");
+    const pidPath = join(root, "pid");
+    await writeFile(
+      binary,
+      `#!${process.execPath}
+process.on("SIGTERM", () => {});
+const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response("ready") });
+await Bun.write(${JSON.stringify(pidPath)}, String(process.pid));
+console.log(JSON.stringify({ ready: true, localAddress: "127.0.0.1:" + server.port }));
+`,
+    );
+    await chmod(binary, 0o700);
+    const connector = await Effect.runPromise(
+      startConnectorEffect(
+        {
+          serverAddress: "test",
+          remotePort: 43110,
+          keyPath: "/unused",
+          localHost: "127.0.0.1",
+          localPort: 0,
+        },
+        binary,
+      ),
+    );
+    const pid = Number(await Bun.file(pidPath).text());
+    const closing = Effect.runPromise(
+      Effect.scoped(
+        Effect.acquireRelease(Effect.succeed(connector), (resource) =>
+          resource.closeEffect().pipe(Effect.orDie),
+        ),
+      ),
+    );
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    try {
+      await Promise.race([
+        closing,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => reject(new Error("Connector did not exit")), 7_000);
+        }),
+      ]);
+      expect(() => process.kill(pid, 0)).toThrow();
+      await expect(fetch(`http://${connector.ready.localAddress}`)).rejects.toBeDefined();
+    } finally {
+      clearTimeout(timer);
+      try {
+        process.kill(pid, "SIGKILL");
+      } catch (error) {
+        expect((error as NodeJS.ErrnoException).code).toBe("ESRCH");
+      }
+      await closing;
+    }
+  }, 10_000);
 });

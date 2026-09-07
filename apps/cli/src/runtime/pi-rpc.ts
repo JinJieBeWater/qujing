@@ -83,7 +83,7 @@ export const startManagedPiRpcSessionEffect = (
       Context.make(Scope.Scope, scope),
     ).pipe(
       Effect.map((session) => new ManagedPiRpcSession(session, scope)),
-      Effect.tapError(() => Scope.close(scope, Exit.void)),
+      Effect.onExit((exit) => (Exit.isFailure(exit) ? Scope.close(scope, exit) : Effect.void)),
     );
   });
 

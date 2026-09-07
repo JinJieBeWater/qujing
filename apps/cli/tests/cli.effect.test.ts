@@ -18,7 +18,6 @@ it.live("runs CLI through Effect entrypoint", () =>
       readStdinEffect: () => Effect.succeed(""),
       validateTailcatKeyEffect: () => Effect.void,
       verifyPeerEffect: () => Effect.void,
-      agentDoctorEffect: () => Effect.succeed({ ok: true, checks: [] }),
     };
     expect(yield* runCliEffect(["--help"], io)).toBe(0);
     expect(output).toContain("Usage: qj");
@@ -40,7 +39,6 @@ it.live("prints version", () =>
       readStdinEffect: () => Effect.succeed(""),
       validateTailcatKeyEffect: () => Effect.void,
       verifyPeerEffect: () => Effect.void,
-      agentDoctorEffect: () => Effect.succeed({ ok: true, checks: [] }),
     };
     expect(yield* runCliEffect(["--version"], io)).toBe(0);
     expect(output).toBe(`${packageJson.version}\n`);

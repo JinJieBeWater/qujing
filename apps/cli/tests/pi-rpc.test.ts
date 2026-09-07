@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { Effect } from "effect";
+import { Effect, Fiber } from "effect";
 import { chmod, mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -151,14 +151,58 @@ while IFS= read -r line; do :; done
     expect(() => process.kill(pid, 0)).toThrow();
   });
 
-  test("waits for agent_settled after abort", async () => {
-    const root = await mkdtemp(join(tmpdir(), "qujing-pi-settle-"));
+  test("kills Pi when startup is interrupted", async () => {
+    const root = await mkdtemp(join(tmpdir(), "qujing-pi-interrupt-"));
     roots.push(root);
     const binary = join(root, "pi");
-    const promptMarker = join(root, "prompted");
+    const pidFile = join(root, "pid");
     await writeFile(
       binary,
-      `#!/usr/bin/env bun
+      `#!/bin/sh
+printf '%s' $$ > "${pidFile}"
+while IFS= read -r line; do :; done
+`,
+    );
+    await chmod(binary, 0o700);
+    const fiber = Effect.runFork(
+      startManagedPiRpcSessionEffect({
+        cwd: root,
+        sessionId: "00000000-0000-4000-8000-000000000129",
+        binary,
+      }),
+    );
+    let pid = 0;
+    try {
+      const deadline = Date.now() + 2_000;
+      while (!pid) {
+        if (Date.now() > deadline) throw new Error("Pi did not publish its PID");
+        pid = Number(await readFile(pidFile, "utf8").catch(() => ""));
+        if (!pid) await Bun.sleep(5);
+      }
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      expect(() => process.kill(pid, 0)).toThrow();
+    } finally {
+      await Effect.runPromise(Fiber.interrupt(fiber));
+      if (pid) {
+        try {
+          process.kill(pid, "SIGKILL");
+        } catch (error) {
+          expect((error as NodeJS.ErrnoException).code).toBe("ESRCH");
+        }
+      }
+    }
+  });
+
+  test.each(["response-first", "settled-first"])(
+    "reuses Runtime after abort (%s)",
+    async (order) => {
+      const root = await mkdtemp(join(tmpdir(), "qujing-pi-settle-"));
+      roots.push(root);
+      const binary = join(root, "pi");
+      const promptMarker = join(root, "prompted");
+      await writeFile(
+        binary,
+        `#!/usr/bin/env bun
 import { appendFile } from "node:fs/promises";
 const sessionId = process.argv[process.argv.indexOf("--session-id") + 1];
 let buffer = "";
@@ -173,48 +217,77 @@ for await (const chunk of Bun.stdin.stream()) {
     } else if (message.type === "prompt") {
       await appendFile(${JSON.stringify(promptMarker)}, "prompt\\n");
       console.log(JSON.stringify({ type: "response", id: message.id, success: true }));
+      if (message.message === "next") {
+        console.log(JSON.stringify({ type: "message_end", message: { role: "assistant", content: [{ type: "text", text: "next answer" }] } }));
+        console.log(JSON.stringify({ type: "agent_settled" }));
+      }
     } else if (message.type === "clear_queue") {
       console.log(JSON.stringify({ type: "response", id: message.id, success: true }));
     } else if (message.type === "abort") {
-      console.log(JSON.stringify({ type: "response", id: message.id, success: true }));
-      setTimeout(() => console.log(JSON.stringify({ type: "agent_settled" })), 100);
+      const respond = () => console.log(JSON.stringify({ type: "response", id: message.id, success: true }));
+      const settle = () => console.log(JSON.stringify({ type: "agent_settled" }));
+      if (${JSON.stringify(order)} === "response-first") {
+        respond();
+        setTimeout(settle, 100);
+      } else {
+        settle();
+        setTimeout(respond, 100);
+      }
     }
   }
 }
 `,
-    );
-    await chmod(binary, 0o700);
-    const sessionId = "00000000-0000-4000-8000-000000000125";
-    const runtime = new RuntimePool({
-      createSessionEffect: (_workspace, session) =>
-        startManagedPiRpcSessionEffect({ cwd: root, sessionId: session.id, binary }),
-      abortTimeoutMs: 1_000,
-      fatal: () => {},
-    });
-    const controller = new AbortController();
-    const pending = Effect.runPromise(
-      runtime.answerEffect({
-        workspace: { id: "docs", name: "Docs", summary: "Docs", root },
-        session: {
-          id: sessionId,
-          peerId: "agent",
-          workspaceId: "docs",
-          createdAt: new Date().toISOString(),
-          updatedAt: new Date().toISOString(),
-        },
-        question: "wait",
-        signal: controller.signal,
-      }),
-    );
-    while (!(await readFile(promptMarker, "utf8").catch(() => ""))) await Bun.sleep(1);
-    const started = performance.now();
+      );
+      await chmod(binary, 0o700);
+      const sessionId = "00000000-0000-4000-8000-000000000125";
+      const runtime = new RuntimePool({
+        createSessionEffect: (_workspace, session) =>
+          startManagedPiRpcSessionEffect({ cwd: root, sessionId: session.id, binary }),
+        abortTimeoutMs: 1_000,
+        fatal: () => {},
+      });
+      const controller = new AbortController();
+      const pending = Effect.runPromise(
+        runtime.answerEffect({
+          workspace: { id: "docs", name: "Docs", summary: "Docs", root },
+          session: {
+            id: sessionId,
+            peerId: "agent",
+            workspaceId: "docs",
+            createdAt: new Date().toISOString(),
+            updatedAt: new Date().toISOString(),
+          },
+          question: "wait",
+          signal: controller.signal,
+        }),
+      );
+      while (!(await readFile(promptMarker, "utf8").catch(() => ""))) await Bun.sleep(1);
+      const started = performance.now();
 
-    controller.abort(new DOMException("Aborted", "AbortError"));
+      controller.abort(new DOMException("Aborted", "AbortError"));
 
-    await expect(pending).rejects.toMatchObject({ name: "AbortError" });
-    expect(performance.now() - started).toBeGreaterThanOrEqual(75);
-    await Effect.runPromise(runtime.disposeEffect());
-  });
+      await expect(pending).rejects.toMatchObject({ name: "AbortError" });
+      expect(performance.now() - started).toBeGreaterThanOrEqual(75);
+      await expect(
+        Effect.runPromise(
+          runtime.answerEffect({
+            workspace: { id: "docs", name: "Docs", summary: "Docs", root },
+            session: {
+              id: sessionId,
+              peerId: "agent",
+              workspaceId: "docs",
+              createdAt: new Date().toISOString(),
+              updatedAt: new Date().toISOString(),
+            },
+            question: "next",
+            signal: new AbortController().signal,
+          }),
+        ),
+      ).resolves.toEqual({ answer: "next answer" });
+      expect((await readFile(promptMarker, "utf8")).trim().split("\n")).toHaveLength(2);
+      await Effect.runPromise(runtime.disposeEffect());
+    },
+  );
 
   test("rejects CRLF from Pi Runtime", async () => {
     const root = await mkdtemp(join(tmpdir(), "qujing-pi-crlf-"));

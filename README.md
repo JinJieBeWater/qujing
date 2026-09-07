@@ -27,7 +27,7 @@ Agent authenticates with one local bearer. Agent is not a Peer. Discovery is onl
 - **Peer** is another Qujing Node visible to local Node. Manual PeerDirectory can list candidates; empty directory lists none.
 - **Agent** connects only to local Node at `http://127.0.0.1:43111/mcp` by default and is not part of Peer mesh.
 
-Current process roles still split Node, Agent-facing MCP service, and Connector. They are implementation boundaries, not product identities.
+One `qj serve` daemon hosts local MCP, Peer-facing MCP, Runtime, and Connector resources.
 
 ## Install
 
@@ -79,10 +79,12 @@ For a version-pinned or offline release bundle, run `bunx --bun skills add ./ski
 
 Both installation methods keep `qj` and `qujing-transport` from the same release together. Node Runtime is either built-in Pi RPC or a configured TanStack AI ACP harness.
 
-### 1. Start Node
+Pi RPC requires a Pi CLI with `clear_queue` and `agent_settled` support; Pi 0.85.1 is verified. Pi 0.84.3 lacks `clear_queue` and cannot satisfy Qujing's cancellation contract. Keep the owner's Pi settings, authentication, extensions, and session archive when upgrading.
+
+### 1. Initialize Node
 
 ```bash
-qj init node --node-id jinjiebewater --node-name JinJieBeWater
+qj init --node-id jinjiebewater --node-name JinJieBeWater
 qj workspace add runtime-tooling --name "Runtime Tooling" --root ~/src/runtime --summary "Runtime SDK and extensions"
 ```
 
@@ -92,25 +94,7 @@ Configure Runtime before starting Node:
 qj runtime set-pi --model openai-codex/gpt-5.5
 ```
 
-In separate Node terminal, run and leave Node active:
-
-```bash
-qj serve node
-```
-
-### 2. Initialize Agent-facing service once
-
-```bash
-qj init agent
-```
-
-In separate local Node terminal, run and leave Agent-facing service active:
-
-```bash
-qj serve agent
-```
-
-`qj init agent` prints local bearer once. Configure Agent once:
+`qj init` prints local bearer once. Configure Agent once:
 
 - URL: `http://127.0.0.1:43111/mcp`
 - Header: `Authorization: Bearer <local-bearer>`
@@ -118,7 +102,13 @@ qj serve agent
 
 If local bearer was lost, run `qj token rotate` and replace Agent's stored bearer.
 
-### 3. Pair one Peer
+In separate terminal, run and leave Qujing active:
+
+```bash
+qj serve
+```
+
+### 2. Pair one Peer
 
 On local Node machine, create Peer Link key:
 
@@ -148,7 +138,7 @@ For agent-run installation, pairing, verification, credential rotation, upgrades
 
 ## Trust model
 
-- Node, Agent-facing MCP service, and ephemeral Connectors bind loopback only; Tailcat forwards only Node port.
+- Node MCP, Agent-facing MCP, and ephemeral Connectors bind loopback only; Tailcat forwards only Node port.
 - Agent local bearer and every Peer Link’s Tailcat key/remote bearer are distinct.
 - Local Node verifies expected Peer Node ID on every rebuilt upstream MCP session.
 - Node Runtime can run built-in Pi RPC with explicit `provider/model`, or any ACP-compatible CLI through `@tanstack/ai`, `@tanstack/ai-acp`, local process sandbox, TanStack persistence, and TanStack locks.
@@ -160,16 +150,16 @@ For agent-run installation, pairing, verification, credential rotation, upgrades
 ## Operations
 
 ```bash
-qj doctor node
-qj doctor agent
+qj doctor
 
-qj service install node --yes
-qj service install agent --yes
+qj service install --yes
 ```
 
-Process services use separate launchd/systemd units on macOS/Linux. macOS Background Items identify them as `qujing-node` or `qujing-agent`; terminal commands remain `qj`. Windows Preview is foreground-only. Run `qj serve node` or `qj serve agent` in foreground while diagnosing.
+Process service uses one launchd/systemd unit on macOS/Linux. macOS Background Items identify it as `qujing-daemon`; terminal command remains `qj`. Windows Preview is foreground-only. Run `qj serve` in foreground while diagnosing.
 
 ## Source checkout
+
+Release builds require Bun, Go, and `tar`; Windows archives also require `zip`. Missing tools fail before `dist` is changed. Transport E2E requires Bash, Python 3, and curl.
 
 ```bash
 bun run verify

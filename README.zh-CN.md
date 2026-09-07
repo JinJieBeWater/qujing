@@ -27,7 +27,7 @@ Agent 使用一个本机 bearer 认证。Agent 不是 Peer。Discovery 只表示
 - **Peer** 是本机 Node 可见的另一个 Qujing Node。Manual PeerDirectory 可列出候选；empty directory 不列出候选。
 - **Agent（调用方）**默认只连接本机 Node 的 `http://127.0.0.1:43111/mcp`，不属于 Peer mesh。
 
-当前 process role 仍拆成 Node、Agent-facing MCP service 和 Connector。它们是实现边界，不是产品 identity。
+一个 `qj serve` daemon 承载 local MCP、Peer-facing MCP、Runtime 和 Connector 资源。
 
 ## 安装
 
@@ -79,10 +79,12 @@ bunx --bun skills add "JinJieBeWater/qujing@v$(qj --version)" --skill qujing-set
 
 两种安装方式都会配套安装同一发布版本的 `qj` 与 `qujing-transport`。Node Runtime 可使用内置 Pi RPC，或配置好的 TanStack AI ACP harness。
 
-### 1. 启动 Node
+Pi RPC 需要 Pi CLI 支持 `clear_queue` 和 `agent_settled`；已验证 Pi 0.85.1。Pi 0.84.3 缺少 `clear_queue`，不满足 Qujing 的取消合同。升级时保留宿主 Pi 设置、认证、扩展和会话归档。
+
+### 1. 初始化 Node
 
 ```bash
-qj init node --node-id jinjiebewater --node-name JinJieBeWater
+qj init --node-id jinjiebewater --node-name JinJieBeWater
 qj workspace add runtime-tooling --name "Runtime Tooling" --root ~/src/runtime --summary "Runtime SDK and extensions"
 ```
 
@@ -92,25 +94,7 @@ qj workspace add runtime-tooling --name "Runtime Tooling" --root ~/src/runtime -
 qj runtime set-pi --model openai-codex/gpt-5.5
 ```
 
-在独立 Node 终端启动并保持 Node：
-
-```bash
-qj serve node
-```
-
-### 2. 只初始化一次 Agent-facing service
-
-```bash
-qj init agent
-```
-
-在独立本机 Node 终端启动并保持 Agent-facing service：
-
-```bash
-qj serve agent
-```
-
-`qj init agent` 只显示一次本机 bearer。Agent 只需配置一次：
+`qj init` 只显示一次本机 bearer。Agent 只需配置一次：
 
 - URL：`http://127.0.0.1:43111/mcp`
 - Header：`Authorization: Bearer <local-bearer>`
@@ -118,7 +102,13 @@ qj serve agent
 
 如果本机 bearer 丢失，运行 `qj token rotate`，然后替换 Agent 保存的 bearer。
 
-### 3. 配对一个 Peer
+在独立终端启动并保持 Qujing：
+
+```bash
+qj serve
+```
+
+### 2. 配对一个 Peer
 
 在本机 Node 机器生成 Peer Link key：
 
@@ -148,7 +138,7 @@ qj peer accept jinjiebewater --from ./alice-jinjiebewater.pairing.json && rm ./a
 
 ## 信任模型
 
-- Node、Agent-facing MCP service 和临时 Connectors 只绑定 loopback；Tailcat 只转发 Node port。
+- Node MCP、Agent-facing MCP 和临时 Connectors 只绑定 loopback；Tailcat 只转发 Node port。
 - Agent 本机 bearer 与每条 Peer Link 的 Tailcat key、remote bearer 均独立。
 - 本机 Node 每次重建 upstream MCP session 都验证 expected Peer Node ID。
 - Node Runtime 可用显式 `provider/model` 运行内置 Pi RPC，也可通过 `@tanstack/ai`、`@tanstack/ai-acp`、local process sandbox、TanStack persistence 和 TanStack locks 运行任意 ACP-compatible CLI。
@@ -160,16 +150,16 @@ qj peer accept jinjiebewater --from ./alice-jinjiebewater.pairing.json && rm ./a
 ## 运维
 
 ```bash
-qj doctor node
-qj doctor agent
+qj doctor
 
-qj service install node --yes
-qj service install agent --yes
+qj service install --yes
 ```
 
-macOS/Linux 上两个 process service 使用独立 launchd/systemd 服务。macOS 后台项目显示 `qujing-node` 或 `qujing-agent`，终端命令仍是 `qj`。Windows Preview 仅支持前台运行。排障时可运行 `qj serve node` 或 `qj serve agent`。
+macOS/Linux 上使用一个 launchd/systemd 服务。macOS 后台项目显示 `qujing-daemon`，终端命令仍是 `qj`。Windows Preview 仅支持前台运行。排障时可运行 `qj serve`。
 
 ## 源码仓库
+
+发布构建需要 Bun、Go 和 `tar`；Windows 归档还需要 `zip`。缺少工具时会在修改 `dist` 前失败。Transport E2E 需要 Bash、Python 3 和 curl。
 
 ```bash
 bun run verify

@@ -48,7 +48,6 @@ async function fixture() {
     nodeReloadTimeoutMs: 1_000,
     validateTailcatKeyEffect: () => Effect.void,
     verifyPeerEffect: () => Effect.void,
-    agentDoctorEffect: () => Effect.succeed({ ok: true, checks: [] }),
   };
   return {
     io,
@@ -62,9 +61,7 @@ async function fixture() {
 }
 
 async function initNode(io: CliIo) {
-  return Effect.runPromise(
-    runCliEffect(["init", "node", "--node-id", "node", "--node-name", "Node"], io),
-  );
+  return Effect.runPromise(runCliEffect(["init", "--node-id", "node", "--node-name", "Node"], io));
 }
 
 async function addPeerCredential(io: CliIo, args: string[], id: string) {
@@ -110,11 +107,22 @@ function pairing(overrides: Record<string, unknown> = {}) {
 }
 
 describe("task-first CLI", () => {
+  test("rejects invalid init port before creating either config", async () => {
+    const { io } = await fixture();
+    expect(
+      await Effect.runPromise(
+        runCliEffect(["init", "--node-id", "node", "--node-name", "Node", "--port", "0"], io),
+      ),
+    ).toBe(2);
+    expect(await Bun.file(io.configPath).exists()).toBe(false);
+    expect(await Bun.file(io.agentConfigPath).exists()).toBe(false);
+  });
+
   test("runs authoritative Effect entrypoint", async () => {
     const { io, output } = await fixture();
     expect(
       await Effect.runPromise(
-        runCliEffect(["init", "node", "--node-id", "node", "--node-name", "Node"], io),
+        runCliEffect(["init", "--node-id", "node", "--node-name", "Node"], io),
       ),
     ).toBe(0);
     expect(output().stdout).toContain("initialized Node:");
@@ -207,7 +215,11 @@ describe("task-first CLI", () => {
 
   test("initializes one Agent and manages redacted Peers", async () => {
     const { io, output, clear } = await fixture();
-    expect(await Effect.runPromise(runCliEffect(["init", "agent", "--port", "43222"], io))).toBe(0);
+    expect(
+      await Effect.runPromise(
+        runCliEffect(["init", "--node-id", "node", "--node-name", "Node", "--port", "43222"], io),
+      ),
+    ).toBe(0);
     expect(output().stdout).toContain("local-bearer:");
     expect(output().stdout).toContain("http://127.0.0.1:43222/mcp");
     const configText = await Bun.file(io.agentConfigPath).text();
@@ -237,7 +249,7 @@ describe("task-first CLI", () => {
 
   test("verifies rotated Peer credentials before atomic persistence", async () => {
     const { io } = await fixture();
-    await Effect.runPromise(runCliEffect(["init", "agent"], io));
+    await Effect.runPromise(runCliEffect(["init", "--node-id", "node", "--node-name", "Node"], io));
     const firstKey = join(io.agentStateRoot, "first.key");
     const secondKey = join(io.agentStateRoot, "second.key");
     await privateKey(firstKey);
@@ -333,7 +345,7 @@ describe("task-first CLI", () => {
     expect(output().stdout.trim()).toBe(`peer-invite: ${pairingPath}`);
     expect((await stat(pairingPath)).mode & 0o777).toBe(0o600);
 
-    await Effect.runPromise(runCliEffect(["init", "agent"], io));
+    await Effect.runPromise(runCliEffect(["init", "--node-id", "node", "--node-name", "Node"], io));
     const keyPath = join(io.agentStateRoot, "keys", "jason.json");
     await privateKey(keyPath);
     let verified: PeerConfig | undefined;
@@ -496,7 +508,7 @@ describe("task-first CLI", () => {
 
   test("does not persist an unverified Peer and rejects legacy direct-connect commands", async () => {
     const { io, output } = await fixture();
-    await Effect.runPromise(runCliEffect(["init", "agent"], io));
+    await Effect.runPromise(runCliEffect(["init", "--node-id", "node", "--node-name", "Node"], io));
     const keyPath = join(io.agentStateRoot, "rejected.key");
     await privateKey(keyPath);
     io.readStdinEffect = () =>

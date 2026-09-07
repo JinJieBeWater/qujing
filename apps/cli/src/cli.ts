@@ -55,7 +55,6 @@ export interface CliIo {
   nodeReloadTimeoutMs?: number;
   validateTailcatKeyEffect(key: string): Effect.Effect<void, unknown>;
   verifyPeerEffect(peer: PeerConfig): Effect.Effect<void, unknown>;
-  agentDoctorEffect(): Effect.Effect<DoctorReport, unknown>;
 }
 
 class UsageError extends Error {}
@@ -68,176 +67,254 @@ Options:
   -V, --version
 
 Commands:
-  init <node|agent>
+  init --node-id <id> --node-name <name>
   workspace <add|list|update|remove>
   peer <invite|accept|key-create|list|update|remove|rotate|revoke>
   runtime <set-pi|set-acp>
   token rotate
-  doctor <node|agent>
-  serve <node|agent>
-  service <install|remove> <node|agent>
+  doctor
+  serve
+  service <install|remove>
 
 Examples:
-  qj init node --node-id jinjiebewater --node-name JinJieBeWater
+  qj init --node-id jinjiebewater --node-name JinJieBeWater
   qj peer invite alice-peer --key - --out ./alice-peer.pairing.json
   qj peer accept jinjiebewater --from ./alice-peer.pairing.json
-  qj serve agent
+  qj serve
 `;
 
-const help: Record<string, string> = {
-  init: `Usage: qj init <node|agent>
+interface ParsedArgs {
+  positionals: string[];
+  values: Map<string, string>;
+  flags: Set<string>;
+}
+interface CommandSpec {
+  positionals: number;
+  values?: readonly string[];
+  flags?: readonly string[];
+}
+type CommandSurface = "daemon" | "node" | "agent";
+interface CommandDefinition {
+  help: string;
+  spec?: CommandSpec;
+  surface?: CommandSurface;
+}
+
+const commands: Record<string, CommandDefinition> = {
+  init: {
+    help: `Usage: qj init --node-id <id> --node-name <name> [--node-summary <summary>] [--port <local-mcp-port>]
 
 Examples:
-  qj init agent`,
-  workspace: `Usage: qj workspace <add|list|update|remove>
+  qj init --node-id jinjiebewater --node-name JinJieBeWater`,
+    spec: { positionals: 0, values: ["node-id", "node-name", "node-summary", "port"] },
+    surface: "daemon",
+  },
+  workspace: {
+    help: `Usage: qj workspace <add|list|update|remove>
 
 Examples:
   qj workspace list --json`,
-  peer: `Usage: qj peer <invite|accept|key-create|list|update|remove|rotate|revoke>
+  },
+  peer: {
+    help: `Usage: qj peer <invite|accept|key-create|list|update|remove|rotate|revoke>
 
 Examples:
   qj peer list --json`,
-  runtime: `Usage: qj runtime <set-pi|set-acp>
+  },
+  runtime: {
+    help: `Usage: qj runtime <set-pi|set-acp>
 
 Examples:
   qj runtime set-pi --model openai-codex/gpt-5.5
   qj runtime set-acp custom --model model-id --command 'agent --acp --model {model} --cwd {cwd}' --auth host`,
-  token: `Usage: qj token rotate
+  },
+  token: {
+    help: `Usage: qj token rotate
 
 Examples:
   qj token rotate`,
-  doctor: `Usage: qj doctor <node|agent>
+  },
+  doctor: {
+    help: `Usage: qj doctor [--json]
 
 Examples:
-  qj doctor agent`,
-  serve: `Usage: qj serve <node|agent>
+  qj doctor --json`,
+    spec: { positionals: 0, flags: ["json"] },
+    surface: "daemon",
+  },
+  serve: {
+    help: `Usage: qj serve
 
 Examples:
-  qj serve agent`,
-  service: `Usage: qj service <install|remove> <node|agent>
+  qj serve`,
+    spec: { positionals: 0 },
+    surface: "daemon",
+  },
+  service: {
+    help: `Usage: qj service <install|remove>
 
 Examples:
-  qj service install agent --yes`,
-  "init node": `Usage: qj init node --node-id <id> --node-name <name> [--node-summary <summary>]
-
-Examples:
-  qj init node --node-id jinjiebewater --node-name JinJieBeWater
-`,
-  "init agent": `Usage: qj init agent [--port <loopback-port>]
-
-Examples:
-  qj init agent
-  qj init agent --port 43111
-`,
-  "workspace add": `Usage: qj workspace add <id> --name <name> --root <directory> --summary <summary>
+  qj service install --yes`,
+  },
+  "workspace add": {
+    help: `Usage: qj workspace add <id> --name <name> --root <directory> --summary <summary>
 
 Examples:
   qj workspace add runtime-tooling --name "Runtime Tooling" --root ~/src/runtime --summary "Runtime SDK and extensions"
 `,
-  "workspace list": `Usage: qj workspace list [--json]
+    spec: { positionals: 1, values: ["name", "root", "summary"] },
+    surface: "node",
+  },
+  "workspace list": {
+    help: `Usage: qj workspace list [--json]
 
 Examples:
   qj workspace list --json
 `,
-  "workspace update": `Usage: qj workspace update <id> [--name <name>] [--summary <summary>]
+    spec: { positionals: 0, flags: ["json"] },
+    surface: "node",
+  },
+  "workspace update": {
+    help: `Usage: qj workspace update <id> [--name <name>] [--summary <summary>]
 
 Examples:
   qj workspace update runtime-tooling --summary "Runtime SDK and runtime"
 `,
-  "workspace remove": `Usage: qj workspace remove <id> --yes
+    spec: { positionals: 1, values: ["name", "summary"] },
+    surface: "node",
+  },
+  "workspace remove": {
+    help: `Usage: qj workspace remove <id> --yes
 
 Examples:
   qj workspace remove old-workspace --yes
 `,
-  "peer invite": `Usage: qj peer invite <id> --key <public-key|-> [--out <path|->]
+    spec: { positionals: 1, flags: ["yes"] },
+    surface: "node",
+  },
+  "peer invite": {
+    help: `Usage: qj peer invite <id> --key <public-key|-> [--out <path|->]
 
 Examples:
   printf '%s' 'nodekey:...' | qj peer invite alice-peer --key - --out ./alice-peer.pairing.json
 `,
-  "peer accept": `Usage: qj peer accept <peer-id> --from <path|-> [--key <private-key-path>]
+    spec: { positionals: 1, values: ["key", "out"] },
+    surface: "node",
+  },
+  "peer accept": {
+    help: `Usage: qj peer accept <peer-id> --from <path|-> [--key <private-key-path>]
 
 Examples:
   qj peer accept jinjiebewater --from ./alice-peer.pairing.json
   cat ./alice-peer.pairing.json | qj peer accept jinjiebewater --from -
 `,
-  "peer rotate": `Usage: qj peer rotate <id> --key <new-public-key|-> --yes
+    spec: { positionals: 1, values: ["from", "key"] },
+    surface: "agent",
+  },
+  "peer rotate": {
+    help: `Usage: qj peer rotate <id> --key <new-public-key|-> --yes
 
 Examples:
   printf '%s' 'nodekey:...' | qj peer rotate alice-peer --key - --yes
 `,
-  "peer revoke": `Usage: qj peer revoke <id> --yes
+    spec: { positionals: 1, values: ["key"], flags: ["yes"] },
+    surface: "node",
+  },
+  "peer revoke": {
+    help: `Usage: qj peer revoke <id> --yes
 
 Examples:
   qj peer revoke alice-peer --yes
 `,
-  "runtime set-acp": `Usage: qj runtime set-acp <name> --model <model> --command <command> [--auth <host|api-key>] [--auth-method-id <id>] [--permission <default|acceptEdits|bypassPermissions>]
+    spec: { positionals: 1, flags: ["yes"] },
+    surface: "node",
+  },
+  "runtime set-acp": {
+    help: `Usage: qj runtime set-acp <name> --model <model> --command <command> [--auth <host|api-key>] [--auth-method-id <id>] [--permission <default|acceptEdits|bypassPermissions>]
 
 Examples:
   qj runtime set-acp custom --model model-id --command 'agent --acp --model {model} --cwd {cwd}' --auth host
 `,
-  "runtime set-pi": `Usage: qj runtime set-pi --model <provider/model> [--binary <pi>]
+    spec: {
+      positionals: 1,
+      values: ["model", "command", "auth", "auth-method-id", "permission"],
+    },
+    surface: "node",
+  },
+  "runtime set-pi": {
+    help: `Usage: qj runtime set-pi --model <provider/model> [--binary <pi>]
 
 Examples:
   qj runtime set-pi --model openai-codex/gpt-5.5
 `,
-  "peer key-create": `Usage: qj peer key-create <peer-id> [--output <private-key-path>]
+    spec: { positionals: 0, values: ["model", "binary"] },
+    surface: "node",
+  },
+  "peer key-create": {
+    help: `Usage: qj peer key-create <peer-id> [--output <private-key-path>]
 
 Examples:
   qj peer key-create jinjiebewater
 `,
-  "peer list": `Usage: qj peer list [--json]
+    spec: { positionals: 1, values: ["output"] },
+    surface: "agent",
+  },
+  "peer list": {
+    help: `Usage: qj peer list [--json]
 
 Examples:
   qj peer list --json
 `,
-  "peer update": `Usage: qj peer update <peer-id> --key <private-key-path> --bearer <token|-> --yes
+    spec: { positionals: 0, flags: ["json"] },
+    surface: "agent",
+  },
+  "peer update": {
+    help: `Usage: qj peer update <peer-id> --key <private-key-path> --bearer <token|-> --yes
 
 Examples:
   printf '%s' '<new-remote-bearer>' | qj peer update jinjiebewater --key ~/.local/share/qujing/agent/keys/jinjiebewater.json --bearer - --yes
 `,
-  "peer remove": `Usage: qj peer remove <peer-id> --yes
+    spec: { positionals: 1, values: ["key", "bearer"], flags: ["yes"] },
+    surface: "agent",
+  },
+  "peer remove": {
+    help: `Usage: qj peer remove <peer-id> --yes
 
 Examples:
   qj peer remove jinjiebewater --yes
 `,
-  "token rotate": `Usage: qj token rotate
+    spec: { positionals: 1, flags: ["yes"] },
+    surface: "agent",
+  },
+  "token rotate": {
+    help: `Usage: qj token rotate
 
 Examples:
   qj token rotate
 `,
-  "doctor node": `Usage: qj doctor node [--json]
+    spec: { positionals: 0 },
+    surface: "agent",
+  },
+  "service install": {
+    help: `Usage: qj service install --yes
 
 Examples:
-  qj doctor node --json`,
-  "doctor agent": `Usage: qj doctor agent [--json]
+  qj service install --yes`,
+    spec: { positionals: 0, flags: ["yes"] },
+    surface: "daemon",
+  },
+  "service remove": {
+    help: `Usage: qj service remove --yes
 
 Examples:
-  qj doctor agent --json`,
-  "serve node": `Usage: qj serve node
-
-Examples:
-  qj serve node`,
-  "serve agent": `Usage: qj serve agent
-
-Examples:
-  qj serve agent`,
-  "service install node": `Usage: qj service install node --yes
-
-Examples:
-  qj service install node --yes`,
-  "service install agent": `Usage: qj service install agent --yes
-
-Examples:
-  qj service install agent --yes`,
-  "service remove node": `Usage: qj service remove node --yes
-
-Examples:
-  qj service remove node --yes`,
-  "service remove agent": `Usage: qj service remove agent --yes
-
-Examples:
-  qj service remove agent --yes`,
+  qj service remove --yes`,
+    spec: { positionals: 0, flags: ["yes"] },
+    surface: "daemon",
+  },
 };
+
+const help = Object.fromEntries(Object.entries(commands).map(([key, { help }]) => [key, help]));
+const booleanFlags = new Set(Object.values(commands).flatMap(({ spec }) => spec?.flags ?? []));
 
 /** Authoritative CLI orchestration. */
 export function runCliEffect(args: string[], io: CliIo = defaultIo()) {
@@ -262,9 +339,16 @@ export function runCliEffect(args: string[], io: CliIo = defaultIo()) {
       },
       catch: (error) => error,
     });
-    if (nodeCommands.has(command)) return yield* runNodeEffect(command, parsed, io);
-    if (agentCommands.has(command)) return yield* runAgentEffect(command, parsed, io);
-    return yield* Effect.fail(new UsageError(rootHelp));
+    switch (commands[command]?.surface) {
+      case "daemon":
+        return yield* runDaemonEffect(command, parsed, io);
+      case "node":
+        return yield* runNodeEffect(command, parsed, io);
+      case "agent":
+        return yield* runAgentEffect(command, parsed, io);
+      default:
+        return yield* Effect.fail(new UsageError(rootHelp));
+    }
   }).pipe(
     Effect.scoped,
     Effect.catchEager((error) =>
@@ -280,14 +364,72 @@ export function runCliEffect(args: string[], io: CliIo = defaultIo()) {
   );
 }
 
+function runDaemonEffect(command: string, parsed: ParsedArgs, io: CliIo) {
+  const config = new ConfigStore(io);
+  const agent = new AgentConfigStore({ configPath: io.agentConfigPath });
+  return Effect.gen(function* () {
+    switch (command) {
+      case "init": {
+        const node = nodeInput(parsed, help[command]!);
+        const port = portValue(parsed.values.get("port") ?? "43111", "port");
+        yield* config.initEffect({ node });
+        const result = yield* agent.initEffect({ port });
+        out(io, `initialized Node: ${io.configPath}`);
+        if (result.initialized)
+          out(
+            io,
+            `initialized Agent MCP: ${io.agentConfigPath}\nlocal-bearer: ${result.bearer}\nmcp: http://127.0.0.1:${port}/mcp`,
+          );
+        else out(io, `Agent MCP already initialized: ${io.agentConfigPath}`);
+        return 0;
+      }
+      case "doctor": {
+        const [node, localMcp] = yield* Effect.all(
+          [
+            runDoctorEffect(io),
+            runAgentDoctorEffect({
+              agentConfigPath: io.agentConfigPath,
+              agentStateRoot: io.agentStateRoot,
+              ...(io.transportBinary === undefined ? {} : { transportBinary: io.transportBinary }),
+            }),
+          ],
+          { concurrency: "unbounded" },
+        );
+        return printDoctor(io, combineDoctorReports(node, localMcp), parsed.flags.has("json"));
+      }
+      case "serve": {
+        const scope = yield* Scope.Scope;
+        const node = yield* startServerEffect(io, scope);
+        const localMcp = yield* startAgentServerEffect(
+          {
+            configPath: io.agentConfigPath,
+            stateRoot: io.agentStateRoot,
+            ...(io.transportBinary === undefined ? {} : { transportBinary: io.transportBinary }),
+          },
+          scope,
+        );
+        out(io, `qujing: ready\nnode: ${node.url}\nmcp: ${localMcp.url}`);
+        yield* waitForShutdownEffect();
+        return 0;
+      }
+      case "service install":
+        confirm(parsed, help[command]!);
+        out(io, `service: ${yield* installUserServiceEffect(currentServeCommand())}`);
+        return 0;
+      case "service remove":
+        confirm(parsed, help[command]!);
+        out(io, `removed service: ${yield* removeUserServiceEffect()}`);
+        return 0;
+      default:
+        throw new UsageError(rootHelp);
+    }
+  }).pipe(Effect.catchDefect((defect) => Effect.fail(defect)));
+}
+
 function runNodeEffect(command: string, parsed: ParsedArgs, io: CliIo) {
   const store = new ConfigStore(io);
   return Effect.gen(function* () {
     switch (command) {
-      case "init node":
-        yield* store.initEffect({ node: nodeInput(parsed, help[command]!) });
-        out(io, `initialized Node: ${io.configPath}`);
-        return 0;
       case "workspace add": {
         const id = positional(parsed, 0, help[command]!);
         yield* store.addWorkspaceEffect({
@@ -480,23 +622,6 @@ function runNodeEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         );
         return 0;
       }
-      case "doctor node":
-        return printDoctor(io, yield* runDoctorEffect(io), parsed.flags.has("json"));
-      case "serve node": {
-        yield* startServerEffect(io, yield* Scope.Scope);
-        out(io, "node: ready");
-        yield* waitForShutdownEffect();
-        return 0;
-      }
-      case "service install node": {
-        confirm(parsed, help[command]!);
-        out(io, `service: ${yield* installUserServiceEffect(currentServeCommand("node"), "node")}`);
-        return 0;
-      }
-      case "service remove node":
-        confirm(parsed, help[command]!);
-        out(io, `removed service: ${yield* removeUserServiceEffect("node")}`);
-        return 0;
       default:
         throw new UsageError(rootHelp);
     }
@@ -507,19 +632,6 @@ function runAgentEffect(command: string, parsed: ParsedArgs, io: CliIo) {
   const store = new AgentConfigStore({ configPath: io.agentConfigPath });
   return Effect.gen(function* () {
     switch (command) {
-      case "init agent": {
-        const port = portValue(parsed.values.get("port") ?? "43111", "port");
-        const result = yield* store.initEffect({ port });
-        if (!result.initialized) {
-          out(io, `Agent already initialized: ${io.agentConfigPath}`);
-          return 0;
-        }
-        out(
-          io,
-          `initialized Agent: ${io.agentConfigPath}\nlocal-bearer: ${result.bearer}\nmcp: http://127.0.0.1:${port}/mcp`,
-        );
-        return 0;
-      }
       case "peer key-create": {
         const id = positional(parsed, 0, help[command]!);
         const output = resolve(
@@ -632,141 +744,16 @@ function runAgentEffect(command: string, parsed: ParsedArgs, io: CliIo) {
         out(io, `local-bearer: ${result.bearer}`);
         return 0;
       }
-      case "doctor agent": {
-        const report = yield* io.agentDoctorEffect();
-        return printDoctor(io, report, parsed.flags.has("json"));
-      }
-      case "serve agent": {
-        yield* startAgentServerEffect(
-          {
-            configPath: io.agentConfigPath,
-            stateRoot: io.agentStateRoot,
-            ...(io.transportBinary === undefined ? {} : { transportBinary: io.transportBinary }),
-          },
-          yield* Scope.Scope,
-        );
-        out(io, "agent: ready");
-        yield* waitForShutdownEffect();
-        return 0;
-      }
-      case "service install agent": {
-        confirm(parsed, help[command]!);
-        out(
-          io,
-          `service: ${yield* installUserServiceEffect(currentServeCommand("agent"), "agent")}`,
-        );
-        return 0;
-      }
-      case "service remove agent":
-        confirm(parsed, help[command]!);
-        out(io, `removed service: ${yield* removeUserServiceEffect("agent")}`);
-        return 0;
       default:
         throw new UsageError(rootHelp);
     }
   }).pipe(Effect.catchDefect((defect) => Effect.fail(defect)));
 }
 
-interface ParsedArgs {
-  positionals: string[];
-  values: Map<string, string>;
-  flags: Set<string>;
-}
-interface CommandSpec {
-  positionals: number;
-  values?: readonly string[];
-  flags?: readonly string[];
-}
-
-const commandSpecs: Record<string, CommandSpec> = {
-  "init node": {
-    positionals: 0,
-    values: ["node-id", "node-name", "node-summary"],
-  },
-  "init agent": { positionals: 0, values: ["port"] },
-  "workspace add": {
-    positionals: 1,
-    values: ["name", "root", "summary"],
-  },
-  "workspace list": { positionals: 0, flags: ["json"] },
-  "workspace update": { positionals: 1, values: ["name", "summary"] },
-  "workspace remove": { positionals: 1, flags: ["yes"] },
-  "peer invite": {
-    positionals: 1,
-    values: ["key", "out"],
-  },
-  "peer accept": {
-    positionals: 1,
-    values: ["from", "key"],
-  },
-  "peer rotate": {
-    positionals: 1,
-    values: ["key"],
-    flags: ["yes"],
-  },
-  "peer revoke": { positionals: 1, flags: ["yes"] },
-  "runtime set-acp": {
-    positionals: 1,
-    values: ["model", "command", "auth", "auth-method-id", "permission"],
-  },
-  "runtime set-pi": {
-    positionals: 0,
-    values: ["model", "binary"],
-  },
-  "peer key-create": { positionals: 1, values: ["output"] },
-  "peer list": { positionals: 0, flags: ["json"] },
-  "peer update": {
-    positionals: 1,
-    values: ["key", "bearer"],
-    flags: ["yes"],
-  },
-  "peer remove": { positionals: 1, flags: ["yes"] },
-  "token rotate": { positionals: 0 },
-  "doctor node": { positionals: 0, flags: ["json"] },
-  "doctor agent": { positionals: 0, flags: ["json"] },
-  "serve node": { positionals: 0 },
-  "serve agent": { positionals: 0 },
-  "service install node": { positionals: 0, flags: ["yes"] },
-  "service install agent": { positionals: 0, flags: ["yes"] },
-  "service remove node": { positionals: 0, flags: ["yes"] },
-  "service remove agent": { positionals: 0, flags: ["yes"] },
-};
-
-const nodeCommands = new Set([
-  "init node",
-  "workspace add",
-  "workspace list",
-  "workspace update",
-  "workspace remove",
-  "peer invite",
-  "peer rotate",
-  "peer revoke",
-  "runtime set-pi",
-  "runtime set-acp",
-  "doctor node",
-  "serve node",
-  "service install node",
-  "service remove node",
-]);
-
-const agentCommands = new Set([
-  "init agent",
-  "peer accept",
-  "peer key-create",
-  "peer list",
-  "peer update",
-  "peer remove",
-  "token rotate",
-  "doctor agent",
-  "serve agent",
-  "service install agent",
-  "service remove agent",
-]);
-
 function commandKey(args: string[]): string {
   for (let length = Math.min(3, args.length); length > 0; length--) {
     const candidate = args.slice(0, length).join(" ");
-    if (candidate in help || candidate in commandSpecs) return candidate;
+    if (candidate in commands) return candidate;
   }
   return args[0] ?? "";
 }
@@ -784,7 +771,7 @@ function parseArgs(args: string[]): ParsedArgs {
       continue;
     }
     const name = value.slice(2);
-    if (name === "yes" || name === "json") {
+    if (booleanFlags.has(name)) {
       parsed.flags.add(name);
       continue;
     }
@@ -797,7 +784,7 @@ function parseArgs(args: string[]): ParsedArgs {
 }
 
 function validateArgs(command: string, parsed: ParsedArgs, usage: string): void {
-  const spec = commandSpecs[command];
+  const spec = commands[command]?.spec;
   if (!spec) return;
   const allowedValues = new Set(spec.values ?? []);
   const allowedFlags = new Set(spec.flags ?? []);
@@ -996,6 +983,16 @@ function printDoctor(io: CliIo, report: DoctorReport, json: boolean): number {
   return report.ok ? 0 : 1;
 }
 
+function combineDoctorReports(node: DoctorReport, agent: DoctorReport): DoctorReport {
+  return {
+    ok: node.ok && agent.ok,
+    checks: [
+      ...node.checks.map((check) => ({ ...check, name: `node:${check.name}` })),
+      ...agent.checks.map((check) => ({ ...check, name: `agent:${check.name}` })),
+    ],
+  };
+}
+
 function out(io: CliIo, text: string): void {
   io.writeOut(`${text}\n`);
 }
@@ -1024,7 +1021,6 @@ function defaultIo(): CliIo {
         (active) => active.closeEffect(),
       );
     },
-    agentDoctorEffect: () => runAgentDoctorEffect(defaultAgentPaths()),
   };
 }
 

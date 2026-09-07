@@ -287,8 +287,7 @@ export class PeerRuntime {
               () =>
                 this.closePromise(async () => {
                   await upstream.transport.terminateSession?.();
-                  await upstream.agent.close();
-                }),
+                }).pipe(Effect.ensuring(this.closePromise(() => upstream.agent.close()))),
               { interruptible: true },
             );
             const result = yield* this.timeout(
@@ -381,7 +380,11 @@ export class PeerRuntime {
     return Effect.tryPromise({ try: try_, catch: (error) => error });
   }
   private closePromise(try_: () => Promise<void>) {
-    return this.promise(try_).pipe(Effect.catchEager(() => Effect.void));
+    return this.promise(try_).pipe(
+      Effect.interruptible,
+      Effect.timeout(Duration.millis(500)),
+      Effect.catchEager(() => Effect.void),
+    );
   }
   private verifiedWorkspaces(result: Record<string, unknown>): PeerWorkspaces {
     const workspaces = this.result(result, parseWorkspaces);

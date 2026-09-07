@@ -1,4 +1,4 @@
-#!/bin/zsh
+#!/usr/bin/env bash
 set -euo pipefail
 
 root=$(mktemp -d /tmp/qujing-tailcat-e2e.XXXXXX)
@@ -84,6 +84,9 @@ fi
 
 after=$(tailscale debug prefs 2>/dev/null | shasum -a 256 | cut -d' ' -f1 || true)
 [[ "$before" == "$after" ]]
-[[ "$(stat -f '%Lp' "$root/server.json" 2>/dev/null || stat -c '%a' "$root/server.json")" == "600" ]]
-[[ "$(stat -f '%Lp' "$root/peer.json" 2>/dev/null || stat -c '%a' "$root/peer.json")" == "600" ]]
+python3 - "$root/server.json" "$root/peer.json" <<'PY'
+import os, stat, sys
+for path in sys.argv[1:]:
+    assert stat.S_IMODE(os.stat(path).st_mode) == 0o600, path
+PY
 echo "transport e2e: ok"
